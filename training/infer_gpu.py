@@ -42,10 +42,12 @@ def main(argv: list[str] | None = None) -> None:
     model.load_state_dict(payload["model_state"])
     model.eval()
 
+    total = len(ds)
+    print(f"开始推理 {total} 张（{device}），单线程加载约几分钟，会每几批打印进度…", flush=True)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     i = n_ios = n_and = n_unc = 0
     with torch.no_grad(), args.out.open("w", encoding="utf-8") as fo:
-        for x, _ in dl:
+        for bi, (x, _) in enumerate(dl):
             probs = torch.softmax(model(x.to(device)), 1)[:, 1].cpu().numpy()
             for pv in probs:
                 pv = float(pv)
@@ -59,6 +61,8 @@ def main(argv: list[str] | None = None) -> None:
                 r = ds.rows[i]
                 fo.write(json.dumps({"file": r["file"], "device": dev, "p_ios": round(pv, 4), "conf": round(conf, 3)}, ensure_ascii=False) + "\n")
                 i += 1
+            if (bi + 1) % 5 == 0 or i >= total:
+                print(f"  已处理 {i}/{total}（ios={n_ios} android={n_and} uncertain={n_unc}）", flush=True)
     print(f"完成 {i} 张（{device}）：ios={n_ios} android={n_and} uncertain={n_unc} -> {args.out}")
 
 
