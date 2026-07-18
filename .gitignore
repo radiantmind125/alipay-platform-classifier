@@ -1,0 +1,33 @@
+.idea/
+.vscode/
+*.md.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# 运行产物与数据（含隐私，勿提交）
+runs/
+data/
+crops/
+*.jsonl
+*.pt
+*.onnx
+
+# 金标：真实金标含生产凭证号，不入库；只保留脱敏示例
+gold/*.json
+!gold/gold_seed.example.json
+
+# 私有协作笔记（含同事名与内部策略）
+COORDINATION.md
+
+# 系统
+.DS_Store
+Thumbs.db

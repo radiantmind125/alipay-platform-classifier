@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alipay-platform-classifier"
+version = "0.1.0"
+description = "支付宝转账成功截图的安卓/苹果平台分类器（基于状态栏 + 成功对勾，面向 CPU）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+dependencies = [
+    "numpy>=1.26",
+    "Pillow>=10.3",
+]
+
+[project.optional-dependencies]
+# 基于检测器的区域候选。按同项目仓库 README 安装匹配 CUDA/CPU 的 torch，再装同项目包以
+# 获得 LRCNNPredictor。
+proposer = ["torch>=2.3", "torchvision>=0.18", "opencv-python>=4.10"]
+dev = ["pytest>=8.2"]
+
+[project.scripts]
+platform-cache-regions = "alipay_platform.cache_regions:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["src"]

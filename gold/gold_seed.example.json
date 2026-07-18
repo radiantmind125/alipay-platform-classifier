@@ -1,0 +1,9 @@
+{
+  "_note": "金标示例（脱敏）。真实金标含生产交易凭证号，不入库；本文件仅示范格式。人工肉眼核对，只进 val/test。",
+  "method": "human_visual_statusbar",
+  "labels": [
+    {"file": "example_0001.png", "platform": "ios", "res": "1179x2556"},
+    {"file": "example_0002.jpg", "platform": "android", "res": "1080x2400"},
+    {"file": "example_0003.png", "platform": "ios", "res": "1206x2622", "note": "缩放后的 iPhone，靠灵动岛判定"}
+  ]
+}

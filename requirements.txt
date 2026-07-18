@@ -1,0 +1,10 @@
+# 核心（几何 + 元数据 + 标注聚合 + 哈希）——只跑几何模式的区域缓存和全部单测，只需要这些。
+numpy>=1.26
+Pillow>=10.3
+
+# 可选：基于检测器的区域候选（见 pyproject 的 [proposer]）：
+#   按同项目仓库 README 装匹配的 torch/torchvision，再：
+#   pip install -e ../alipay-ai          # 提供 transfer_receipt_ai.model.LRCNNPredictor
+#   pip install opencv-python
+#
+# 刻意不依赖 PaddleOCR：平台判别是视觉信号，而 OCR 正是我们要去掉的主要 CPU 开销。

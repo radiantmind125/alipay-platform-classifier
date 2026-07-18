@@ -1,0 +1,10 @@
+# GPU 训练机（先按 pytorch.org 装匹配 CUDA 的 torch/torchvision）：
+torch>=2.3
+torchvision>=0.18
+numpy>=1.26
+Pillow>=10.3
+
+# 导出 / CPU 上线：
+onnx>=1.15
+onnxruntime>=1.17
+# 若上线 CPU 是 Intel Xeon，可用 onnxruntime-openvino 换取更低延迟。
