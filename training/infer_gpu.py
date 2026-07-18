@@ -38,7 +38,9 @@ def main(argv: list[str] | None = None) -> None:
     ds = StripDataset(args.predict, train=False)
     dl = DataLoader(ds, batch_size=args.batch_size, num_workers=args.workers, shuffle=False)
     payload = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    model = build_model(num_classes=len(payload.get("classes", ["android", "ios"]))).to(device)
+    # 从 checkpoint 读回训练时的 width（--width 3 等），否则通道数对不上无法加载。
+    model = build_model(num_classes=len(payload.get("classes", ["android", "ios"])),
+                        width=float(payload.get("width", 1.0))).to(device)
     model.load_state_dict(payload["model_state"])
     model.eval()
 
