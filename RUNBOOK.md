@@ -11,8 +11,9 @@
 ## 0. 前提
 - Python 3.10–3.12；NVIDIA 驱动 + CUDA；一块 GPU（训练用）。
 - 全量图片池路径（几十万张）。
-- 把 `platform-classifier/` 整个目录拷到服务器（含 `src/ scripts/ training/ gold/ requirements.txt`）。
-  不要拷 `runs/`（在服务器重新生成）。
+- 克隆代码：`git clone https://github.com/radiantmind125/alipay-platform-classifier`（`runs/` 在服务器重新生成）。
+- **真实金标不在公开仓库里**（含真实凭证号）：需把 `gold/gold_seed_v2.json` 单独拷到服务器的 `gold\` 下；
+  仓库里只有脱敏示例 `gold_seed.example.json`。没有金标 `build_splits` 的 val/test 会是空的。
 
 ## 1. 装环境
 ```powershell
