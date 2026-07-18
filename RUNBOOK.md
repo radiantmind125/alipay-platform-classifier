@@ -47,8 +47,8 @@ $procs = 0..($N-1) | ForEach-Object {
     "scripts\inspect_samples.py --input D:\download\raw_images --output runs\pool_full --strip-fraction 0.08 --shard-index $_ --shard-count $N"
 }
 $procs | Wait-Process          # 等所有分片跑完
-# 合并各分片清单为一个 inspect.jsonl（状态栏条已同写 runs\pool_full\status_bar\，文件名唯一无冲突）：
-Get-Content runs\pool_full\inspect.shard-*.jsonl | Set-Content runs\pool_full\inspect.jsonl
+# 合并各分片清单为一个 inspect.jsonl（用 Python 合并，保证 UTF-8 无 BOM，避免 PowerShell 编码坑）：
+python -c "import glob;o=open('runs/pool_full/inspect.jsonl','w',encoding='utf-8');[o.write(l) for f in sorted(glob.glob('runs/pool_full/inspect.shard-*.jsonl')) for l in open(f,encoding='utf-8')];o.close()"
 ```
 - 产出 `runs\pool_full\inspect.jsonl` + `runs\pool_full\status_bar\*.png`。
 - **`--strip-fraction 0.08` 必须与 `training/preprocess.py` 的 `STATUS_STRIP_FRACTION` 一致**，否则训练/上线预处理不一致。
