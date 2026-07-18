@@ -28,6 +28,10 @@ def _augment(canvas_uint8: np.ndarray) -> np.ndarray:
         w, h = pil.size
         s = random.uniform(0.94, 1.06)
         pil = pil.resize((max(1, int(w * s)), h)).resize((w, h))
+    if random.random() < 0.4:  # 模拟缩放/裁剪导致的分辨率损失（resized iPhone 的状态栏更糊）
+        w, h = pil.size
+        f = random.uniform(0.45, 0.8)
+        pil = pil.resize((max(1, int(w * f)), max(1, int(h * f)))).resize((w, h))
     return np.asarray(pil)
 
 
