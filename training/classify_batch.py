@@ -28,6 +28,7 @@ from preprocess import preprocess_original  # noqa: E402
 from model import build_model  # noqa: E402
 from alipay_platform.bootstrap import resolution_platform  # noqa: E402
 from alipay_platform.metadata_seed import read_metadata_facts  # noqa: E402
+from alipay_platform.fusion import device_prior_conflict  # noqa: E402
 
 _EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
@@ -54,6 +55,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--annotate", type=int, default=0, help=">0 则顺带随机标注这么多张(红字面板)")
+    ap.add_argument("--crosscheck", action="store_true", help="对分辨率命中图也跑 CNN 交叉核查(查缩放伪造;更耗 CPU)")
     args = ap.parse_args(argv)
 
     device = args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu"
@@ -69,6 +71,7 @@ def main(argv: list[str] | None = None) -> None:
     # Tier-0:分辨率(零解码)
     result: dict[Path, dict] = {}
     abstain: list[Path] = []
+    covered: list[Path] = []
     for p in imgs:
         try:
             f = read_metadata_facts(p)
@@ -78,33 +81,52 @@ def main(argv: list[str] | None = None) -> None:
         rel = p.relative_to(root).as_posix()
         if plat in ("ios", "android"):
             result[p] = {"file": rel, "device": plat, "source": "resolution", "confidence": 0.99}
+            covered.append(p)
         else:
             abstain.append(p)
     print(f"  分辨率直接判 {len(result)} 张;需状态栏模型 {len(abstain)} 张,推理中…", flush=True)
 
-    # Tier-1:状态栏 CNN(分批)
-    for i in range(0, len(abstain), args.batch_size):
-        chunk = abstain[i : i + args.batch_size]
-        xs, keep = [], []
-        for p in chunk:
-            try:
-                rgb = np.asarray(ImageOps.exif_transpose(Image.open(p)).convert("RGB"))
-                xs.append(torch.from_numpy(preprocess_original(rgb)))
-                keep.append(p)
-            except Exception:
+    @torch.no_grad()
+    def _pios(paths: list[Path]) -> dict[Path, float]:
+        """paths -> {path: P(苹果)};解码失败跳过。"""
+        out: dict[Path, float] = {}
+        for i in range(0, len(paths), args.batch_size):
+            xs, keep = [], []
+            for p in paths[i : i + args.batch_size]:
+                try:
+                    rgb = np.asarray(ImageOps.exif_transpose(Image.open(p)).convert("RGB"))
+                    xs.append(torch.from_numpy(preprocess_original(rgb)))
+                    keep.append(p)
+                except Exception:
+                    continue
+            if not xs:
                 continue
-        if not xs:
-            continue
-        with torch.no_grad():
             probs = torch.softmax(model(torch.stack(xs).to(device)), 1)[:, 1].cpu().numpy()
-        for p, pv in zip(keep, probs):
-            pv = float(pv)
-            conf = max(pv, 1 - pv)
-            dev = "uncertain" if conf < args.conf else ("ios" if pv > 0.5 else "android")
-            result[p] = {"file": p.relative_to(root).as_posix(), "device": dev, "source": "cnn",
-                         "confidence": round(conf, 3), "p_ios": round(pv, 4)}
-        if (i // args.batch_size) % 4 == 0:
-            print(f"    CNN {min(i + args.batch_size, len(abstain))}/{len(abstain)}", flush=True)
+            for p, pv in zip(keep, probs):
+                out[p] = float(pv)
+            if (i // args.batch_size) % 4 == 0:
+                print(f"    CNN {min(i + args.batch_size, len(paths))}/{len(paths)}", flush=True)
+        return out
+
+    # Tier-1:状态栏 CNN 判分辨率弃权的那批
+    for p, pv in _pios(abstain).items():
+        conf = max(pv, 1 - pv)
+        dev = "uncertain" if conf < args.conf else ("ios" if pv > 0.5 else "android")
+        result[p] = {"file": p.relative_to(root).as_posix(), "device": dev, "source": "cnn",
+                     "confidence": round(conf, 3), "p_ios": round(pv, 4)}
+
+    # 交叉核查(opt-in):对分辨率命中图也跑 CNN,查"缩放到 iPhone 分辨率"的伪造
+    if args.crosscheck and covered:
+        print(f"  交叉核查:对 {len(covered)} 张分辨率命中图也跑 CNN…", flush=True)
+        n_conf = 0
+        for p, pv in _pios(covered).items():
+            cdev = "ios" if pv > 0.5 else "android"
+            if device_prior_conflict(result[p]["device"], cdev, max(pv, 1 - pv)):
+                result[p]["confidence"] = 0.5
+                result[p]["device_prior_conflict"] = True
+                result[p]["cnn_device"] = cdev
+                n_conf += 1
+        print(f"  交叉核查发现 分辨率↔状态栏 矛盾(疑似缩放伪造) {n_conf} 张", flush=True)
 
     args.output.mkdir(parents=True, exist_ok=True)
     out_jsonl = args.output / "final_device.jsonl"

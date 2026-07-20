@@ -12,15 +12,25 @@ from dataclasses import dataclass, field
 from typing import Final
 
 DEVICE_FROM_RESOLUTION_CONF: Final[float] = 0.99
+DEVICE_CONFLICT_CONF: Final[float] = 0.5   # 分辨率与状态栏矛盾时，不再盲给 0.99
 
 
 def merge_device(bootstrap_label: str, cnn: dict | None = None) -> dict:
     """合并 Tier-0（分辨率）与 Tier-1（CNN）得到最终设备标签。
 
     bootstrap_label ∈ {'ios','android','abstain'}；cnn 为 None 或 {'device','conf',...}。
+
+    安全性：分辨率可被“把安卓图缩放到 iPhone 精确分辨率”零成本伪造。所以命中分辨率时，
+    **若同时拿到状态栏 CNN 的票且矛盾**，设备标签仍以分辨率为准（真图上分辨率更可靠），
+    但要 (a) 记 device_prior_conflict 供欺诈融合、(b) 不再盲给 0.99。cnn 缺省(None)时行为不变。
     """
     if bootstrap_label in ("ios", "android"):
-        return {"device": bootstrap_label, "source": "resolution", "confidence": DEVICE_FROM_RESOLUTION_CONF}
+        out = {"device": bootstrap_label, "source": "resolution", "confidence": DEVICE_FROM_RESOLUTION_CONF}
+        if cnn is not None and device_prior_conflict(bootstrap_label, cnn.get("device", ""), float(cnn.get("conf", 0.0))):
+            out["confidence"] = DEVICE_CONFLICT_CONF
+            out["device_prior_conflict"] = True
+            out["conflict_detail"] = f"分辨率判{bootstrap_label}、状态栏判{cnn.get('device')}（疑似缩放伪造）"
+        return out
     if cnn is None:
         return {"device": "unknown", "source": "none", "confidence": 0.0}
     return {"device": cnn.get("device", "unknown"), "source": "cnn", "confidence": float(cnn.get("conf", 0.0))}
