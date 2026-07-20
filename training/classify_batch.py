@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import subprocess
 import sys
 from collections import Counter
@@ -56,6 +57,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--annotate", type=int, default=0, help=">0 则顺带随机标注这么多张(红字面板)")
     ap.add_argument("--crosscheck", action="store_true", help="对分辨率命中图也跑 CNN 交叉核查(查缩放伪造;更耗 CPU)")
+    ap.add_argument("--limit", type=int, default=0, help="只随机处理 N 张(0=全部;配 --crosscheck 可快速估误报率)")
+    ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
 
     device = args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu"
@@ -66,6 +69,10 @@ def main(argv: list[str] | None = None) -> None:
 
     root = args.input if args.input.is_dir() else args.input.parent
     imgs = list(_iter_images(args.input))
+    if args.limit and len(imgs) > args.limit:
+        random.seed(args.seed)
+        random.shuffle(imgs)
+        imgs = imgs[: args.limit]
     print(f"共 {len(imgs)} 张,先按分辨率分流…", flush=True)
 
     # Tier-0:分辨率(零解码)
