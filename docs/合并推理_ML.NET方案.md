@@ -8,11 +8,12 @@
 
 "合并推理"最实际的做法,就是你俩说的**多个模型串在一起 + 一个统一入口**。原因很直接:
 
-- 一张完整的图,里面有三种不同性质的计算:
-  1. **神经网络**(设备的状态栏 CNN、字段的 OCR 检测/识别)——这些能导 ONNX;
-  2. **纯规则**(分辨率查表判设备、"没有勾"等真伪信号融合)——这些是 if/else,不是网络,塞不进一个计算图;
-  3. **OCR 的前/后处理**(检测框解码、抠图、CTC 文本解码)——变长、有控制流,也塞不进单个静态图。
-- 所以"一个 ONNX 文件端到端"在工程上不现实。**能做、且是标准做法的是:对外一个入口(一个 .NET 推理类 / 一个模型包),内部按顺序调用几个 ONNX 模型 + 少量规则。** 经理那边"只跑一个"这个诉求完全满足。
+- 一张完整的图要跑:**神经网络**(设备状态栏 CNN、字段 OCR 检测/识别,这些能导 ONNX)+ **一堆非网络步骤**(分辨率查表、抠图、文本解析、真伪融合)。
+- 严格讲,规则和控制流本身其实能塞进 ONNX(图里有 If/Loop/Scan 这些),但**真正卡死"单图端到端"的是三处没有对应 ONNX 算子的步骤**:
+  1. OCR 检测的后处理——`findContours` 连通域/轮廓提取 + 文本框外扩(`unclip`/pyclipper),没有对应 ONNX 算子;
+  2. 识别结果的"类别号 → 字符"字典映射;
+  3. 文本 → 结构化字段(金额/收款方/时间…)的字符串/正则解析。
+- 这三处导不进图,所以"一个 ONNX 文件端到端"不现实。**标准做法是:对外一个入口(一个 .NET 推理类 / 一个模型包),内部按顺序调用几个 ONNX 模型 + 这些非图步骤。** 经理那边"只跑一个"完全满足。
 
 这也正是群里已经对齐的方向(mate:"多个模型串起来";经理:"你们看怎么合并方便")。
 
@@ -62,17 +63,27 @@
 python training\export.py --checkpoint training\runs\statusbar_v2\best.pt --out training\runs\statusbar_v2\statusbar.onnx --mlnet
 ```
 
-### 3.1 关键:预处理必须在 C# 端 1:1 复现(否则会掉点)
+### 3.0 ML.NET 加载两条硬约束(实测经验)
 
-ONNX 里只有网络本身,**下面这几步喂进去之前要在 C# 做,顺序和参数必须完全一致**(与训练一致,否则 train/serve 偏差):
+- **动态 batch 在 ML.NET 默认按 1 处理。** 单张推理(batch=1)直接加载就能跑;若要批量(batch>1),必须用带 `shapeDictionary` 的 `ApplyOnnxModel` 重载显式固定 batch 维,否则报形状不匹配。线上是单张流式,batch=1 即可。
+- **锁死 onnxruntime 版本。** ML.NET 自带的 onnxruntime 往往比我们导出/验证用的旧;在 `.csproj` 里显式 `PackageReference` 固定 `Microsoft.ML.OnnxRuntime` 版本,保证行为一致(opset 13 从 ORT 1.6 起就支持,无兼容性风险)。
 
-1. **EXIF 摆正**(按方向标签旋正,很多手机截图带方向)。
-2. **裁顶部状态栏**:取图像**最上面 8%** 的整宽长条(`height * 0.08`,四舍五入,至少 1 像素)。
-3. **缩放到 512×64**(宽512、高64),**插值用 BICUBIC(双三次)**——训练用的就是这个,别用双线性。
-4. **归一化**(逐通道,RGB 顺序):
-   - 先 `/255` 到 0~1;
-   - 再 `(x - mean) / std`,`mean=[0.485,0.456,0.406]`、`std=[0.229,0.224,0.225]`;
-   - 排成 CHW,组成 `float[1,3,64,512]`。
+### 3.1 关键:预处理必须在 C# 端 1:1 复现(这里最容易掉点)
+
+ONNX 里只有网络本身。下面这几步在喂进去之前要在 C# 做,**顺序和数值必须和训练完全一致**,否则 train/serve 偏差会直接掉点。逐条按坑写:
+
+1. **EXIF 摆正,恰好一次,且在裁剪之前**:覆盖全部 8 种朝向。注意——**ImageSharp `Image.Load` 默认已自动按 EXIF 摆正**,就别再手动转一次(会造成双重旋转);**System.Drawing 不自动**,要手动读 `0x0112` 再转。截图大多没有 Orientation,但**翻拍图有**,这步对真伪判定也有用。
+2. **裁顶部状态栏**:取最上面 8% 的整宽长条(`round(height * 0.08)`,至少 1 像素)。
+3. **缩放到 (宽=512, 高=64)**(别把宽高传反)。**这一步是最大掉点风险**:
+   - 这是大幅**下采样**(约 1080→512、~190→64)喂给一个 64px 的小网络,判别信号恰恰是状态栏那点**抗锯齿细节**;
+   - 训练用的是 PIL 的 resize——**卷积式、下采样时按缩放因子放大卷积核做抗锯齿、三次核系数 a=−0.5**;
+   - 而 System.Drawing/GDI+ 的 HighQualityBicubic、OpenCVSharp 的 INTER_CUBIC 是**固定 4×4 邻域、不抗锯齿、a=−0.75**,ML.NET 自带 ResizeImages 只近似双线性——**这几种和 PIL 差得远(实测像素能差 43–45/255),足以在"缩放过的刘海苹果 / 稀疏安卓栏"边界上把判定翻掉**;
+   - 所以 C# 必须用**能匹配 PIL 的高质量缩放**:优先 **SkiaSharp 高质量缩放**,或自己写"缩放因子放大核 + a=−0.5"的抗锯齿卷积。
+4. **转 uint8**:缩放结果**先 clip 到 [0,255] 再四舍五入成 uint8**(bicubic 会过冲,不 clip 会在高对比边缘分叉)。
+5. **防 BGR 当 RGB**:System.Drawing / OpenCVSharp 内存里是 **BGR(A)** 序,取字节前要转成 **RGB**(否则减 mean 之后整体偏色、大幅掉点)。
+6. **归一化**(逐通道,RGB 顺序):先 `/255` 到 0~1;再 `(x-mean)/std`,`mean=[0.485,0.456,0.406]`、`std=[0.229,0.224,0.225]`;排成 CHW,组成 `float[1,3,64,512]`。
+
+**验收(务必做)**:拿几十张真实截图 + 翻拍图,分别跑 Python 的 `preprocess_original` 和 C# 版,**逐像素 maxdiff ≤ 1**;更稳妥是直接比端到端 ONNX 输出,要求 **argmax 一致、P(苹果) 差 < 1e-2**。过了这关才算复现对。
 
 ### 3.2 分辨率规则(在 CNN 之前,C# 里几行 if 就行,省掉大部分 CNN 调用)
 
@@ -91,10 +102,10 @@ if (IsIphoneResolution(w, h))        return Device.Apple;      // 命中 iPhone 
 if (AndroidPanel.Contains(Math.Min(w, h))) return Device.Android; // 720/1080/1440
 
 // 2) 判不了 → 状态栏 CNN
-using var img = ExifTranspose(Image.Load(path));
+using var img = ExifTranspose(Image.Load(path));                            // EXIF 恰好一次、在裁剪前
 var strip = Crop(img, 0, 0, img.Width, (int)Math.Round(img.Height * 0.08)); // 顶部 8%
-strip.Mutate(x => x.Resize(512, 64, KnownResamplers.Bicubic));              // 512x64 双三次
-float[] input = ToChwImagenetNorm(strip);   // /255,减均值除方差,CHW,得到 [1,3,64,512]
+var small = ResizePilLike(strip, 512, 64);   // ★ 必须匹配 PIL 抗锯齿(SkiaSharp 高质量/自写 a=-0.5),别用 GDI/ImageSharp 默认双三次
+float[] input = ToChwImagenetNorm(small);    // clip→round→uint8→/255,减均值除方差(RGB序),CHW,得到 [1,3,64,512]
 
 using var session = new InferenceSession("statusbar.onnx");
 var tensor = new DenseTensor<float>(input, new[] { 1, 3, 64, 512 });
@@ -147,7 +158,7 @@ mate 的 OCR 用的是 PaddleOCR。要并进来,需要:
 ## 六、ML.NET 对外形态(两选一,都满足"跑一个")
 
 - **方式 A(推荐):一个 .NET 推理类/服务** `InferBlueprint(image) -> 合并结果`。内部顺序:设备分支 → 字段分支 → 融合。经理只调这一个方法。最直接、最好维护。
-- **方式 B:一个 ML.NET 管道(.zip)**,把几个 `ApplyOnnxModel` 串起来,规则用 `CustomMapping`。经理 `Load` 一个 .zip 即可。可行,但自定义规则(分辨率查表、CTC 解码、融合)在 .zip 里序列化/还原较麻烦,不如方式 A 干净。
+- **方式 B:一个 ML.NET 管道(.zip)**,把几个 `ApplyOnnxModel` 串起来,规则用 `CustomMapping`。经理 `Load` 一个 .zip 即可。可行,但自定义规则要随 .zip 保存,得把逻辑写成实现 `CustomMappingFactory<,>`、带 `[CustomMappingFactory("契约名")]` 特性的**具名类**(用匿名 lambda 且 contractName 为空时 `Model.Save` 会直接抛),加载端还要保证这个程序集随应用一起部署。相比之下 `ApplyOnnxModel` 的存取不需要这些,所以**先做方式 A 更干净**,稳定后再评估打包成 B。
 
 两种对经理都是"加载/调用一个东西"。建议先按方式 A 落地,后面要更"打包"再包成方式 B。
 
