@@ -12,24 +12,43 @@ import argparse
 from pathlib import Path
 
 import torch
+from torch import nn
 
 from model import build_model
 from preprocess import CANVAS_H, CANVAS_W
 
 
-def export_onnx(checkpoint: Path, out: Path, *, opset: int = 17) -> None:
+class _WithSoftmax(nn.Module):
+    """在图内接一个 Softmax：ML.NET 端直接读概率 prob[1]=P(苹果)，省掉外部再算一步。"""
+
+    def __init__(self, core: nn.Module) -> None:
+        super().__init__()
+        self.core = core
+        self.sm = nn.Softmax(dim=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.sm(self.core(x))
+
+
+def export_onnx(checkpoint: Path, out: Path, *, opset: int = 17, softmax: bool = False) -> None:
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     model = build_model(num_classes=len(payload.get("classes", ["android", "ios"])), width=float(payload.get("width", 1.0)))
     model.load_state_dict(payload["model_state"])
     model.eval()
+    export_model: nn.Module = _WithSoftmax(model) if softmax else model
+    out_name = "prob" if softmax else "logits"
     dummy = torch.zeros(1, 3, CANVAS_H, CANVAS_W)
     out.parent.mkdir(parents=True, exist_ok=True)
-    torch.onnx.export(
-        model, dummy, out.as_posix(), opset_version=opset,
-        input_names=["strip"], output_names=["logits"],
-        dynamic_axes={"strip": {0: "batch"}, "logits": {0: "batch"}},
+    kwargs = dict(
+        opset_version=opset, input_names=["strip"], output_names=[out_name],
+        dynamic_axes={"strip": {0: "batch"}, out_name: {0: "batch"}},
     )
-    print(f"FP32 ONNX 已导出：{out}  (classes={payload.get('classes')}, input=1x3x{CANVAS_H}x{CANVAS_W})")
+    try:
+        # 旧版 TorchScript 导出器：图更干净、算子最基础，ML.NET / onnxruntime 兼容性最好
+        torch.onnx.export(export_model, dummy, out.as_posix(), dynamo=False, **kwargs)
+    except TypeError:
+        torch.onnx.export(export_model, dummy, out.as_posix(), **kwargs)  # 老版本 torch 没有 dynamo 参数
+    print(f"ONNX 已导出：{out}  (classes={payload.get('classes')}, 输入 strip=Bx3x{CANVAS_H}x{CANVAS_W}, 输出 {out_name}, opset={opset}, softmax={softmax})")
 
 
 def quantize_int8(onnx_fp32: Path, out: Path) -> None:
@@ -47,8 +66,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--out", type=Path, default=Path("training/runs/statusbar_v1/model_fp32.onnx"))
     ap.add_argument("--int8", action="store_true", help="额外导出 INT8 动态量化（默认不导出）")
     ap.add_argument("--opset", type=int, default=17)
+    ap.add_argument("--mlnet", action="store_true", help="ML.NET 友好：图内含 Softmax(输出概率 prob) + opset 13")
     args = ap.parse_args(argv)
-    export_onnx(args.checkpoint, args.out, opset=args.opset)
+    opset = 13 if args.mlnet else args.opset
+    export_onnx(args.checkpoint, args.out, opset=opset, softmax=args.mlnet)
     if args.int8:
         quantize_int8(args.out, args.out.with_name(args.out.stem + "_int8.onnx"))
 
