@@ -96,17 +96,16 @@ def resolution_vote(width: int, height: int) -> Vote:
 
 
 def icc_vote(icc_profile: bytes | None) -> Vote:
-    """带 Display-P3 ICC 标 => 偏苹果；sRGB / 无标 => 弃权。
+    """ICC 一律弃权：实测证明它对本场景不具设备判别力，旧的“P3=>苹果”是反的。
 
-    iOS 截图通常带 Display P3 色彩标；安卓截图几乎都是 sRGB 或不带标。这是软投票（P3 在
-    别处也可能出现），所以只能起佐证作用，不能单独定论。
+    在真实转账截图上量过（跨信号审计 + 直接探针）：
+    - 旧规则“含 P3 => iOS”严重误报：覆盖集里 icc 投 iOS 的 157 张，147 张其实是安卓；
+    - “Display P3”文字其实是**安卓**标（76 安卓 vs 2 苹果——宽色域安卓内嵌苹果作者的 P3 描述文件）；
+    - ICC 头 offset 40 的平台签名 'APPL' 苹果安卓都有（54 vs 98），也不区分；
+    - 且截图多经微信/支付宝重压缩，ICC 常被剥掉，覆盖率本就很低。
+    没有可靠的 iOS ICC 信号，为避免把这个反向噪声喂进标注/审计，直接弃权。
     """
-    if not icc_profile:
-        return _abstain("无 ICC 色彩标")
-    head = icc_profile[:512].lower()
-    if b"display p3" in head or b"displayp3" in head or b"p3" in head[:200]:
-        return Vote("ios", 0.6, "Display-P3 ICC 色彩标")
-    return _abstain("非 P3 的 ICC 色彩标")
+    return _abstain("ICC 对本场景无设备判别力（实测），弃权")
 
 
 def exif_make_vote(make: str | None, has_capture_tags: bool) -> Vote:
