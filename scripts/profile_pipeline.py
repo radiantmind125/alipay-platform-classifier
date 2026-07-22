@@ -92,6 +92,10 @@ def main() -> None:
             install(StatusBarDeviceClassifier, "classify", "设备")
         except Exception as exc:  # noqa: BLE001
             print(f"  (设备计时未装:{exc})")
+    # 拆开"其它"里最可疑的两块:标注绘制 与 存图/JPEG 编码
+    install(pipeline_mod, "draw_original_circles", "标注绘制")
+    install(pipeline_mod, "draw_rectified_circles", "标注绘制")
+    install(pipeline_mod, "save_rgb", "存图编码")
 
     out = Path(tempfile.mkdtemp(prefix="profile_"))
     print(f"检测权重:{checkpoint}")
@@ -112,13 +116,13 @@ def main() -> None:
 
     print(f"\n检测阶段:成功 {len(outputs)} 张,总墙钟 {total:.1f}s = {total / n * 1000:.0f} ms/张\n")
     measured = 0.0
-    for key in ("解码", "矫正", "检测", "设备"):
+    for key in ("解码", "矫正", "检测", "设备", "标注绘制", "存图编码"):
         if key not in acc:
             continue
         measured += acc[key]
         print(f"  {key}: {acc[key] / n * 1000:7.1f} ms/张  占 {acc[key] / total * 100:5.1f}%  (累计 {acc[key]:.1f}s, 调用 {cnt[key]})")
     other = max(0.0, total - measured)
-    print(f"  其它/IO/标注: {other / n * 1000:7.1f} ms/张  占 {other / total * 100:5.1f}%")
+    print(f"  其它/JSON/开销: {other / n * 1000:7.1f} ms/张  占 {other / total * 100:5.1f}%")
 
     print("\n== OCR 占比另测(用生产双进程路径,最准)==")
     print(f"同样 {args.limit} 张各跑一次,取墙钟差(PowerShell):")
