@@ -17,6 +17,8 @@ CORE_FIELDS = ("amount", "transfer_status", "recipient_field", "payment_method_f
 ALL_FIELDS = ("time", *CORE_FIELDS)
 CN = {"time": "时间(时钟)", "amount": "金额", "transfer_status": "转账状态",
       "recipient_field": "收款方", "payment_method_field": "付款方式"}
+PLAT_CN = {"ios": "苹果", "android": "安卓", "uncertain": "不确定", "unknown": "未知"}
+SRC_CN = {"resolution": "分辨率规则", "cnn": "状态栏CNN"}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -34,6 +36,9 @@ def main(argv: list[str] | None = None) -> None:
     empty = Counter()
     device = Counter()
     partial_missing = Counter()  # 部分桶里"缺了哪几个核心字段"的组合,表征这批到底缺在哪
+    dev_source = Counter()       # 设备判定来源:分辨率规则 / 状态栏CNN
+    conf_buckets = Counter()     # 设备置信度分桶
+    conflict = 0                 # 分辨率↔状态栏冲突数(疑似缩放/伪造)
     for f in files:
         try:
             d = json.loads(f.read_text(encoding="utf-8"))
@@ -52,9 +57,18 @@ def main(argv: list[str] | None = None) -> None:
         else:
             partial += 1
             partial_missing[tuple(c for c in CORE_FIELDS if c not in detected)] += 1
-        dev = (d.get("device") or {}).get("platform")
+        devinfo = d.get("device") or {}
+        dev = devinfo.get("platform")
         if dev:
             device[dev] += 1
+            src = devinfo.get("source")
+            if src:
+                dev_source[src] += 1
+            conf = devinfo.get("confidence")
+            if isinstance(conf, (int, float)):
+                conf_buckets["≥0.95" if conf >= 0.95 else "0.75–0.95" if conf >= 0.75 else "<0.75"] += 1
+            if devinfo.get("device_prior_conflict"):
+                conflict += 1
 
     if not n:
         print(f"目录里没找到结果 json:{args.results_dir}")
@@ -70,7 +84,14 @@ def main(argv: list[str] | None = None) -> None:
         print(f"    {CN[c]:14} {empty[c]:6}  {p(empty[c])}")
     if device:
         tot = sum(device.values())
-        print("\n设备分布:", " / ".join(f"{k}={v}({v/tot*100:.0f}%)" for k, v in device.most_common()))
+        print(f"\n设备识别(共 {tot} 张):")
+        print("  平台分布:", " / ".join(f"{PLAT_CN.get(k, k)}={v}({v/tot*100:.0f}%)" for k, v in device.most_common()))
+        if dev_source:
+            print("  判定来源:", " / ".join(f"{SRC_CN.get(k, k)}={v}({v/tot*100:.0f}%)" for k, v in dev_source.most_common()))
+        conf_line = " / ".join(f"{b}:{conf_buckets[b]}" for b in ("≥0.95", "0.75–0.95", "<0.75") if conf_buckets[b])
+        if conf_line:
+            print("  置信度:  ", conf_line)
+        print(f"  分辨率↔状态栏冲突(疑似缩放/伪造,重点复核): {conflict} 张")
     if partial:
         print(f"\n部分({partial}张)缺了哪几个核心字段(表征这批到底缺在哪、要不要重训):")
         for combo, cnt in partial_missing.most_common(10):
