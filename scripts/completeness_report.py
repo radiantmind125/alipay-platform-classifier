@@ -33,6 +33,7 @@ def main(argv: list[str] | None = None) -> None:
     full = core_only = partial = 0
     empty = Counter()
     device = Counter()
+    partial_missing = Counter()  # 部分桶里"缺了哪几个核心字段"的组合,表征这批到底缺在哪
     for f in files:
         try:
             d = json.loads(f.read_text(encoding="utf-8"))
@@ -50,6 +51,7 @@ def main(argv: list[str] | None = None) -> None:
             core_only += 1
         else:
             partial += 1
+            partial_missing[tuple(c for c in CORE_FIELDS if c not in detected)] += 1
         dev = (d.get("device") or {}).get("platform")
         if dev:
             device[dev] += 1
@@ -69,6 +71,11 @@ def main(argv: list[str] | None = None) -> None:
     if device:
         tot = sum(device.values())
         print("\n设备分布:", " / ".join(f"{k}={v}({v/tot*100:.0f}%)" for k, v in device.most_common()))
+    if partial:
+        print(f"\n部分({partial}张)缺了哪几个核心字段(表征这批到底缺在哪、要不要重训):")
+        for combo, cnt in partial_missing.most_common(10):
+            names = "+".join(CN[c] for c in combo) if combo else "(检测数异常/空)"
+            print(f"    缺 {names:32} {cnt:6}  {cnt/partial*100:.1f}%")
 
 
 if __name__ == "__main__":
