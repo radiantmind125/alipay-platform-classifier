@@ -52,6 +52,7 @@ def main() -> None:
     args = ap.parse_args()
 
     recips: list[tuple[str, float | None]] = []
+    n_json = n_recip = n_raw = 0
     for f in args.results_dir.rglob("*.json"):
         if f.name.startswith("inference_"):
             continue
@@ -59,14 +60,24 @@ def main() -> None:
             d = json.loads(f.read_text(encoding="utf-8"))
         except Exception:
             continue
-        rec = (d.get("fields") or {}).get("recipient") or {}
-        raw = rec.get("raw")
-        if isinstance(raw, str) and raw.strip():
-            conf = rec.get("ocr_confidence")
-            recips.append((raw.strip(), conf if isinstance(conf, (int, float)) else None))
+        n_json += 1
+        rec = (d.get("fields") or {}).get("recipient")
+        if isinstance(rec, dict):
+            n_recip += 1
+            raw = rec.get("raw")
+            if isinstance(raw, str) and raw.strip():
+                n_raw += 1
+                conf = rec.get("ocr_confidence")
+                recips.append((raw.strip(), conf if isinstance(conf, (int, float)) else None))
 
     if not recips:
-        print(f"没找到带 OCR 文本的收款方(要用全量 --ocr paddle 的输出):{args.results_dir}")
+        print(f"没找到带 OCR 文本的收款方:{args.results_dir}")
+        print(f"  扫描到结果 json {n_json} 个;其中有 recipient 字段的 {n_recip};recipient 带文本的 {n_raw}")
+        if n_json == 0:
+            print("  → 这个目录没有结果 json,可能跑错目录、或那次没跑成。")
+        elif n_raw == 0:
+            print("  → 有结果但 recipient 都没文本,多半是 --ocr none 的输出(只检测没识别)。")
+            print("     请指向全量 --ocr paddle 的输出,比如你之前跑的 full_10000。")
         return
 
     char_freq: Counter[str] = Counter(c for text, _ in recips for c in text)
