@@ -32,7 +32,7 @@ from alipay_platform.photo_detector import (  # noqa: E402
 )
 
 _EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-_CAPTURE_TAGS = (36867, 33434, 33437, 34855, 37386)  # DateTimeOrig/Exposure/FNumber/ISO/FocalLen(不用 Make/Model:华为截图也带)
+_CAPTURE_TAGS = (33434, 33437, 34855, 37386)  # 光学拍摄参数 Exposure/FNumber/ISO/FocalLen(不用 DateTimeOrig/Make/Model:安卓截图也常带,会误判成相机)
 
 
 def _has_capture_tags(im: Image.Image) -> bool:
