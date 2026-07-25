@@ -40,17 +40,21 @@ def merge_device(bootstrap_label: str, cnn: dict | None = None) -> dict:
 class FraudSignals:
     """各信号为布尔；来源见字段说明。"""
 
-    no_checkmark: bool = False          # mate 检测器：无 transfer_status（经理的“没有勾”）
-    device_prior_conflict: bool = False # CNN 判定 与 分辨率/EXIF 先验 矛盾（疑似拼接篡改）
-    photo_of_screen: bool = False       # 翻拍图
-    exif_device_mismatch: bool = False  # 分辨率=iPhone 但 EXIF 是安卓厂商/含相机字段
+    no_checkmark: bool = False            # mate 检测器：无 transfer_status（经理的“没有勾”）
+    device_prior_conflict: bool = False   # CNN 判定 与 分辨率/EXIF 先验 矛盾（疑似拼接篡改）
+    photo_of_screen: bool = False         # 翻拍嫌疑（元数据：相机尺寸/怪长宽比/平坦区噪声，弱）
+    screen_recapture_moire: bool = False  # 翻拍确认（像素级：中频色度摩尔纹周期峰，硬,高精度)
+    exif_device_mismatch: bool = False    # 分辨率=iPhone 但 EXIF 是安卓厂商/含相机字段
 
 
 # 权重可按经理对“误拒容忍度”调整（开放问题）。单个 no_checkmark -> 落人工带；两信号一致 -> 拒。
+# 翻拍摩尔纹确认(screen_recapture_moire)单条即 review：拿支付凭证专门去拍屏本身就不正常;
+# 但翻拍是否算有效凭证是经理的业务政策(开放问题),故默认 review 不默认硬拒。
 FRAUD_WEIGHTS: Final[dict[str, float]] = {
     "no_checkmark": 0.5,
     "device_prior_conflict": 0.35,
     "photo_of_screen": 0.25,
+    "screen_recapture_moire": 0.5,
     "exif_device_mismatch": 0.35,
 }
 REJECT_THRESHOLD: Final[float] = 0.6
