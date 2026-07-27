@@ -18,15 +18,16 @@
 2. 确认三样东西在服务器上，记下路径：
    - SSP 源码目录，例如 `D:\SSP-AI-Generated-Image-Detection-main`
    - 真图：`D:\download\TempFakeImages`（蓝图）、`D:\download2\TempFakeImages`（白图）
-   - platform-classifier 仓库（含 training\ 脚本）。没有就先拉：
+   - platform-classifier 仓库（含 training\ 脚本）。已拉到 `D:\alipay-platform-classifier`。
+     每次开工前 `git pull` 拿最新脚本 + gold 标签：
      ```
-     git clone https://github.com/radiantmind125/alipay-platform-classifier D:\platform-classifier
+     cd /d D:\alipay-platform-classifier
+     git pull
      ```
-     已有就 `git pull` 更新到最新。
 
-3. 之后所有 `python training\...` 命令都在 `D:\platform-classifier` 目录下运行：
+3. 之后所有 `python training\...` 命令都在 `D:\alipay-platform-classifier` 目录下运行：
    ```
-   cd /d D:\platform-classifier
+   cd /d D:\alipay-platform-classifier
    ```
 
 ---
@@ -82,9 +83,10 @@ python training\engine_b_tamper.py --src-root D:\download2\TempFakeImages --out 
 
 nature=真图（自动排除相机/翻拍），ai=合成翻拍+真翻拍+redteam+第3a步的 AI 生成：
 ```
-python training\build_ssp_dataset.py --genuine-roots D:\download\TempFakeImages D:\download2\TempFakeImages --gold gold\recapture_gold.jsonl --gold-img-root D:\download\TempFakeImages --redteam-dir D:\platform-classifier\..\redteam_prod\attacked --extra-ai D:\ssp_ai_raw\aigen --out D:\ssp_alipay --n-nature 10000 --n-recap-synth 3000 --val-frac 0.15
+python training\build_ssp_dataset.py --genuine-roots D:\download\TempFakeImages D:\download2\TempFakeImages --gold training\data\recapture_gold.jsonl --gold-img-root D:\download\TempFakeImages --extra-ai D:\ssp_ai_raw\aigen --out D:\ssp_alipay --n-nature 10000 --n-recap-synth 3000 --val-frac 0.15
 ```
-（`--redteam-dir` 指向你本地 redteam_prod\attacked 的实际路径；没有就去掉这参数。）
+（`--gold training\data\recapture_gold.jsonl` 是随仓库来的真翻拍标签，指向的图在 `D:\download\TempFakeImages`。
+若你另有 redteam 攻击图，加 `--redteam-dir <那个目录>`；没有就不加。）
 产出布局：`D:\ssp_alipay\imagenet_ai_0419_sdv4\{train,val}\{nature,ai}`。
 
 ---
@@ -134,7 +136,7 @@ python D:\SSP\predict_ssp.py --model D:\SSP-AI-Generated-Image-Detection-main\sn
 
 ## 9. 诚实前提 / 汇报口径（很重要）
 
-- **正样本约 99% 是我们自造**（合成翻拍 + AI 生成），所以整体分数偏乐观。**必须单独在真造假图上报召回**：`gold\recapture_gold.jsonl` 里的真翻拍 + 拼音假页 + redteam，跟合成分开报。
+- **正样本约 99% 是我们自造**（合成翻拍 + AI 生成），所以整体分数偏乐观。**必须单独在真造假图上报召回**：`training\data\recapture_gold.jsonl` 里的真翻拍 + 拼音假页 + redteam，跟合成分开报。
 - **SSP 抓"整图渲染真假 + 翻拍"**；**改金额/负号那种局部篡改（经理 03/04 例子）SSP 结构上看不到**，要靠 Head B 字段/字形取证（我在本地建，随后接进同一融合分）。
 - 图库挖掘倾向：真实欺诈以"模板改字"为主 → SSP 主要靠"真渲染 vs 假渲染管线"差异，**Head B 才是抓字段级欺诈的主力**。两者一起进融合层，别指望单个 SSP 包打。
 - 一句话对经理：SSP 已能在我们自己的支付宝数据上重训跑通、直接进你的 predict 脚本;字段级篡改另有配套检测在做。
