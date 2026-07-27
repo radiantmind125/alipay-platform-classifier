@@ -26,6 +26,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="统一 JPEG 质量重存(防压缩泄漏)")
     ap.add_argument("--root", type=Path, required=True, help="数据集根,内含 train/val 的 nature/ai")
     ap.add_argument("--q", type=int, default=90)
+    ap.add_argument("--max-side", type=int, default=768,
+                    help="统一最长边像素(两类都缩到它,消除'低分辨率/模糊=假'的泄漏;0=不改尺寸)")
     args = ap.parse_args()
 
     n = 0
@@ -41,6 +43,11 @@ def main() -> None:
                 try:
                     with Image.open(p) as im:
                         rgb = ImageOps.exif_transpose(im).convert("RGB")
+                    if args.max_side > 0:                         # 统一最长边 -> 两类分辨率/清晰度对齐
+                        w, h = rgb.size
+                        s = args.max_side / max(w, h)
+                        if abs(s - 1.0) > 0.01:
+                            rgb = rgb.resize((max(1, round(w * s)), max(1, round(h * s))), Image.LANCZOS)
                     dst = p.with_suffix(".jpg")
                     rgb.save(dst, "JPEG", quality=args.q)
                     if p.suffix.lower() != ".jpg":

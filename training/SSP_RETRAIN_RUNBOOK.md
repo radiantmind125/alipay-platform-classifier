@@ -62,12 +62,14 @@ python training\patch_ssp_repo.py --repo D:\SSP-AI-Generated-Image-Detection-mai
 
 SSP 只能从"整图指纹"类假图学：**翻拍** 和 **AI 生成**。局部改金额它看不到（那是 Head B 的活）。
 
-**3a. AI 生成假图（SSP 的主 ai 类，需要 GPU + 联网下模型，约 20-40 分钟）**
+**3a. AI 生成假图（SSP 的主 ai 类，GPU，约 10-20 分钟）——用 vae（稳、快、只下 335MB）**
 ```
-python training\gen_ai_fakes.py --genuine-roots D:\download\TempFakeImages D:\download2\TempFakeImages --out D:\ssp_ai_raw\aigen --n 4000 --methods vae img2img --models stabilityai/sd-vae-ft-mse runwayml/stable-diffusion-v1-5 --device cuda
+python training\gen_ai_fakes.py --genuine-roots D:\download\TempFakeImages D:\download2\TempFakeImages --out D:\ssp_ai_raw\aigen --n 4000 --methods vae --models stabilityai/sd-vae-ft-mse --device cuda
 ```
-首次会下 Stable Diffusion 模型（几个 GB）。下不动/离线，就**只跑 vae**（更快更小）：把 `--methods vae img2img` 改成 `--methods vae`，`--models` 只留 `stabilityai/sd-vae-ft-mse`。
-产出：`D:\ssp_ai_raw\aigen\*.jpg`。
+产出：`D:\ssp_ai_raw\aigen\*.jpg`（约 4000 张）。
+> 注意:**不要用 `runwayml/stable-diffusion-v1-5` 做 img2img —— 该模型已被官方从 HuggingFace 下架(404)。**
+> img2img 非必需;vae 往返已足够给 SSP 盖上生成指纹。真想加 img2img,自己换一个当前可用的 SD 模型 id。
+> vae 输出会偏小偏糊,没关系:下面第 5 步会把两类统一到同一尺寸/质量,消除"低清=假"的泄漏。
 
 > 合成翻拍 + 真翻拍 + redteam 由下一步的 build_ssp_dataset 自动加进 ai，不用手动跑。
 
@@ -91,12 +93,13 @@ python training\build_ssp_dataset.py --genuine-roots D:\download\TempFakeImages 
 
 ---
 
-## 5. 统一压缩（防泄漏，5-10 分钟）—— 别跳过
+## 5. 统一尺寸+压缩（防泄漏，5-10 分钟）—— 别跳过
 
-否则 SSP 会学成"JPEG=假"。把两类都统一成同一 JPEG 质量：
+否则 SSP 会学成"JPEG=假"或"低清=假"。把 nature 和 ai 两类**统一到同一最长边(默认768)和同一 JPEG 质量**：
 ```
-python training\reencode_uniform.py --root D:\ssp_alipay\imagenet_ai_0419_sdv4 --q 90
+python training\reencode_uniform.py --root D:\ssp_alipay\imagenet_ai_0419_sdv4 --q 90 --max-side 768
 ```
+（这一步同时解决 vae 假图偏小偏糊的问题:真图也缩到 768,两类清晰度对齐,模型学的是真伪不是清晰度。）
 
 ---
 
