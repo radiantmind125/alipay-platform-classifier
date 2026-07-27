@@ -114,7 +114,7 @@ def main() -> None:
                 for i, sp in enumerate(srcs):
                     try:
                         im = _to_multiple_of_8(ImageOps.exif_transpose(Image.open(sp)).convert("RGB"), args.cap)
-                        x = torch.from_numpy(np.asarray(im)).permute(2, 0, 1).unsqueeze(0)
+                        x = torch.from_numpy(np.array(im)).permute(2, 0, 1).unsqueeze(0)  # np.array 复制=可写,消除警告
                         x = (x.float() / 127.5 - 1.0).to(args.device, torch.float16)
                         with torch.no_grad():
                             lat = vae.encode(x).latent_dist.sample()
