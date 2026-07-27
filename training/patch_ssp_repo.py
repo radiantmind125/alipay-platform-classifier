@@ -20,15 +20,13 @@ import shutil
 import sys
 from pathlib import Path
 
+# 每条:(文件, [可能的原串候选…], 目标串)。命中任一候选即替换;都没有且未达标才告警。
 _PATCHES = [
     ("options.py",
-     "default=[0, 0, 0, 0, 1, 0, 0, 0]",
+     ["default=[0, 0, 0, 0, 1, 0, 0, 0]", "default=[0,0,0,0,1,0,0,0]"],
      "default=[2, 2, 2, 2, 1, 2, 2, 2]"),
-    ("options.py",
-     "default=[0,0,0,0,1,0,0,0]",
-     "default=[2,2,2,2,1,2,2,2]"),
     ("utils/tdataloader.py",
-     "from scipy.ndimage.filters import gaussian_filter",
+     ["from scipy.ndimage.filters import gaussian_filter"],
      "from scipy.ndimage import gaussian_filter"),
 ]
 
@@ -45,26 +43,27 @@ def main() -> None:
 
     applied = 0
     skipped = 0
-    for rel, old, new in _PATCHES:
+    for rel, olds, new in _PATCHES:
         f = args.repo / rel
         if not f.exists():
             print(f"跳过(文件不存在): {rel}")
             continue
         txt = f.read_text(encoding="utf-8")
-        if new in txt and old not in txt:
+        if new in txt:
             print(f"已是目标状态: {rel} :: {new}")
             skipped += 1
             continue
-        if old not in txt:
-            print(f"!! 没找到待替换串,请人工核对: {rel} :: {old}")
+        hit = next((o for o in olds if o in txt), None)
+        if hit is None:
+            print(f"!! 没找到待替换串,请人工核对: {rel} :: {olds[0]}")
             continue
         if args.dry_run:
-            print(f"[dry-run] 将改 {rel}: {old} -> {new}")
+            print(f"[dry-run] 将改 {rel}: {hit} -> {new}")
             continue
         if not (f.with_suffix(f.suffix + ".bak")).exists():
             shutil.copy2(f, f.with_suffix(f.suffix + ".bak"))
-        f.write_text(txt.replace(old, new), encoding="utf-8")
-        print(f"已改 {rel}: {old} -> {new}(原文件备份 .bak)")
+        f.write_text(txt.replace(hit, new), encoding="utf-8")
+        print(f"已改 {rel}: {hit} -> {new}(原文件备份 .bak)")
         applied += 1
 
     print(f"\n完成:改 {applied} 处,已达标 {skipped} 处。")
