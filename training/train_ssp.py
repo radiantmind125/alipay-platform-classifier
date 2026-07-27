@@ -1,7 +1,14 @@
-r"""重训 SSP-tiny(经理说的"那几个评估模型重新训练"里,我们自己域上重训的那个)。
+r"""重训 SSP-tiny —— 【仅 CPU 实验/流水线验证,不是交付物,不能进经理的 predict_*.py】。
 
-服务器 GPU 用 --manifest(jsonl 每行 {"file":..., "label":0/1});本机 CPU 用 --smoke
-自动造数据冒烟验证流水线能跑能分:正样本=引擎C合成翻拍(+可选真翻拍),负样本=干净截图。
+审计要点(务必知道):
+- 交付/周一测试要的是**官方 ResNet50 SSP**(用 SSP 仓库 train_val.py 在服务器 GPU 上重训),
+  它的 .pth 才能被经理的 predict_ssp.py / predict_all_models.py 直接加载。SSP-tiny 结构不同,
+  塞进去会 strict=True 报错、或 strict=False 静默加载随机权重出垃圾分数。SSP-tiny 只作 CPU 实验。
+- **标签约定**:官方是 nature=1(真)/ ai=0(假),ai_score=1-sigmoid。本脚本冒烟用的是
+  1=翻拍(正),与官方相反 —— 内部自洽但**别把本脚本的权重喂官方脚本**。正式重训一律用官方约定。
+- 冒烟里的正样本几乎全是合成翻拍,分数(0.92)是流水线活性,不是真实检测精度,必须在真翻拍上复核。
+
+本机 CPU 用 --smoke 造数据验证流水线;--manifest 走自己的小模型正式训(非官方交付路径)。
 
     冒烟(本机 CPU):
       python training/train_ssp.py --smoke --image-root C:\...\TempFakeImages --n 80 --epochs 10
@@ -79,8 +86,8 @@ def _pick_screenshots(root: Path, n: int, seed: int) -> list[Path]:
 
 
 def build_smoke(root: Path, n: int, cap: int, k: int) -> tuple[np.ndarray, np.ndarray]:
-    neg_src = _pick_screenshots(root, n, seed=1)
-    pos_src = _pick_screenshots(root, n, seed=999)                          # 另一批截图,合成成翻拍当正样本
+    pool = _pick_screenshots(root, 2 * n, seed=1)                           # 一次取够,再切两半,保证正负不重叠(防泄漏)
+    neg_src, pos_src = pool[:n], pool[n:2 * n]                              # pos 那半合成成翻拍当正样本,与 neg 无交集
     xs, ys = [], []
     print(f"负样本(干净截图) {len(neg_src)},正样本(合成翻拍) {len(pos_src)};提特征中…")
     for p in neg_src:

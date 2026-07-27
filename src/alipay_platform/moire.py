@@ -66,7 +66,7 @@ def _band_peaks(chan: np.ndarray) -> tuple[float, int]:
     rn = r / (n / 2.0)
     fx, fy = (xx - cx) / (n / 2.0), (yy - cy) / (n / 2.0)
     axis = (np.abs(yy - cy) < 2) | (np.abs(xx - cx) < 2)
-    near8 = lambda f: np.abs(np.abs(f) * 4 - np.round(np.abs(f) * 4)) < 0.03   # f≈k/8 的 JPEG 格点
+    near8 = lambda f: np.abs(np.abs(f) * 4 - np.round(np.abs(f) * 4)) < 0.03   # 归一化频率 f≈k/4(=JPEG 8像素块周期的谐波),掩掉
     band = (rn > _BAND_LO) & (rn < _BAND_HI) & (~axis) & (~(near8(fx) & near8(fy)))
     vals = white[band]
     if vals.size == 0:
