@@ -103,7 +103,11 @@ python training\eval_summary.py D:\ssp_test\realfake2_out\summary.csv --kind fak
 
 - **`没有找到模型`**:`--model_root` 要指到 `Net_epoch_best.pth` 这个文件本身(不是目录)。
 - **`未检测到 CUDA,自动切换到 CPU`**:正常,只是慢;想快就确认 `torch.cuda.is_available()` 为 True。
+- **`输出目录已存在且非空 ... 需加 --force`**:A1 重跑时会看到。确认 `--genuine-out`/`--realfake-out` 是测试目录后,在 A1 命令末尾加 `--force` 再跑。(这道闸是防手滑把别的目录删掉。)
+- **`排除集为空 ... 已中止`**:`--dataset-root` 指错或 nature 为空 → 排除失效会导致特异性泄漏,脚本**直接中止**(不是警告)。确认路径到 `imagenet_ai_0419_sdv4` 再跑。
+- **`(a) 只凑到 x/1200 ... 已中止`**:`--genuine-roots` 路径不对或库里干净截图不足。改对路径重跑;别拿不足量的集报数。((b) 已生成不受影响。)
 - **(b) 拷 0 张 / 找不到很多**:`--recap-src-root` 指错了。40 张翻拍在 `D:\download\TempFakeImages`(蓝图)。
-- **(a) 训练已用跳过 0**:`--dataset-root` 指错,没读到 nature → 排除失效。确认路径到 `imagenet_ai_0419_sdv4`。
+- **eval_summary 报 `FileNotFoundError`(summary.csv 不存在)**:是上游 predict 没写出来 —— 多半 `--input` 目录空/错 或 `--model_root` 没找到 .pth。**先看 predict 末尾三行**:`图片数量:` 要 >0、`模型数量:` 要 =1、要有 `汇总结果: ...summary.csv`。这三样对了 summary.csv 才会存在。
 - **中文乱码**:脚本已 reconfigure UTF-8;若控制台仍乱码不影响数字,看英文/数字部分即可。
+- eval_summary 若打印 `剔除 N 张评分失败`:说明有图 predict 时报错(截断/坏图),已自动移出分母,不污染特异性/召回。
 - 每张图 predict 取 16 个随机 patch 取平均,分数每次跑会有极小抖动,属正常。

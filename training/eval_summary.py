@@ -36,8 +36,24 @@ def main() -> None:
         print("空文件或读不到行:", args.csv_path)
         return
 
-    scores = sorted(float(r["final_ai_score"]) for r in rows if r.get("final_ai_score") not in (None, ""))
-    dec = Counter((r.get("decision") or "").strip() for r in rows)
+    # 剔除"评分失败"的图:predict 里若某图在模型上抛异常, scores 为空({}), final_ai_score 保持 0.0,
+    # 直接当分统计会把这些图误算成"正确 Pass"(真图特异性虚高)/"漏检"(假图召回虚低)。
+    has_sj = any("scores_json" in r for r in rows)
+
+    def _scored(r) -> bool:
+        if r.get("final_ai_score") in (None, ""):
+            return False
+        if has_sj:
+            return (r.get("scores_json") or "").strip() not in ("", "{}")
+        return True
+
+    good = [r for r in rows if _scored(r)]
+    dropped = len(rows) - len(good)
+    if dropped:
+        print(f"注意: 剔除 {dropped} 张评分失败/未评分的图(不计入下面统计)。")
+
+    scores = sorted(float(r["final_ai_score"]) for r in good)
+    dec = Counter((r.get("decision") or "").strip() for r in good)
     n = len(scores)
     if n == 0:
         print("没有可用的 final_ai_score 列。字段:", list(rows[0].keys()))

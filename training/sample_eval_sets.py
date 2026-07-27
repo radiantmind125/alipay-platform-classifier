@@ -55,8 +55,14 @@ def _used_nature_stems(dataset_root: Path) -> set[str]:
     return used
 
 
-def _fresh(d: Path):
+def _fresh(d: Path, force: bool) -> None:
+    if len(d.parts) < 2:
+        sys.exit(f"拒绝: 输出目录 {d} 像磁盘根/太浅, 不删。请指到具体子目录(如 D:\\ssp_test\\gen_clean)。")
     if d.exists():
+        entries = list(d.iterdir())
+        if entries and not force:
+            sys.exit(f"输出目录已存在且非空: {d}(共 {len(entries)} 项)。为防误删, 需加 --force 才会清空重建。"
+                     f" 请先确认这确实是测试输出目录、不是别的重要目录!")
         shutil.rmtree(d)
     d.mkdir(parents=True, exist_ok=True)
 
@@ -76,15 +82,23 @@ def main() -> None:
     ap.add_argument("--recap-src-root", type=Path, required=True, help="翻拍原图所在目录")
     ap.add_argument("--realfake-out", type=Path, required=True)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--force", action="store_true",
+                    help="输出目录已存在且非空时也清空重建(默认拒绝, 防误删)")
+    ap.add_argument("--allow-empty-exclusion", action="store_true",
+                    help="允许排除集为空(默认拒绝, 防真图测试集混入训练图导致泄漏)")
     args = ap.parse_args()
 
     used = _used_nature_stems(args.dataset_root)
     print(f"训练 nature 已用真图(stem)数: {len(used)}  <- 这些从测试集里排除")
+    if not used and not args.allow_empty_exclusion:
+        sys.exit(f"排除集为空: --dataset-root({args.dataset_root}) 可能指错, 或其 train/val 的 nature 目录为空。"
+                 f" 这会让训练用过的真图混进 (a) 真图测试集 -> 特异性泄漏虚高, 已中止。"
+                 f" 确认路径无误(或就是想不排除)可加 --allow-empty-exclusion。")
 
     # ---- (b) 真造假(先做,顺便拿 40 张的 stem 也从真图里排除) ----
     recap_names = [ln.strip() for ln in args.recap_list.read_text(encoding="utf-8").splitlines() if ln.strip()]
     recap_stems = {Path(nm).stem for nm in recap_names}
-    _fresh(args.realfake_out)
+    _fresh(args.realfake_out, args.force)
     b_copied = b_leak = b_missing = 0
     for nm in recap_names:
         stem = Path(nm).stem
@@ -105,7 +119,7 @@ def main() -> None:
     for r in args.genuine_roots:
         files += [p for p in r.rglob("*") if p.suffix.lower() in _EXTS]
     random.Random(args.seed).shuffle(files)
-    _fresh(args.genuine_out)
+    _fresh(args.genuine_out, args.force)
     a_copied = a_skip_used = a_skip_recap = a_skip_notclean = 0
     for p in files:
         if a_copied >= args.n_genuine:
@@ -123,10 +137,16 @@ def main() -> None:
                     continue
         except Exception:
             continue
-        shutil.copy2(p, args.genuine_out / p.name)
+        # 加序号前缀保证目标名唯一:两个图库都叫 TempFakeImages, 同名会互相覆盖 -> 计数虚高
+        shutil.copy2(p, args.genuine_out / f"{a_copied:06d}_{p.name}")
         a_copied += 1
     print(f"(a) 无泄漏真图测试集 -> {args.genuine_out}: 拷 {a_copied} 张 "
           f"(训练已用跳过 {a_skip_used}, 翻拍跳过 {a_skip_recap}, 非干净截图跳过 {a_skip_notclean})")
+    if a_copied < args.n_genuine:
+        sys.exit(f"!! (a) 只凑到 {a_copied}/{args.n_genuine} 张 —— 多半是 --genuine-roots 路径不对, "
+                 f"或库里可用干净截图不足。别拿不足量的集当'{args.n_genuine}张'报给经理, 已中止。"
+                 f" 真图已拷在 {args.genuine_out}; 若确实想用少量, 自行调低 --n-genuine 重跑。"
+                 f"((b) 真造假集已生成, 不受影响。)")
     print("提示:真图库以真为主但混极少数未标欺诈,特异性可能被极轻微低估,可接受。")
 
 
