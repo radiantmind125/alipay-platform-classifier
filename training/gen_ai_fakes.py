@@ -105,8 +105,11 @@ def main() -> None:
     if not srcs:
         print("没采到真图源"); return
     print(f"真图源 {len(srcs)} 张,方法 {args.methods},模型 {args.models}")
-    mf = open(args.out / "manifest.csv", "w", newline="", encoding="utf-8-sig")
-    mw = csv.writer(mf); mw.writerow(["file", "method", "model"])   # 记生成器身份, 供 held-out 生成器切分
+    _mp = args.out / "manifest.csv"; _new = not _mp.exists()
+    mf = open(_mp, "a", newline="", encoding="utf-8-sig")   # 追加模式: 多次运行(如再补 img2img)累积不覆盖
+    mw = csv.writer(mf)
+    if _new:
+        mw.writerow(["file", "method", "model"])   # 记生成器身份, 供 held-out 生成器切分
 
     made = 0
     for method in args.methods:
