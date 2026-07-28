@@ -37,9 +37,9 @@ def main() -> None:
             if not d.exists():
                 print(f"缺目录: {d}")
                 continue
-            for p in list(d.iterdir()):
-                if p.suffix.lower() not in _EXTS:
-                    continue
+            files = [p for p in d.iterdir() if p.suffix.lower() in _EXTS]
+            print(f"  {sp}/{cl}: 开始重存 {len(files)} 张...", flush=True)
+            for j, p in enumerate(files, 1):
                 try:
                     with Image.open(p) as im:
                         rgb = ImageOps.exif_transpose(im).convert("RGB")
@@ -55,7 +55,9 @@ def main() -> None:
                     n += 1
                 except Exception:
                     continue
-            print(f"  {sp}/{cl}: {sum(1 for _ in d.iterdir())} 张")
+                if j % 500 == 0:
+                    print(f"    {sp}/{cl} {j}/{len(files)}...", flush=True)
+            print(f"  {sp}/{cl}: 完成 {sum(1 for _ in d.iterdir())} 张", flush=True)
     print(f"统一重存完成,共 {n} 张,全部 JPEG q={args.q}(两类压缩一致,无泄漏)。")
 
 
