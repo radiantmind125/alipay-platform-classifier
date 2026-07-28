@@ -6,6 +6,8 @@ r"""把官方 SSP 仓库改成能在"支付宝单类 + 现代环境"下重训(�
    改后只在 sdv4 槽 训(==1)+验(0/1),其余 7 个 ==2 跳过。数据放 <root>/imagenet_ai_0419_sdv4/。
 2. tdataloader.py: `from scipy.ndimage.filters import gaussian_filter`
    -> `from scipy.ndimage import gaussian_filter`(旧路径 scipy>=1.14 已删,改后不必钉 scipy==1.10.1)。
+3. (stage2)utils/patch.py: 选块 patch_list[0](最平)-> patch_list[-1](最富纹理)。
+   —— VAE 往返假图指纹在细节/文字区,平背景无指纹,最平块学不到(loss 卡chance)。train 和 predict 两个仓库都要打。
 
 不动 train_val.py 的 .cuda()(服务器有 GPU,原样即可)。
 
@@ -28,6 +30,11 @@ _PATCHES = [
     ("utils/tdataloader.py",
      ["from scipy.ndimage.filters import gaussian_filter"],
      "from scipy.ndimage import gaussian_filter"),
+    # stage2: 选块从"最平块"改成"最富纹理块"。VAE 往返假图的指纹在细节/文字区(平背景被完美重建、无指纹),
+    # 最平块看不到 -> 模型学不到(loss 卡在 chance)。选最富纹理块才看得到 AI 往返指纹。train/predict 两个仓库都要打。
+    ("utils/patch.py",
+     ["new_img = patch_list[0]", "new_img=patch_list[0]"],
+     "new_img = patch_list[-1]"),
 ]
 
 
