@@ -116,7 +116,9 @@ def main() -> None:
         for mid in args.models:
             tag = mid.split("/")[-1]
             if method == "vae":
+                print(f"[{tag}] 加载 VAE(首次会下载模型, 可能几分钟)...", flush=True)
                 vae = AutoencoderKL.from_pretrained(mid, torch_dtype=torch.float16).to(args.device).eval()
+                print(f"[{tag}] 就绪, 开始造 {len(srcs)} 张(每 200 张报一次进度)...", flush=True)
                 for i, sp in enumerate(srcs):
                     try:
                         im = _to_multiple_of_8(ImageOps.exif_transpose(Image.open(sp)).convert("RGB"), args.cap)
@@ -129,6 +131,8 @@ def main() -> None:
                         fn = f"aivae_{tag}_{i:06d}.jpg"
                         Image.fromarray(rec).save(args.out / fn, quality=95)
                         mw.writerow([fn, "vae", mid]); made += 1
+                        if made % 200 == 0:
+                            print(f"  已造 {made} 张...", flush=True)
                     except Exception as exc:  # noqa: BLE001
                         if i < 3:
                             print("vae 失败", sp.name, exc)
@@ -136,9 +140,11 @@ def main() -> None:
                 if args.device.startswith("cuda"):
                     torch.cuda.empty_cache()
             elif method == "img2img":
+                print(f"[{tag}] 加载 img2img SD 模型(首次下载 ~5GB, 慢)...", flush=True)
                 pipe = StableDiffusionImg2ImgPipeline.from_pretrained(mid, torch_dtype=torch.float16,
                                                                       safety_checker=None).to(args.device)
                 pipe.set_progress_bar_config(disable=True)
+                print(f"[{tag}] 就绪, 开始造 {len(srcs)} 张...", flush=True)
                 gen = torch.Generator(device=args.device).manual_seed(args.seed)
                 for i, sp in enumerate(srcs):
                     try:
@@ -148,6 +154,8 @@ def main() -> None:
                         fn = f"aii2i_{tag}_{i:06d}.jpg"
                         out.save(args.out / fn, quality=95)
                         mw.writerow([fn, "img2img", mid]); made += 1
+                        if made % 100 == 0:
+                            print(f"  已造 {made} 张...", flush=True)
                     except Exception as exc:  # noqa: BLE001
                         if i < 3:
                             print("img2img 失败", sp.name, exc)
