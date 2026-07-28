@@ -82,7 +82,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="组装 AI 生成检测数据集(held-out 生成器进 val)")
     ap.add_argument("--genuine-roots", type=Path, nargs="+", required=True)
     ap.add_argument("--aigen-root", type=Path, required=True, help="gen_ai_fakes 产出目录(含 manifest.csv)")
-    ap.add_argument("--holdout-tag", required=True, help="留作 val 的生成器 tag(如 sdxl-vae-fp16-fix)")
+    ap.add_argument("--holdout-tag", default="", help="留作 val 的生成器 tag(如 sdxl-vae-fp16-fix);留空=不留出,全部生成器 train/val 切分(多样化训练用外部 held-out 时)")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--n-nature", type=int, default=9000)
     ap.add_argument("--n-ai", type=int, default=0, help="ai 总量上限(0=全用)")
@@ -121,9 +121,9 @@ def main() -> None:
     if args.n_ai > 0:
         random.Random(args.seed + 1).shuffle(rows); rows = rows[:args.n_ai]
 
-    holdout = [r for r in rows if r[1] == args.holdout_tag or args.holdout_tag in r[1]]
+    holdout = [r for r in rows if args.holdout_tag and (r[1] == args.holdout_tag or args.holdout_tag in r[1])]
     seen = [r for r in rows if r not in holdout]
-    if not holdout:
+    if args.holdout_tag and not holdout:
         print(f"!! 没匹配到 held-out 生成器 '{args.holdout_tag}';现有 tag: {sorted(set(t for _, t in rows))}")
     s_tr, s_va = _split(seen, args.val_frac, rng)
     for fn, _ in s_tr:
@@ -136,14 +136,17 @@ def main() -> None:
     def n(d):
         return sum(1 for _ in d.iterdir())
     from collections import Counter
-    val_ai_tags = Counter(t for _, t in s_va) + Counter({args.holdout_tag: len(holdout)})
+    val_ai_tags = Counter(t for _, t in s_va)
+    if holdout:
+        val_ai_tags[args.holdout_tag] += len(holdout)
     print(f"数据集 -> {base}")
     print(f"  train/nature={n(dirs[('train','nature')])}  train/ai={n(dirs[('train','ai')])}")
     print(f"  val/nature  ={n(dirs[('val','nature')])}  val/ai  ={n(dirs[('val','ai')])}")
-    print(f"  ai 生成器: 训练用 {sorted(set(t for _, t in seen))}  |  held-out(仅val) '{args.holdout_tag}' x{len(holdout)}")
+    ho = f"held-out(仅val) '{args.holdout_tag}' x{len(holdout)}" if args.holdout_tag else "无 held-out(全部生成器进 train/val;泛化用外部测试集单独测)"
+    print(f"  ai 生成器: 训练用 {sorted(set(t for _, t in seen))}  |  {ho}")
     print(f"  val/ai 各生成器: {dict(val_ai_tags)}")
-    if n(dirs[("val", "ai")]) == 0 or len(holdout) == 0:
-        print("  !! val/ai 空 或 没 held-out -> 无法测泛化, 检查 --aigen-root/--holdout-tag")
+    if n(dirs[("val", "ai")]) == 0:
+        print("  !! val/ai 空 -> 检查 --aigen-root")
     print("下一步(保指纹): python training/reencode_uniform.py --root %s --max-side 0 --q 95" % base)
     print("诚实: 召回按 val/ai 里**held-out 生成器**单独报 = 对'没见过的 AI'的真实识别率。")
 
