@@ -65,7 +65,7 @@ def _collect(roots: list[Path], n: int, seed: int) -> list[Path]:
 
 def _to_multiple_of_8(im: Image.Image, cap: int = 768) -> Image.Image:
     w, h = im.size
-    s = min(1.0, cap / max(w, h))
+    s = 1.0 if cap <= 0 else min(1.0, cap / max(w, h))   # cap<=0 = 原生分辨率(不缩,保住 AI 指纹)
     w, h = max(8, int(w * s) // 8 * 8), max(8, int(h * s) // 8 * 8)
     return im.resize((w, h))
 
@@ -83,7 +83,7 @@ def main() -> None:
     ap.add_argument("--models", nargs="+", default=["stabilityai/sd-vae-ft-mse"],
                     help="vae 用 AutoencoderKL 模型id;img2img 用完整 SD 模型id")
     ap.add_argument("--strength", type=float, default=0.35, help="img2img 强度(越大改得越多)")
-    ap.add_argument("--cap", type=int, default=768)
+    ap.add_argument("--cap", type=int, default=768, help="最长边上限;**0=原生分辨率**(重训 AI 检测器用 0, 保住指纹别缩)")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -99,11 +99,14 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         raise SystemExit(f"需要 diffusers(pip install diffusers transformers accelerate):{exc}")
 
+    import csv
     args.out.mkdir(parents=True, exist_ok=True)
     srcs = _collect(args.genuine_roots, args.n, args.seed)
     if not srcs:
         print("没采到真图源"); return
     print(f"真图源 {len(srcs)} 张,方法 {args.methods},模型 {args.models}")
+    mf = open(args.out / "manifest.csv", "w", newline="", encoding="utf-8-sig")
+    mw = csv.writer(mf); mw.writerow(["file", "method", "model"])   # 记生成器身份, 供 held-out 生成器切分
 
     made = 0
     for method in args.methods:
@@ -120,8 +123,9 @@ def main() -> None:
                             lat = vae.encode(x).latent_dist.sample()
                             rec = vae.decode(lat).sample
                         rec = ((rec.clamp(-1, 1) + 1) * 127.5).round().byte().squeeze(0).permute(1, 2, 0).cpu().numpy()
-                        Image.fromarray(rec).save(args.out / f"aivae_{tag}_{i:06d}.jpg", quality=92)
-                        made += 1
+                        fn = f"aivae_{tag}_{i:06d}.jpg"
+                        Image.fromarray(rec).save(args.out / fn, quality=95)
+                        mw.writerow([fn, "vae", mid]); made += 1
                     except Exception as exc:  # noqa: BLE001
                         if i < 3:
                             print("vae 失败", sp.name, exc)
@@ -138,8 +142,9 @@ def main() -> None:
                         im = _to_multiple_of_8(ImageOps.exif_transpose(Image.open(sp)).convert("RGB"), args.cap)
                         out = pipe(prompt="a mobile app payment screenshot", image=im,
                                    strength=args.strength, guidance_scale=3.0, generator=gen).images[0]
-                        out.save(args.out / f"aii2i_{tag}_{i:06d}.jpg", quality=92)
-                        made += 1
+                        fn = f"aii2i_{tag}_{i:06d}.jpg"
+                        out.save(args.out / fn, quality=95)
+                        mw.writerow([fn, "img2img", mid]); made += 1
                     except Exception as exc:  # noqa: BLE001
                         if i < 3:
                             print("img2img 失败", sp.name, exc)
@@ -147,9 +152,9 @@ def main() -> None:
                 if args.device.startswith("cuda"):
                     torch.cuda.empty_cache()
 
-    print(f"造了 {made} 张 AI 假图 -> {args.out}")
-    print("诚实:这是'AI 触碰过的页',喂 SSP 的 ai 类;模板改字类欺诈另走 engine B + 字形头;"
-          "上线前在从图库挖出的真假图上复核。")
+    mf.close()
+    print(f"造了 {made} 张 AI 假图 -> {args.out}(manifest.csv 已记生成器身份)")
+    print("重训 AI 检测器要点:--cap 0 原生分辨率保指纹;多个生成器混造增多样;留一个生成器只进 val 测泛化。")
 
 
 if __name__ == "__main__":
