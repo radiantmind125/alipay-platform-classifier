@@ -20,7 +20,8 @@ python training\gen_ai_fakes.py --genuine-roots D:\download2\TempFakeImages D:\d
 - 产出 `D:\ai_fakes\*.jpg` + `manifest.csv`(记了每张的生成器)。
 - **质检**: 打开几张看是能认出的截图(略糊/略软), 不是黑图/噪声。某个 VAE 出黑图(fp16 NaN)就从 `--models` 去掉它。
 - 想更多样(不同机制): 再补一批 img2img(需联网下 SD 模型, 慢):
-  `... --out D:\ai_fakes --methods img2img --models stabilityai/stable-diffusion-2-1 --strength 0.4 --cap 0`
+  `... --out D:\ai_fakes --methods img2img --models stable-diffusion-v1-5/stable-diffusion-v1-5 --strength 0.4 --cap 1024`
+  (注: stabilityai/stable-diffusion-2-1 已被 gated/下架 401; 用社区镜像 stable-diffusion-v1-5/stable-diffusion-v1-5 或 Lykon/dreamshaper-8)
   (追加到同目录; manifest 会续写。img2img 也可当另一个 held-out 候选。)
 
 ---

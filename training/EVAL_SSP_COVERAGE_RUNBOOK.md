@@ -85,6 +85,7 @@ python training\eval_summary.py D:\ssp_test\tamper_clean_out\summary.csv --kind 
 ## (可选)实验 A 的加强版:img2img(更强的 held-out,机制不同)
 VAE 往返是"再解码一次";img2img 是"用扩散模型轻改一遍",机制更不一样、更接近真实 AI 洗白。代价:模型大(~5GB)、慢。想做再跑:
 ```
-python training\gen_ai_fakes.py --genuine-roots D:\ssp_test\gen10k --out D:\ssp_test\aigen_i2i --n 200 --methods img2img --models stabilityai/stable-diffusion-2-1 --strength 0.4 --device cuda
+python training\gen_ai_fakes.py --genuine-roots D:\ssp_test\gen10k --out D:\ssp_test\aigen_i2i --n 200 --methods img2img --models stable-diffusion-v1-5/stable-diffusion-v1-5 --strength 0.4 --cap 1024 --device cuda
+# 注: stabilityai/stable-diffusion-2-1 已 gated/401; 用社区 stable-diffusion-v1-5/stable-diffusion-v1-5 或 Lykon/dreamshaper-8
 ```
 (若该模型 id 下载失败,换一个当前可用的 SD1.x/2.x 模型;别用已下架的 runwayml/stable-diffusion-v1-5。)之后照 A2/A3 换路径预测+算召回。
