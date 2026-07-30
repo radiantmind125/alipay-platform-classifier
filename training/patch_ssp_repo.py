@@ -8,6 +8,8 @@ r"""把官方 SSP 仓库改成能在"支付宝单类 + 现代环境"下重训(�
    -> `from scipy.ndimage import gaussian_filter`(旧路径 scipy>=1.14 已删,改后不必钉 scipy==1.10.1)。
 3. (stage2)utils/patch.py: 选块 patch_list[0](最平)-> patch_list[-1](最富纹理)。
    —— VAE 往返假图指纹在细节/文字区,平背景无指纹,最平块学不到(loss 卡chance)。train 和 predict 两个仓库都要打。
+4. (v4)options.py: jpg_qual [90,100] -> [40,95] 拓宽 JPEG 增广质量区间。
+   —— 仅当训练带 --jpg_prob>0 时生效(jpg_prob=0 无副作用)。让压缩过的假图仍被抓、压缩的真图不误杀。
 
 不动 train_val.py 的 .cuda()(服务器有 GPU,原样即可)。
 
@@ -35,6 +37,11 @@ _PATCHES = [
     ("utils/patch.py",
      ["new_img = patch_list[0]", "new_img=patch_list[0]"],
      "new_img = patch_list[-1]"),
+    # v4 格式鲁棒: 拓宽 JPEG 增广质量区间(仅 --jpg_prob>0 生效; =0 无副作用)。
+    # 抗压缩: 压过的假图仍认指纹、压过的真图不误杀。配 train_val.py --jpg_prob 0.5 --blur_prob 0.1 用。
+    ("options.py",
+     ["default=[90, 100]", "default=[90,100]"],
+     "default=[40, 95]"),
 ]
 
 
