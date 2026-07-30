@@ -45,10 +45,16 @@ def _is_clean_screenshot(im: Image.Image) -> bool:
     return (not any(t in ifd for t in _OPT)) and short <= 1500 and 1.6 <= aspect <= 2.6
 
 
-def _collect(roots: list[Path], n: int, seed: int) -> list[Path]:
+def _collect(roots: list[Path], n: int, seed: int, split: str = "all") -> list[Path]:
+    import hashlib
     files: list[Path] = []
     for r in roots:
         files += [p for p in r.rglob("*") if p.suffix.lower() in _EXTS]
+    if split != "all":   # 按源图 stem 稳定哈希切池: train=80% / holdout=20%, 保证 held-out 探针与训练源零交集
+        def _keep(p: Path) -> bool:
+            h = int(hashlib.sha1(p.stem.encode("utf-8")).hexdigest(), 16) % 5
+            return h != 0 if split == "train" else h == 0
+        files = [p for p in files if _keep(p)]
     random.Random(seed).shuffle(files)
     out: list[Path] = []
     for p in files:
@@ -84,6 +90,10 @@ def main() -> None:
                     help="vae 用 AutoencoderKL 模型id;img2img 用完整 SD 模型id")
     ap.add_argument("--strength", type=float, default=0.35, help="img2img 强度(越大改得越多)")
     ap.add_argument("--cap", type=int, default=768, help="最长边上限;**0=原生分辨率**(重训 AI 检测器用 0, 保住指纹别缩)")
+    ap.add_argument("--dtype", default="fp16", choices=["fp16", "bf16", "fp32"],
+                    help="16通道VAE(Flux/SD3)在 fp16 会 NaN 出黑图, 用 bf16")
+    ap.add_argument("--source-split", default="all", choices=["all", "train", "holdout"],
+                    help="按源图哈希切池: train(80%%)训练用 / holdout(20%%)held-out探针用, 保证零源交集")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -92,6 +102,7 @@ def main() -> None:
         import torch
     except Exception as exc:  # noqa: BLE001
         raise SystemExit(f"需要 torch:{exc}")
+    _DT = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[args.dtype]
     try:
         from diffusers import AutoencoderKL
         if "img2img" in args.methods:
@@ -101,7 +112,7 @@ def main() -> None:
 
     import csv
     args.out.mkdir(parents=True, exist_ok=True)
-    srcs = _collect(args.genuine_roots, args.n, args.seed)
+    srcs = _collect(args.genuine_roots, args.n, args.seed, args.source_split)
     if not srcs:
         print("没采到真图源"); return
     print(f"真图源 {len(srcs)} 张,方法 {args.methods},模型 {args.models}")
@@ -117,13 +128,13 @@ def main() -> None:
             tag = mid.split("/")[-1]
             if method == "vae":
                 print(f"[{tag}] 加载 VAE(首次会下载模型, 可能几分钟)...", flush=True)
-                vae = AutoencoderKL.from_pretrained(mid, torch_dtype=torch.float16).to(args.device).eval()
+                vae = AutoencoderKL.from_pretrained(mid, torch_dtype=_DT).to(args.device).eval()
                 print(f"[{tag}] 就绪, 开始造 {len(srcs)} 张(每 200 张报一次进度)...", flush=True)
                 for i, sp in enumerate(srcs):
                     try:
                         im = _to_multiple_of_8(ImageOps.exif_transpose(Image.open(sp)).convert("RGB"), args.cap)
                         x = torch.from_numpy(np.array(im)).permute(2, 0, 1).unsqueeze(0)  # np.array 复制=可写,消除警告
-                        x = (x.float() / 127.5 - 1.0).to(args.device, torch.float16)
+                        x = (x.float() / 127.5 - 1.0).to(args.device, _DT)
                         with torch.no_grad():
                             lat = vae.encode(x).latent_dist.sample()
                             rec = vae.decode(lat).sample
@@ -141,7 +152,7 @@ def main() -> None:
                     torch.cuda.empty_cache()
             elif method == "img2img":
                 print(f"[{tag}] 加载 img2img SD 模型(首次下载 ~5GB, 慢)...", flush=True)
-                pipe = StableDiffusionImg2ImgPipeline.from_pretrained(mid, torch_dtype=torch.float16,
+                pipe = StableDiffusionImg2ImgPipeline.from_pretrained(mid, torch_dtype=_DT,
                                                                       safety_checker=None).to(args.device)
                 pipe.set_progress_bar_config(disable=True)
                 print(f"[{tag}] 就绪, 开始造 {len(srcs)} 张...", flush=True)
