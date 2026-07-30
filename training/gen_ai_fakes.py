@@ -92,6 +92,10 @@ def main() -> None:
     ap.add_argument("--cap", type=int, default=768, help="最长边上限;**0=原生分辨率**(重训 AI 检测器用 0, 保住指纹别缩)")
     ap.add_argument("--dtype", default="fp16", choices=["fp16", "bf16", "fp32"],
                     help="16通道VAE(Flux/SD3)在 fp16 会 NaN 出黑图, 用 bf16")
+    ap.add_argument("--vae-class", default="kl", choices=["kl", "tiny"],
+                    help="kl=AutoencoderKL(SD/SDXL/16通道KL如ostris); tiny=AutoencoderTiny(TAESD蒸馏微型解码器,架构最不同)")
+    ap.add_argument("--vae-subfolder", default="",
+                    help="从完整模型子目录取VAE(如 Flux/SD3: --vae-subfolder vae)")
     ap.add_argument("--source-split", default="all", choices=["all", "train", "holdout"],
                     help="按源图哈希切池: train(80%%)训练用 / holdout(20%%)held-out探针用, 保证零源交集")
     ap.add_argument("--device", default="cuda")
@@ -127,8 +131,16 @@ def main() -> None:
         for mid in args.models:
             tag = mid.split("/")[-1]
             if method == "vae":
-                print(f"[{tag}] 加载 VAE(首次会下载模型, 可能几分钟)...", flush=True)
-                vae = AutoencoderKL.from_pretrained(mid, torch_dtype=_DT).to(args.device).eval()
+                if args.vae_class == "tiny":
+                    from diffusers import AutoencoderTiny
+                    _VC = AutoencoderTiny
+                else:
+                    _VC = AutoencoderKL
+                _kw = {"torch_dtype": _DT}
+                if args.vae_subfolder:
+                    _kw["subfolder"] = args.vae_subfolder
+                print(f"[{tag}] 加载 VAE({args.vae_class}, 首次会下载模型, 可能几分钟)...", flush=True)
+                vae = _VC.from_pretrained(mid, **_kw).to(args.device).eval()
                 print(f"[{tag}] 就绪, 开始造 {len(srcs)} 张(每 200 张报一次进度)...", flush=True)
                 for i, sp in enumerate(srcs):
                     try:
@@ -136,7 +148,10 @@ def main() -> None:
                         x = torch.from_numpy(np.array(im)).permute(2, 0, 1).unsqueeze(0)  # np.array 复制=可写,消除警告
                         x = (x.float() / 127.5 - 1.0).to(args.device, _DT)
                         with torch.no_grad():
-                            lat = vae.encode(x).latent_dist.sample()
+                            if args.vae_class == "tiny":
+                                lat = vae.encode(x).latents        # AutoencoderTiny 无 latent_dist, 直接取 .latents
+                            else:
+                                lat = vae.encode(x).latent_dist.sample()
                             rec = vae.decode(lat).sample
                         rec = ((rec.clamp(-1, 1) + 1) * 127.5).round().byte().squeeze(0).permute(1, 2, 0).cpu().numpy()
                         fn = f"aivae_{tag}_{i:06d}.jpg"
