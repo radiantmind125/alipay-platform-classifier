@@ -10,6 +10,8 @@ r"""把官方 SSP 仓库改成能在"支付宝单类 + 现代环境"下重训(�
    —— VAE 往返假图指纹在细节/文字区,平背景无指纹,最平块学不到(loss 卡chance)。train 和 predict 两个仓库都要打。
 4. (v4)options.py: jpg_qual [90,100] -> [40,95] 拓宽 JPEG 增广质量区间。
    —— 仅当训练带 --jpg_prob>0 时生效(jpg_prob=0 无副作用)。让压缩过的假图仍被抓、压缩的真图不误杀。
+5. (v4b)utils/tdataloader.py: JPEG 增广加"一半概率再压一次"(双压), 模拟微信多次转发的重压缩。
+   —— 修 v4 压缩弱点: 重压缩洗掉高频指纹, 让模型见过双压才抓得住压缩后的假图。同样只在 --jpg_prob>0 时生效。
 
 不动 train_val.py 的 .cuda()(服务器有 GPU,原样即可)。
 
@@ -42,6 +44,10 @@ _PATCHES = [
     ("options.py",
      ["default=[90, 100]", "default=[90,100]"],
      "default=[40, 95]"),
+    # v4b 抗压缩: data_augment 里 JPEG 一半概率再压一次(双压), 模拟微信多次转发。修 v4 压缩假图召回弱点。
+    ("utils/tdataloader.py",
+     ["        img = jpeg_from_key(img, qual, method)"],
+     "        img = jpeg_from_key(img, qual, method)\n        if random() < 0.5:   # v4b 双压: 模拟微信多次转发的重压缩\n            img = jpeg_from_key(img, sample_randint(opt.jpg_qual), sample_discrete(opt.jpg_method))"),
 ]
 
 
