@@ -69,10 +69,10 @@ def _collect(roots: list[Path], n: int, seed: int, split: str = "all") -> list[P
     return out
 
 
-def _to_multiple_of_8(im: Image.Image, cap: int = 768) -> Image.Image:
+def _to_multiple_of_8(im: Image.Image, cap: int = 768, mult: int = 8) -> Image.Image:
     w, h = im.size
     s = 1.0 if cap <= 0 else min(1.0, cap / max(w, h))   # cap<=0 = 原生分辨率(不缩,保住 AI 指纹)
-    w, h = max(8, int(w * s) // 8 * 8), max(8, int(h * s) // 8 * 8)
+    w, h = max(mult, int(w * s) // mult * mult), max(mult, int(h * s) // mult * mult)   # mult: Qwen 视频VAE 需 16 倍数
     return im.resize((w, h))
 
 
@@ -92,8 +92,8 @@ def main() -> None:
     ap.add_argument("--cap", type=int, default=768, help="最长边上限;**0=原生分辨率**(重训 AI 检测器用 0, 保住指纹别缩)")
     ap.add_argument("--dtype", default="fp16", choices=["fp16", "bf16", "fp32"],
                     help="16通道VAE(Flux/SD3)在 fp16 会 NaN 出黑图, 用 bf16")
-    ap.add_argument("--vae-class", default="kl", choices=["kl", "tiny"],
-                    help="kl=AutoencoderKL(SD/SDXL/16通道KL如ostris); tiny=AutoencoderTiny(TAESD蒸馏微型解码器,架构最不同)")
+    ap.add_argument("--vae-class", default="kl", choices=["kl", "tiny", "qwen"],
+                    help="kl=AutoencoderKL(SD/SDXL/16通道KL如ostris/Flux); tiny=AutoencoderTiny(TAESD); qwen=AutoencoderKLQwenImage(真Qwen-Image VAE, 视频VAE需5D+尺寸16倍数, 需diffusers>=0.34)")
     ap.add_argument("--vae-subfolder", default="",
                     help="从完整模型子目录取VAE(如 Flux/SD3: --vae-subfolder vae)")
     ap.add_argument("--source-split", default="all", choices=["all", "train", "holdout"],
@@ -127,6 +127,7 @@ def main() -> None:
         mw.writerow(["file", "method", "model"])   # 记生成器身份, 供 held-out 生成器切分
 
     made = 0
+    _mult = 16 if args.vae_class == "qwen" else 8   # Qwen 视频VAE 要求 H/W 是 16 的倍数
     for method in args.methods:
         for mid in args.models:
             tag = mid.split("/")[-1]
@@ -134,6 +135,12 @@ def main() -> None:
                 if args.vae_class == "tiny":
                     from diffusers import AutoencoderTiny
                     _VC = AutoencoderTiny
+                elif args.vae_class == "qwen":
+                    try:
+                        from diffusers import AutoencoderKLQwenImage   # 真 Qwen-Image VAE(视频VAE)
+                    except ImportError:
+                        raise SystemExit("Qwen VAE 需 diffusers>=0.34: pip install -U diffusers")
+                    _VC = AutoencoderKLQwenImage
                 else:
                     _VC = AutoencoderKL
                 _kw = {"torch_dtype": _DT}
@@ -144,15 +151,20 @@ def main() -> None:
                 print(f"[{tag}] 就绪, 开始造 {len(srcs)} 张(每 200 张报一次进度)...", flush=True)
                 for i, sp in enumerate(srcs):
                     try:
-                        im = _to_multiple_of_8(ImageOps.exif_transpose(Image.open(sp)).convert("RGB"), args.cap)
+                        im = _to_multiple_of_8(ImageOps.exif_transpose(Image.open(sp)).convert("RGB"), args.cap, _mult)
                         x = torch.from_numpy(np.array(im)).permute(2, 0, 1).unsqueeze(0)  # np.array 复制=可写,消除警告
                         x = (x.float() / 127.5 - 1.0).to(args.device, _DT)
                         with torch.no_grad():
-                            if args.vae_class == "tiny":
-                                lat = vae.encode(x).latents        # AutoencoderTiny 无 latent_dist, 直接取 .latents
+                            if args.vae_class == "qwen":
+                                x = x.unsqueeze(2)                          # Qwen 视频VAE 要 5D [B,C,1,H,W]
+                                lat = vae.encode(x).latent_dist.sample()
+                                rec = vae.decode(lat).sample.squeeze(2)     # 去掉时间维 -> [B,C,H,W]
+                            elif args.vae_class == "tiny":
+                                lat = vae.encode(x).latents                 # AutoencoderTiny 无 latent_dist
+                                rec = vae.decode(lat).sample
                             else:
                                 lat = vae.encode(x).latent_dist.sample()
-                            rec = vae.decode(lat).sample
+                                rec = vae.decode(lat).sample
                         rec = ((rec.clamp(-1, 1) + 1) * 127.5).round().byte().squeeze(0).permute(1, 2, 0).cpu().numpy()
                         fn = f"aivae_{tag}_{i:06d}.jpg"
                         Image.fromarray(rec).save(args.out / fn, quality=95)
