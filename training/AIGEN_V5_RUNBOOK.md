@@ -24,6 +24,12 @@ python -c "import diffusers; print(diffusers.__version__)"
 ```
 diffusers <0.34 → `pip install -U diffusers`(Qwen 需要)。
 
+## 0 确认 v4 假图池还在(重要 别跳)
+```
+(Get-ChildItem D:\ai_fakes_v4\aivae_sd-vae-ft-mse_*.jpg -ErrorAction SilentlyContinue | Measure-Object).Count
+```
+- 应约 3000。**若是 0** = `D:\ai_fakes_v4` 被删/清过 → **停 告诉我**。这时不能只追加 Qwen/Flux(会丢掉 mse/ema/sdxl/ostris 老生成器 v5 就废了)要重造全部。
+
 ## 1 造真 Qwen 训练假图(追加到 v4 假图池)
 ```
 python training\gen_ai_fakes.py --genuine-roots D:\download2\TempFakeImages D:\download\TempFakeImages --out D:\ai_fakes_v4 --n 3000 --methods vae --models Qwen/Qwen-Image --vae-subfolder vae --vae-class qwen --cap 1024 --dtype bf16 --source-split train --seed 811 --device cuda
@@ -53,8 +59,10 @@ python training\reencode_uniform.py --root D:\ssp_aigen_v5\imagenet_ai_0419_sdv4
 ```
 Copy-Item D:\SSP-AI-Generated-Image-Detection-main\utils\tdataloader.py.bak D:\SSP-AI-Generated-Image-Detection-main\utils\tdataloader.py -Force
 python training\patch_ssp_repo.py --repo D:\SSP-AI-Generated-Image-Detection-main
+findstr /n "v4b" D:\SSP-AI-Generated-Image-Detection-main\utils\tdataloader.py
 ```
-- 第一行还原 tdataloader 原始版(去掉 v4b 跑过的双压); patch_ssp_repo 会重打 scipy 修复 + jpg_qual + 选块 但**不再加双压**(已撤)。
+- 前两行: 还原 tdataloader 原始版(去掉 v4b 跑过的双压)+ 重打 scipy 修复 + jpg_qual + 选块 但**不再加双压**(规则已撤)。
+- 第三行 `findstr` **应无输出(空)**。若打印出带 v4b 的行 = 双压没去掉 → 告诉我。
 - 若提示 .bak 不存在, 告诉我(我给手动去掉双压两行的办法)。
 
 ## 6 训练 v5(用 v4 的增广)
