@@ -12,6 +12,8 @@ r"""把官方 SSP 仓库改成能在"支付宝单类 + 现代环境"下重训(�
    —— 仅当训练带 --jpg_prob>0 时生效(jpg_prob=0 无副作用)。让压缩过的假图仍被抓、压缩的真图不误杀。
 5. (v4b 已废弃)曾加过 JPEG 双压增广试图修压缩弱点, 但验证显示没帮助反伤干净召回(重压缩是硬限救不回)→ 已撤规则。
    服务器若还留着 v4b 的双压, v5 前用 tdataloader.py.bak 还原再重打补丁即可去掉。
+6. (v6)utils/tdataloader.py: data_augment 里加随机降采样增广(两类都做), 修 v5 加 Qwen 后出现的 resize 误杀。
+   —— 模型把"缩放/降采样"误当假图信号 → 随机缩放两类教它"缩放不是假"。硬编码 prob 0.5 训练自动生效。
 
 不动 train_val.py 的 .cuda()(服务器有 GPU,原样即可)。
 
@@ -45,6 +47,10 @@ _PATCHES = [
      ["default=[90, 100]", "default=[90,100]"],
      "default=[40, 95]"),
     # (v4b 双压增广已废弃移除: 验证证明没帮助反伤干净召回, 见 docstring 第5点)
+    # v6 缩放增广: data_augment 里随机降采样(两类都做), 教模型缩放不是假, 修 v5 加 Qwen 后的 resize 误杀。
+    ("utils/tdataloader.py",
+     ["def data_augment(img, opt):\n    img = np.array(img)"],
+     "def data_augment(img, opt):\n    img = np.array(img)\n    if random() < 0.5:   # v6 缩放增广: 随机降采样 两类都做 教模型缩放不是假 修 resize 误杀\n        h0, w0 = img.shape[:2]\n        s = 0.35 + random() * 0.65\n        nh, nw = max(64, int(h0 * s)), max(64, int(w0 * s))\n        img = cv2.resize(img, (nw, nh), interpolation=choice([cv2.INTER_AREA, cv2.INTER_LINEAR, cv2.INTER_CUBIC]))"),
 ]
 
 
