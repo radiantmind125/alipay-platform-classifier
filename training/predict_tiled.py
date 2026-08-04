@@ -61,6 +61,19 @@ def _texture_map(a: np.ndarray) -> np.ndarray:
     return t
 
 
+def _is_blue_page(a: np.ndarray) -> bool:
+    """蓝底转账页判定。
+
+    为什么要判: 蓝图的金额是**白字蓝底**, 而 locate_amount 找的是"浅底深字" —— 它看不见真金额,
+    却会误锁到页面里唯一的深字浅底元素: **红包促销卡**(如"到店支付红包 ¥0.6" 那种彩色卡片)。
+    那块是花哨的合成图形, 打分自然偏高 -> 系统性误杀。实测最高分真图里就有这种。
+    所以蓝图直接不出局部信号(它需要自己的金额定位器, 见蓝白分开的计划)。
+    """
+    top = a[: max(1, a.shape[0] // 3)]
+    r, g, b = (float(top[:, :, i].mean()) for i in range(3))
+    return b > r + 25 and b > g + 15
+
+
 def _richest_patch(a: np.ndarray, ps: int) -> np.ndarray:
     """块内纹理最丰富的 ps x ps 窗口(积分图一次算完所有窗口, 免 64 次随机裁剪; 确定性)。"""
     h, w = a.shape[:2]
@@ -91,6 +104,9 @@ def main() -> None:
                     help="**只看金额那一块**(用 locate_amount 定位, 外扩后切少量小块)。"
                          "篡改就发生在这里, 只看这儿 = 信号最强 + 误杀面最小。定位失败则退回 --roi-top。"
                          "注: 金额定位是按白底账单详情调的, 蓝图页可能定位不到。")
+    ap.add_argument("--skip-blue", action="store_true",
+                    help="蓝底转账页不出局部信号(默认关, 建议开)。蓝图金额是白字蓝底, locate_amount 看不见, "
+                         "会误锁红包促销卡 -> 那是彩色合成图形, 打分偏高 = 系统性误杀源")
     ap.add_argument("--amount-pad", type=float, default=1.0,
                     help="金额框上下左右各外扩几倍框高(1.0=各扩一个框高, 给点上下文)")
     ap.add_argument("--roi-top", type=float, default=1.0,
@@ -163,7 +179,8 @@ def main() -> None:
             cols, rows = args.cols, args.rows
             located = False
             if args.roi_amount:                   # 只看金额那块: 篡改就在这儿, 信号最强误杀面最小
-                loc = _locate(arr) if _locate else None
+                # 蓝图上 locate_amount 会误锁红包促销卡(白字蓝底的真金额它看不见)-> 直接不出信号
+                loc = None if (args.skip_blue and _is_blue_page(arr)) else (_locate(arr) if _locate else None)
                 if loc:
                     bx0, by0, bx1, by1 = loc[0], loc[1], loc[2], loc[3]
                     pad = int(max(8, (by1 - by0) * args.amount_pad))
