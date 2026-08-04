@@ -107,7 +107,12 @@ def main() -> None:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--n", type=int, default=100, help="**先用 2 试跑看质量**, 再放量(每张一次接口调用)")
     ap.add_argument("--model", default="doubao-seedream-4-5-251128")
-    ap.add_argument("--amount", default="8888.88", help="让它把金额改成多少(改不改都带同样的生成指纹)")
+    ap.add_argument("--prompt-mode", default="redraw", choices=["redraw", "amount"],
+                    help="redraw(默认)=让它照原样重画; amount=让它把金额改成 --amount。"
+                         "**默认用 redraw**: 要求改支付凭证金额会触发风控('input image may contain sensitive information')"
+                         "而我们只需要它**重新生成**金额那块以带上 Seedream 指纹 —— 改不改数字指纹完全一样。")
+    ap.add_argument("--amount", default="8888.88", help="--prompt-mode amount 时把金额改成多少")
+    ap.add_argument("--prompt", default="", help="完全自定义提示词(盖过 --prompt-mode)")
     ap.add_argument("--save-crops", type=Path, default=None, help="同时存配对裁块(ai/ 与 nature/)")
     ap.add_argument("--crop-min", type=int, default=0,
                     help="0=紧贴改动区裁(训练用, 裁块内全是AI像素); >0=外扩到该最小边长(会混进真像素)")
@@ -127,11 +132,13 @@ def main() -> None:
         (args.save_crops / "ai").mkdir(parents=True, exist_ok=True)
         (args.save_crops / "nature").mkdir(parents=True, exist_ok=True)
 
-    srcs = _collect(args.src_root, args.n * 3, args.seed)
+    srcs = _collect(args.src_root, args.n * 6, args.seed)   # 多备货: 部分会被风控拒 + 部分定位失败
     if not srcs:
         print("没采到真图源"); return
-    prompt = (f"把这张图里的金额数字改成 {args.amount} "
-              f"其他所有内容 排版 颜色 字体都完全保持不变")
+    prompt = args.prompt or (
+        "照着这张图 重新画一张一模一样的图片 所有文字 数字和排版都保持不变"
+        if args.prompt_mode == "redraw" else
+        f"把这张图里的金额数字改成 {args.amount} 其他所有内容 排版 颜色 字体都完全保持不变")
     print(f"真图源 {len(srcs)} 张 | 模型 {args.model} | 目标造 {args.n} 张", flush=True)
     print(f"提示词: {prompt}", flush=True)
 
@@ -204,6 +211,9 @@ def main() -> None:
             failed += 1
             if failed <= 5:
                 print(f"  失败 {sp.name}: {str(exc)[:180]}", flush=True)
+            if failed == 5 and "sensitive" in str(exc):
+                print("  提示: 风控在拒图。若你用的是 --prompt-mode amount, 换成默认的 redraw 会好很多"
+                      "(指纹一样, 但不涉及'改支付金额'这种敏感请求)。", flush=True)
             if failed >= 10 and made == 0:
                 print("连续失败太多, 先停下检查(key/额度/模型名/网络)。"); break
 
