@@ -112,6 +112,9 @@ def main() -> None:
                          "内容完全相同、只差有没有被 AI 动过 -> 训练局部篡改检测最干净的正负样本(标注免费)")
     ap.add_argument("--crop-min", type=int, default=128, help="配对裁块的最小边长(不足则以框为中心外扩)")
     ap.add_argument("--model", default="stabilityai/sd-vae-ft-mse")
+    ap.add_argument("--tag", default="",
+                    help="输出文件名里的标记(默认取模型名)。**多个生成器往同一目录累积时必须区分**, "
+                         "否则第二次跑会把第一次的覆盖掉(计数从0重来)")
     ap.add_argument("--dtype", default="fp16", choices=["fp16", "bf16", "fp32"])
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--seed", type=int, default=0)
@@ -131,7 +134,8 @@ def main() -> None:
     srcs = _collect(args.src_root, args.n * 3, args.seed)   # 多取些, 定位不到金额的会跳过
     if not srcs:
         print("没采到真图源"); return
-    print(f"真图源 {len(srcs)} 张, 模式 {args.mode}, 加载 VAE...", flush=True)
+    tag = args.tag or args.model.rstrip("/").split("/")[-1]     # 文件名标记, 防多生成器互相覆盖
+    print(f"真图源 {len(srcs)} 张, 模式 {args.mode}, 标记 {tag}, 加载 VAE...", flush=True)
     vae = AutoencoderKL.from_pretrained(args.model, torch_dtype=dt).to(args.device).eval()
 
     made = skipped = 0
@@ -164,10 +168,10 @@ def main() -> None:
                     a1, b1 = min(h, cy + half), min(w, cx + half)
                     if a1 - a0 >= 32 and b1 - b0 >= 32:
                         Image.fromarray(out[a0:a1, b0:b1]).save(
-                            args.save_crops / "ai" / f"crop_{made:06d}.jpg", quality=95)
+                            args.save_crops / "ai" / f"crop_{tag}_{made:06d}.jpg", quality=95)
                         Image.fromarray(arr[a0:a1, b0:b1]).save(
-                            args.save_crops / "nature" / f"crop_{made:06d}.jpg", quality=95)
-            Image.fromarray(out).save(args.out / f"ailocal_{args.mode}_{made:06d}.jpg", quality=95)
+                            args.save_crops / "nature" / f"crop_{tag}_{made:06d}.jpg", quality=95)
+            Image.fromarray(out).save(args.out / f"ailocal_{args.mode}_{tag}_{made:06d}.jpg", quality=95)
             made += 1
             if made % 50 == 0:
                 print(f"  已造 {made} 张...", flush=True)

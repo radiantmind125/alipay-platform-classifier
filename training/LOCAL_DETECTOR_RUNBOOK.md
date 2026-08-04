@@ -19,15 +19,28 @@
 
 ---
 
-## 1 造配对训练块(GPU, 几十分钟)
+## 1 造配对训练块 · **用三个不同的生成器**(GPU, 约 1 小时)
+
+**为什么要三个**: 千问那次的教训 —— 只按一个生成器训, 换个生成器就抓不到(当时漏了七成)。
+真骗子可能用 PS 生成填充 / SDXL 局部重绘 / 别的工具, 不会正好是我们训练用的那个。
+所以三个不同架构的 VAE 各造一批, 让它学**通用的"这块被 AI 动过"**而不是某一个模型的指纹。
+
 ```
 cd D:\alipay-platform-classifier
 git pull
-python training\gen_local_ai_edit.py --src-root D:\download2\TempFakeImages --out D:\probe\localedit_train --save-crops D:\localcrops --n 3000 --mode local --device cuda
+python training\gen_local_ai_edit.py --src-root D:\download2\TempFakeImages --out D:\probe\localedit_train --save-crops D:\localcrops --n 1500 --mode local --model stabilityai/sd-vae-ft-mse --device cuda
+python training\gen_local_ai_edit.py --src-root D:\download2\TempFakeImages --out D:\probe\localedit_train --save-crops D:\localcrops --n 1500 --mode local --model madebyollin/sdxl-vae-fp16-fix --seed 11 --device cuda
+python training\gen_local_ai_edit.py --src-root D:\download2\TempFakeImages --out D:\probe\localedit_train --save-crops D:\localcrops --n 1500 --mode local --model ostris/vae-kl-f8-d16 --dtype bf16 --seed 22 --device cuda
 ```
-- `--n 3000` 目标 3000 对(定位不到金额的会跳过, 实际少一些)。
-- 产出 `D:\localcrops\ai\*.jpg` 和 `D:\localcrops\nature\*.jpg`, **一一配对**。
-- **质检**: 打开一对同名的(ai 和 nature 各一张)—— 应该看着几乎一样(都是金额那块), 这就对了。
+- 三条命令**累积**到同一个 `D:\localcrops`(文件名带模型标记, 不会互相覆盖)。合计约 4500 对。
+- 不同 `--seed` = 用不同的源图, 增加多样性。
+- 第三个是 16 通道 VAE, **必须 `--dtype bf16`**(fp16 会出黑图)。
+- **质检**: 打开一对同名的(`D:\localcrops\ai\crop_sd-vae-ft-mse_000001.jpg` 和 `nature\` 里同名那张)——
+  应该看着几乎一样(都是金额那块), 这就对了。再确认三个模型的文件都在:
+```
+Get-ChildItem D:\localcrops\ai | Group-Object {($_.BaseName -split '_')[1]} | Select-Object Name,Count
+```
+  应看到三行(sd-vae-ft-mse / sdxl-vae-fp16-fix / vae-kl-f8-d16)每行约 1500。
 
 ## 2 组装成训练目录(官方 loader 的固定结构)
 ```
@@ -43,17 +56,33 @@ python train_val.py --image_root D:\ssp_local --gpu_id 0 --save_path .\snapshot\
 产出 `snapshot\localdet\Net_epoch_best.pth`。
 
 ## 4 用分块方式测整张图(这才是上线的用法)
+
+**注意用和 v6 完全一样的口径去比**(--roi-amount + --require-located), 否则不是同一把尺子:
 ```
 cd D:\alipay-platform-classifier
 $ld = "D:\SSP-AI-Generated-Image-Detection-main\snapshot\localdet\Net_epoch_best.pth"
-python training\predict_tiled.py --ssp-repo D:\SSP --model $ld --input D:\probe\localedit --output_dir D:\probe\localedit_ld --device cuda
-python training\predict_tiled.py --ssp-repo D:\SSP --model $ld --input D:\ssp_aigen_v5\imagenet_ai_0419_sdv4\val\nature --output_dir D:\probe\valnat_ld --limit 1000 --device cuda
-python training\sweep_thresholds.py --fake D:\probe\localedit_ld\summary.csv --genuine D:\probe\valnat_ld\summary.csv
+python training\predict_tiled.py --ssp-repo D:\SSP --model $ld --input D:\probe\localedit --output_dir D:\probe\localedit_ld --roi-amount --roi-top 0.6 --device cuda
+python training\predict_tiled.py --ssp-repo D:\SSP --model $ld --input D:\ssp_aigen_v5\imagenet_ai_0419_sdv4\val\nature --output_dir D:\probe\valnat_ld --roi-amount --roi-top 0.6 --device cuda
+python training\sweep_thresholds.py --fake D:\probe\localedit_ld\summary.csv --genuine D:\probe\valnat_ld\summary.csv --require-located
 ```
-**关键看 sweep 的"误杀 0.1% 预算下召回"** —— 对照 v6 分块的 **13.7%**:
-- 大幅超过(比如 >60%) → 成了, 局部篡改这条线可以上, 和 v6 一起用(v6 抓整图AI, 它抓局部改动)。
-- 只是略好 → 说明小块里的 VAE 指纹本身就弱, 要换思路(传统取证特征: ELA/噪声不一致/JPEG ghost, 这类对复制粘贴改字也管用)。
-- 没提升 → 发我数据, 我重新设计。
+**对照基线(v6 同口径, 全量2700真图 + 仅定位成功)**:
+| 误杀预算 | v6 基线 | 本模型 |
+|---|---|---|
+| 0.1% | **33.3%** | ? |
+| 1.0% | **66.0%** | ? |
+
+- 明显超过基线 → 成了, 这条线可以上(v6 抓整图AI, 它抓局部改金额)。
+- 只是持平/略好 → 说明小块里的指纹本身就弱, 要换思路(传统取证特征: ELA/噪声不一致/JPEG ghost —— 这类对**复制粘贴改字**也管用, 正好补第5步那块)。
+- 反而更差 → 发我数据(附训练日志最后几轮的 val accuracy), 我看是过拟合还是别的。
+
+**重要**: `D:\probe\localedit` 是用 `sd-vae-ft-mse` 造的(第一次那批), 而本模型**训练里见过这个生成器** —— 所以这个数字偏乐观。
+更诚实的做法是另造一批**训练没用过的**生成器的局部编辑图来测:
+```
+python training\gen_local_ai_edit.py --src-root D:\download2\TempFakeImages --out D:\probe\localedit_heldout --n 300 --mode local --model stabilityai/sd-vae-ft-ema --seed 99 --device cuda
+python training\predict_tiled.py --ssp-repo D:\SSP --model $ld --input D:\probe\localedit_heldout --output_dir D:\probe\localedit_heldout_ld --roi-amount --roi-top 0.6 --device cuda
+python training\sweep_thresholds.py --fake D:\probe\localedit_heldout_ld\summary.csv --genuine D:\probe\valnat_ld\summary.csv --require-located
+```
+(`sd-vae-ft-ema` 没进训练 -> 这个数字才代表"没见过的编辑工具"的真实识别率。)
 
 ## 5(重要)也要测传统非AI篡改
 经理最初的 03/04 是**直接改数字**(不一定用AI)。造一批用 engine_b_tamper:
