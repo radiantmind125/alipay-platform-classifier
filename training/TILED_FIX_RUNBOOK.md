@@ -31,11 +31,13 @@ python training\eval_summary.py D:\probe\localedit_tiled\summary.csv --kind fake
 对照: 原来整图打分是 **100% 漏检**。这里漏检降下来才算有效。
 
 ## 2 真图误杀(红线: 必须仍然极低)
+真图有 2700 张, **先抽 500 张看趋势**(够看出误杀有没有变高; 通过了再跑全量):
 ```
-python training\predict_tiled.py --ssp-repo D:\SSP --model $v6 --input D:\ssp_aigen_v5\imagenet_ai_0419_sdv4\val\nature --output_dir D:\probe\valnat_tiled --device cuda
+python training\predict_tiled.py --ssp-repo D:\SSP --model $v6 --input D:\ssp_aigen_v5\imagenet_ai_0419_sdv4\val\nature --output_dir D:\probe\valnat_tiled --limit 500 --device cuda
 python training\eval_summary.py D:\probe\valnat_tiled\summary.csv --kind genuine
 ```
 对照: 整图打分时误杀 0.1%。**这里明显变高就不能用**(或要提高阈值)。
+(去掉 `--limit 500` 就是全量 2700 张。)
 
 ## 3 压缩/缩放真图也别误杀(同红线)
 ```
