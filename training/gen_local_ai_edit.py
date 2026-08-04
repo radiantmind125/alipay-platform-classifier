@@ -110,7 +110,9 @@ def main() -> None:
     ap.add_argument("--save-crops", type=Path, default=None,
                     help="额外产出**配对训练块**: <dir>/ai=改动区裁块, <dir>/nature=同一张原图同一位置的裁块。"
                          "内容完全相同、只差有没有被 AI 动过 -> 训练局部篡改检测最干净的正负样本(标注免费)")
-    ap.add_argument("--crop-min", type=int, default=128, help="配对裁块的最小边长(不足则以框为中心外扩)")
+    ap.add_argument("--crop-min", type=int, default=0,
+                    help="0(默认)=**紧贴改动区**裁, 裁块内每个像素都被AI动过(训练必须这样, 否则标签噪声大到学不动); "
+                         ">0 = 以改动区为中心外扩到这个最小边长(会混进没动过的真像素, 只在想给模型上下文时用)")
     ap.add_argument("--model", default="stabilityai/sd-vae-ft-mse")
     ap.add_argument("--tag", default="",
                     help="输出文件名里的标记(默认取模型名)。**多个生成器往同一目录累积时必须区分**, "
@@ -162,10 +164,17 @@ def main() -> None:
                 patch = _vae_roundtrip(vae, arr[y0:y1, x0:x1], args.device, dt)
                 out = _feather_paste(arr, patch, (x0, y0, x1, y1))
                 if args.save_crops:      # 配对裁块: 同一位置 改过的 vs 原始的, 内容一致只差 AI 动没动过
-                    cy, cx = (y0 + y1) // 2, (x0 + x1) // 2
-                    half = max(args.crop_min, x1 - x0, y1 - y0) // 2
-                    a0, b0 = max(0, cy - half), max(0, cx - half)
-                    a1, b1 = min(h, cy + half), min(w, cx + half)
+                    if args.crop_min <= 0:
+                        # **紧贴改动区**(往里缩 4px 躲开羽化边)-> 裁块里**每个像素都被 AI 动过**。
+                        # 这一条很关键: 之前默认往外扩到 128, 结果裁块里八成是没动过的真像素,
+                        # patch_img 随机选的那 32x32 多半落在真像素上 -> "ai" 样本其实是真的 ->
+                        # 标签噪声过半 -> 训练卡在瞎猜(loss 0.69, ai/nature 准确率反向摆动)。
+                        a0, b0, a1, b1 = y0 + 4, x0 + 4, y1 - 4, x1 - 4
+                    else:                # 旧行为: 带上下文(想让模型看周边时才用)
+                        cy, cx = (y0 + y1) // 2, (x0 + x1) // 2
+                        half = max(args.crop_min, x1 - x0, y1 - y0) // 2
+                        a0, b0 = max(0, cy - half), max(0, cx - half)
+                        a1, b1 = min(h, cy + half), min(w, cx + half)
                     if a1 - a0 >= 32 and b1 - b0 >= 32:
                         Image.fromarray(out[a0:a1, b0:b1]).save(
                             args.save_crops / "ai" / f"crop_{tag}_{made:06d}.jpg", quality=95)

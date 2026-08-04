@@ -109,7 +109,8 @@ def main() -> None:
     ap.add_argument("--model", default="doubao-seedream-4-5-251128")
     ap.add_argument("--amount", default="8888.88", help="让它把金额改成多少(改不改都带同样的生成指纹)")
     ap.add_argument("--save-crops", type=Path, default=None, help="同时存配对裁块(ai/ 与 nature/)")
-    ap.add_argument("--crop-min", type=int, default=128)
+    ap.add_argument("--crop-min", type=int, default=0,
+                    help="0=紧贴改动区裁(训练用, 裁块内全是AI像素); >0=外扩到该最小边长(会混进真像素)")
     ap.add_argument("--base", default="https://www.dmxapi.cn")
     ap.add_argument("--size", default="2K")
     ap.add_argument("--timeout", type=int, default=240)
@@ -182,11 +183,14 @@ def main() -> None:
             mw.writerow([fn, args.model, sp.name]); mf.flush()
 
             if args.save_crops:               # 配对裁块: 同位置 改过 vs 原始
-                cy, cx = (sy0 + sy1) // 2, (sx0 + sx1) // 2
-                half = max(args.crop_min, sx1 - sx0, sy1 - sy0) // 2
                 H, W = src.shape[:2]
-                a0, b0 = max(0, cy - half), max(0, cx - half)
-                a1, b1 = min(H, cy + half), min(W, cx + half)
+                if args.crop_min <= 0:        # 紧贴改动区(躲开羽化边)-> 裁块内全是被AI动过的像素
+                    a0, b0, a1, b1 = sy0 + 4, sx0 + 4, sy1 - 4, sx1 - 4
+                else:
+                    cy, cx = (sy0 + sy1) // 2, (sx0 + sx1) // 2
+                    half = max(args.crop_min, sx1 - sx0, sy1 - sy0) // 2
+                    a0, b0 = max(0, cy - half), max(0, cx - half)
+                    a1, b1 = min(H, cy + half), min(W, cx + half)
                 if a1 - a0 >= 32 and b1 - b0 >= 32:
                     Image.fromarray(out[a0:a1, b0:b1]).save(
                         args.save_crops / "ai" / f"crop_seedream_{made:05d}.jpg", quality=95)
