@@ -124,7 +124,9 @@ def main() -> None:
                     help="0=紧贴改动区裁(训练用, 裁块内全是AI像素); >0=外扩到该最小边长(会混进真像素)")
     ap.add_argument("--base", default="https://www.dmxapi.cn")
     ap.add_argument("--size", default="2K")
-    ap.add_argument("--timeout", type=int, default=240)
+    ap.add_argument("--timeout", type=int, default=300)
+    ap.add_argument("--retries", type=int, default=2,
+                    help="超时/网络错时重试几次(风控拒图那种永久性错误不重试, 重试也没用)")
     ap.add_argument("--sleep", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -186,12 +188,22 @@ def main() -> None:
             payload = {"model": args.model, "prompt": prompt,
                        "image": "data:image/jpeg;base64," + base64.b64encode(send_bytes).decode("ascii"),
                        "response_format": "url", "size": args.size, "watermark": False}
-            r = _post(args.base.rstrip("/") + "/v1/images/generations", key, payload, args.timeout)
-            url = (r.get("data") or [{}])[0].get("url")
-            if not url:
-                raise RuntimeError("响应没有图片 url: " + json.dumps(r)[:200])
-            with urllib.request.urlopen(url, timeout=args.timeout) as resp:
-                gen_im = Image.open(io.BytesIO(resp.read())).convert("RGB")
+            gen_im = None
+            for attempt in range(args.retries + 1):     # 超时/网络抖动重试; 风控拒图不重试(永久错)
+                try:
+                    r = _post(args.base.rstrip("/") + "/v1/images/generations", key, payload, args.timeout)
+                    url = (r.get("data") or [{}])[0].get("url")
+                    if not url:
+                        raise RuntimeError("响应没有图片 url: " + json.dumps(r)[:200])
+                    with urllib.request.urlopen(url, timeout=args.timeout) as resp:
+                        gen_im = Image.open(io.BytesIO(resp.read())).convert("RGB")
+                    break
+                except Exception as e:  # noqa: BLE001
+                    if "sensitive" in str(e) or attempt >= args.retries:
+                        raise
+                    time.sleep(2.0 * (attempt + 1))
+            if gen_im is None:
+                raise RuntimeError("重试后仍失败")
 
             if args.send == "crop":
                 # 重绘结果缩回小块原尺寸, 再从中取出"金额框"那部分贴回原图(位置天然对齐)
