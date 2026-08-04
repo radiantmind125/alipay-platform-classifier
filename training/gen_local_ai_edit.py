@@ -107,6 +107,10 @@ def main() -> None:
     ap.add_argument("--mode", default="local", choices=["local", "full"],
                     help="local=只重绘金额块(主测); full=整图往返(对照组)")
     ap.add_argument("--pad", type=int, default=6, help="金额框外扩像素(让重绘块自然点)")
+    ap.add_argument("--save-crops", type=Path, default=None,
+                    help="额外产出**配对训练块**: <dir>/ai=改动区裁块, <dir>/nature=同一张原图同一位置的裁块。"
+                         "内容完全相同、只差有没有被 AI 动过 -> 训练局部篡改检测最干净的正负样本(标注免费)")
+    ap.add_argument("--crop-min", type=int, default=128, help="配对裁块的最小边长(不足则以框为中心外扩)")
     ap.add_argument("--model", default="stabilityai/sd-vae-ft-mse")
     ap.add_argument("--dtype", default="fp16", choices=["fp16", "bf16", "fp32"])
     ap.add_argument("--device", default="cuda")
@@ -121,6 +125,9 @@ def main() -> None:
     dt = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[args.dtype]
 
     args.out.mkdir(parents=True, exist_ok=True)
+    if args.save_crops:
+        (args.save_crops / "ai").mkdir(parents=True, exist_ok=True)
+        (args.save_crops / "nature").mkdir(parents=True, exist_ok=True)
     srcs = _collect(args.src_root, args.n * 3, args.seed)   # 多取些, 定位不到金额的会跳过
     if not srcs:
         print("没采到真图源"); return
@@ -150,6 +157,16 @@ def main() -> None:
                     continue
                 patch = _vae_roundtrip(vae, arr[y0:y1, x0:x1], args.device, dt)
                 out = _feather_paste(arr, patch, (x0, y0, x1, y1))
+                if args.save_crops:      # 配对裁块: 同一位置 改过的 vs 原始的, 内容一致只差 AI 动没动过
+                    cy, cx = (y0 + y1) // 2, (x0 + x1) // 2
+                    half = max(args.crop_min, x1 - x0, y1 - y0) // 2
+                    a0, b0 = max(0, cy - half), max(0, cx - half)
+                    a1, b1 = min(h, cy + half), min(w, cx + half)
+                    if a1 - a0 >= 32 and b1 - b0 >= 32:
+                        Image.fromarray(out[a0:a1, b0:b1]).save(
+                            args.save_crops / "ai" / f"crop_{made:06d}.jpg", quality=95)
+                        Image.fromarray(arr[a0:a1, b0:b1]).save(
+                            args.save_crops / "nature" / f"crop_{made:06d}.jpg", quality=95)
             Image.fromarray(out).save(args.out / f"ailocal_{args.mode}_{made:06d}.jpg", quality=95)
             made += 1
             if made % 50 == 0:
@@ -160,6 +177,8 @@ def main() -> None:
             skipped += 1
 
     print(f"造了 {made} 张({args.mode}) -> {args.out}; 跳过 {skipped} 张(多为定位不到金额)")
+    if args.save_crops:
+        print(f"配对训练块 -> {args.save_crops}\\ai 与 {args.save_crops}\\nature(同位置 同内容 只差有没有被AI动过)")
     if args.mode == "local":
         print("提示: 只改了金额那一小块, 其余像素原封不动 —— 这就是 SSP 最可能漏的那类。")
         print("对照组: 同命令加 --mode full --out 另一个目录, 比较召回差 = 改动面积的影响。")
