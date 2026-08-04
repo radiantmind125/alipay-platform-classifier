@@ -87,6 +87,10 @@ def main() -> None:
     ap.add_argument("--cols", type=int, default=3)
     ap.add_argument("--rows", type=int, default=6, help="截图是竖长条, 行多列少更合理")
     ap.add_argument("--overlap", type=float, default=0.15)
+    ap.add_argument("--roi-top", type=float, default=1.0,
+                    help="只看图像上部的这个比例(如 0.6 = 上面五分之三)。"
+                         "下半部分是广告条/优惠券缩略图/图标, 纹理最杂 —— 真图在那儿最容易被误判成AI(误杀主要来源), "
+                         "而金额等关键字段都在上部。经理给 OCR 定的'裁掉下面减少误差'同一个道理。")
     ap.add_argument("--patch_size", type=int, default=32)
     ap.add_argument("--agg", default="max", choices=["max", "top3", "mean"])
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 张(真图量大时先抽样看趋势; 0=全跑)")
@@ -135,13 +139,15 @@ def main() -> None:
     if not imgs:
         print("没找到图片"); return
     out_dir = Path(args.output_dir); out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"图片 {len(imgs)} 张 | 切块 {args.cols}x{args.rows} 重叠 {args.overlap} | 聚合 {args.agg} | 设备 {device}",
-          flush=True)
+    print(f"图片 {len(imgs)} 张 | 切块 {args.cols}x{args.rows} 重叠 {args.overlap} | 只看上部 {args.roi_top} | "
+          f"聚合 {args.agg} | 设备 {device}", flush=True)
 
     rows_out = []
     for i, ip in enumerate(imgs, 1):
         try:
             arr = np.asarray(Image.open(ip).convert("RGB"))
+            if 0 < args.roi_top < 1.0:            # 只保留上部, 甩掉下面广告/券区(误杀主要来源)
+                arr = arr[:max(32, int(arr.shape[0] * args.roi_top))]
             h, w = arr.shape[:2]
             patches = [_richest_patch(arr[y0:y1, x0:x1], args.patch_size)
                        for (x0, y0, x1, y1) in _tiles(w, h, args.cols, args.rows, args.overlap)]
