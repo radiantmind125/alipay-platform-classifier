@@ -10,8 +10,10 @@ r"""用 DMXAPI(聚合接口)批量造国内大模型的假收据 —— 豆包 S
 - 断点续跑: 已存在的输出文件跳过, 中断了重跑不会重复花钱。
 - 每张都写 manifest.csv(记模型/提示词), 便于后面按生成器切分训练/测试。
 
-用法(先设 key):
-  set DMX_KEY=sk-xxxx
+用法(先设 key; **PowerShell 和 cmd 语法不一样, 别用错**):
+  PowerShell:  $env:DMX_KEY = "sk-xxxx"      (提示符 PS D:\...> 用这个)
+  cmd:         set DMX_KEY=sk-xxxx
+  设完在同一个窗口跑下面的命令。
   python training/gen_api_fakes.py --src-root D:\download\TempFakeImages --out D:\api_fakes\seedream45 --n 50 --model doubao-seedream-4-5-251128
   python training/gen_api_fakes.py --src-root D:\download\TempFakeImages --out D:\api_fakes\qwenedit --n 50 --model qwen-image-edit
   # 局部改金额(测结构盲区, 用真模型而不是我本地模拟):
@@ -104,7 +106,12 @@ def main() -> None:
 
     key = os.environ.get("DMX_KEY", "").strip()
     if not key:
-        raise SystemExit("请先设置环境变量 DMX_KEY(不要把 key 写进代码或仓库):  set DMX_KEY=sk-xxxx")
+        raise SystemExit(
+            "没读到环境变量 DMX_KEY(key 不写进代码/仓库, 只放环境变量)。按你的终端选一种:\n"
+            '  PowerShell(提示符是 PS D:\\...> ):  $env:DMX_KEY = "sk-xxxx"\n'
+            "  cmd(提示符是 D:\\> ):              set DMX_KEY=sk-xxxx\n"
+            "注意: PowerShell 里 `set DMX_KEY=...` 是无效的(那是 cmd 语法, 在 PS 里只建了个普通变量)。\n"
+            "设完在**同一个窗口**里跑本脚本; 换窗口要重设。可用 `echo $env:DMX_KEY` 确认。")
     prompt = args.prompt or _PROMPTS[args.prompt_mode]
 
     args.out.mkdir(parents=True, exist_ok=True)
