@@ -87,6 +87,12 @@ def main() -> None:
     ap.add_argument("--cols", type=int, default=3)
     ap.add_argument("--rows", type=int, default=6, help="截图是竖长条, 行多列少更合理")
     ap.add_argument("--overlap", type=float, default=0.15)
+    ap.add_argument("--roi-amount", action="store_true",
+                    help="**只看金额那一块**(用 locate_amount 定位, 外扩后切少量小块)。"
+                         "篡改就发生在这里, 只看这儿 = 信号最强 + 误杀面最小。定位失败则退回 --roi-top。"
+                         "注: 金额定位是按白底账单详情调的, 蓝图页可能定位不到。")
+    ap.add_argument("--amount-pad", type=float, default=1.0,
+                    help="金额框上下左右各外扩几倍框高(1.0=各扩一个框高, 给点上下文)")
     ap.add_argument("--roi-top", type=float, default=1.0,
                     help="只看图像上部的这个比例(如 0.6 = 上面五分之三)。"
                          "下半部分是广告条/优惠券缩略图/图标, 纹理最杂 —— 真图在那儿最容易被误判成AI(误杀主要来源), "
@@ -99,6 +105,13 @@ def main() -> None:
     ap.add_argument("--ai_label", type=int, default=0, choices=[0, 1])
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
+
+    _locate = None
+    if args.roi_amount:                 # 复用 engine_b_tamper 的金额定位(同目录, 直接 import)
+        try:
+            from engine_b_tamper import locate_amount as _locate
+        except Exception as exc:  # noqa: BLE001
+            print(f"载入金额定位失败({exc}), --roi-amount 将退回 --roi-top", flush=True)
 
     sys.path.insert(0, str(Path(args.ssp_repo)))
     import torch
@@ -143,14 +156,26 @@ def main() -> None:
           f"聚合 {args.agg} | 设备 {device}", flush=True)
 
     rows_out = []
+    n_located = 0
     for i, ip in enumerate(imgs, 1):
         try:
             arr = np.asarray(Image.open(ip).convert("RGB"))
-            if 0 < args.roi_top < 1.0:            # 只保留上部, 甩掉下面广告/券区(误杀主要来源)
+            cols, rows = args.cols, args.rows
+            located = False
+            if args.roi_amount:                   # 只看金额那块: 篡改就在这儿, 信号最强误杀面最小
+                loc = _locate(arr) if _locate else None
+                if loc:
+                    bx0, by0, bx1, by1 = loc[0], loc[1], loc[2], loc[3]
+                    pad = int(max(8, (by1 - by0) * args.amount_pad))
+                    H, W = arr.shape[:2]
+                    arr = arr[max(0, by0 - pad):min(H, by1 + pad), max(0, bx0 - pad):min(W, bx1 + pad)]
+                    cols, rows = 2, 2             # 区域已经很小, 切少量块就够
+                    located = True
+            if not located and 0 < args.roi_top < 1.0:   # 退回: 只保留上部(甩掉下面广告/券区=误杀主源)
                 arr = arr[:max(32, int(arr.shape[0] * args.roi_top))]
             h, w = arr.shape[:2]
             patches = [_richest_patch(arr[y0:y1, x0:x1], args.patch_size)
-                       for (x0, y0, x1, y1) in _tiles(w, h, args.cols, args.rows, args.overlap)]
+                       for (x0, y0, x1, y1) in _tiles(w, h, cols, rows, args.overlap)]
             batch = torch.from_numpy(np.stack(patches)).permute(0, 3, 1, 2).float().div_(255.0).to(device)
             batch = (batch - MEAN) / STD
             with torch.no_grad():                      # 所有分块一次前向
@@ -165,8 +190,9 @@ def main() -> None:
                              "final_ai_score": round(final, 6),
                              "tile_max": round(s_max, 6), "tile_top3": round(s_top3, 6),
                              "tile_mean": round(s_mean, 6), "n_tiles": len(ts),
-                             "decision": dec,
+                             "decision": dec, "roi_amount_located": int(located),
                              "scores_json": json.dumps({"tiled": round(final, 6)})})
+            n_located += int(located)
             if i % 200 == 0:
                 print(f"  已算 {i}/{len(imgs)}...", flush=True)
         except Exception as exc:  # noqa: BLE001
@@ -175,9 +201,13 @@ def main() -> None:
     sp = out_dir / "summary.csv"
     with open(sp, "w", newline="", encoding="utf-8-sig") as f:
         wcsv = csv.DictWriter(f, fieldnames=["image", "image_name", "final_ai_score", "tile_max",
-                                             "tile_top3", "tile_mean", "n_tiles", "decision", "scores_json"])
+                                             "tile_top3", "tile_mean", "n_tiles", "decision",
+                                             "roi_amount_located", "scores_json"])
         wcsv.writeheader(); wcsv.writerows(rows_out)
     print(f"完成 {len(rows_out)} 张 -> {sp}")
+    if args.roi_amount:
+        print(f"其中 {n_located}/{len(rows_out)} 张成功定位到金额区(其余按 --roi-top 处理)。"
+              f"定位率低说明这批不是白底账单详情页。")
     print("下一步: python training/eval_summary.py <上面的 summary.csv> --kind fake|genuine")
     print("提示: CSV 存了 tile_max/tile_top3/tile_mean, 换聚合方式不用重跑。")
 
