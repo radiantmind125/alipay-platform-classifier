@@ -22,9 +22,11 @@ from pathlib import Path
 _COLS = ["tile_max", "tile_top3", "tile_mean"]
 
 
-def _read(p: Path, col: str) -> list[float]:
+def _read(p: Path, col: str, require_located: bool = False) -> list[float]:
     out = []
     for r in csv.DictReader(open(p, encoding="utf-8-sig")):
+        if require_located and (r.get("roi_amount_located") or "1").strip() != "1":
+            continue          # 金额没定位到 = 打分打的不是金额区, 这种情况干脆不出信号
         v = (r.get(col) or "").strip()
         if v:
             try:
@@ -68,14 +70,19 @@ def main() -> None:
                     help="误杀预算(比例)")
     ap.add_argument("--show-top", type=int, default=10,
                     help="列出分数最高的 N 张真图(它们决定严阈值下的召回上限; 看是不是金额定位失败那批)")
+    ap.add_argument("--require-located", action="store_true",
+                    help="只统计**金额定位成功**的图(定位失败时打的不是金额区, 上线就该不出这个信号)。"
+                         "用来量化'定位失败不出信号'这条规则能把尾巴清多干净")
     args = ap.parse_args()
+    if args.require_located:
+        print("(只统计金额定位成功的图: 定位失败的不出信号)")
 
     print("聚合方式    误杀预算    阈值      假图召回(该阈值下)")
     print("-" * 58)
     best = None
     for col in _COLS:
-        f = _read(args.fake, col)
-        g = sorted(_read(args.genuine, col))
+        f = _read(args.fake, col, args.require_located)
+        g = sorted(_read(args.genuine, col, args.require_located))
         if not f or not g:
             print(f"{col:10s} 读不到数据(检查 CSV 是否有这列)")
             continue
@@ -88,7 +95,9 @@ def main() -> None:
                 best = (col, rec, thr)
         print("-" * 58)
 
-    print(f"\n真图 {len(sorted(_read(args.genuine, 'tile_max')))} 张 | 假图 {len(_read(args.fake, 'tile_max'))} 张")
+    print(f"\n真图 {len(_read(args.genuine, 'tile_max', args.require_located))} 张 | "
+          f"假图 {len(_read(args.fake, 'tile_max', args.require_located))} 张"
+          f"{'(仅金额定位成功)' if args.require_located else ''}")
     if best:
         col, rec, thr = best
         print(f"\n误杀 0.1% 预算下最好的是 {col}, 阈值 {thr:.4f}, 局部改动召回 {rec*100:.1f}%")
