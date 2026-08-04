@@ -34,6 +34,20 @@ def _read(p: Path, col: str) -> list[float]:
     return out
 
 
+def _top_rows(p: Path, col: str, n: int):
+    """分数最高的几张真图 —— 它们决定了严阈值下的召回上限, 看看是不是某种特定情况(如金额定位失败)。"""
+    rows = []
+    for r in csv.DictReader(open(p, encoding="utf-8-sig")):
+        v = (r.get(col) or "").strip()
+        if v:
+            try:
+                rows.append((float(v), r.get("roi_amount_located", "?"), r.get("image_name", "")))
+            except ValueError:
+                pass
+    rows.sort(reverse=True)
+    return rows[:n]
+
+
 def _quantile(sorted_vals: list[float], q: float) -> float:
     """取分位数(q=0.999 -> 99.9% 的真图都低于它 -> 误杀约 0.1%)。"""
     if not sorted_vals:
@@ -52,6 +66,8 @@ def main() -> None:
     ap.add_argument("--genuine", type=Path, required=True, help="真图的 tiled summary.csv")
     ap.add_argument("--budgets", type=float, nargs="+", default=[0.001, 0.005, 0.01, 0.02],
                     help="误杀预算(比例)")
+    ap.add_argument("--show-top", type=int, default=10,
+                    help="列出分数最高的 N 张真图(它们决定严阈值下的召回上限; 看是不是金额定位失败那批)")
     args = ap.parse_args()
 
     print("聚合方式    误杀预算    阈值      假图召回(该阈值下)")
@@ -84,6 +100,20 @@ def main() -> None:
             print("=> 可用! 按这个聚合和阈值配置上线。")
     print("\n注意: 真图样本量决定了能可靠估计的最小误杀率(500 张最多估到 0.2% 量级)。")
     print("若结论卡在边界, 需要用更多真图重跑(去掉 --limit)。")
+
+    if args.show_top > 0:
+        top = _top_rows(args.genuine, "tile_max", args.show_top)
+        if top:
+            print(f"\n分数最高的 {len(top)} 张真图(严阈值下就是被它们卡住的):")
+            print("  分数     金额定位成功  文件名")
+            for s, loc, nm in top:
+                print(f"  {s:.4f}   {loc:^10s}   {nm}")
+            locs = [l for _, l, _ in top]
+            if locs.count("0") > locs.count("1"):
+                print("  => 高分真图多是**金额定位失败**那批(退回了整片上部打分)。")
+                print("     对策: 定位失败的图不出这个信号(或单独走更严阈值), 尾巴能干净很多。")
+            elif locs.count("1") > locs.count("0"):
+                print("  => 高分真图大多定位成功 —— 说明是金额区本身就容易被误判, 需要专训的局部检测器。")
 
 
 if __name__ == "__main__":
