@@ -38,10 +38,14 @@ from PIL import Image
 _EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 _OPT = (33434, 33437, 34855, 37386)   # 光学拍摄参数; 有=相机照片, 不当真图源
 
-# 提示词: redraw=整张重画(测/训 AI 生成); local-amount=只改金额(测局部编辑盲区)
+# 提示词: redraw=整张重画; local-amount=让模型改金额
+# 实测重要发现: Seedream 收到 local-amount 也是**整张重新生成**(只是金额变了) —— 两种模式出图的
+# 幻觉细节完全一致, 说明它做不了"只动金额那几个像素"的外科式修改。
+# 含义: 骗子用消费级 AI App"把金额改掉"拿到的其实是整张重绘图 -> 正是 v6 已经 0 漏检的那一类。
+# 真正的"只改一小块"(99%真像素)要用带掩码的局部重绘 -> 见 gen_local_ai_edit.py(本地模拟那条路)。
 _PROMPTS = {
     "redraw": "照着这张图 重新画一张一模一样的图片 所有文字 数字和排版都保持不变",
-    "local-amount": "只把这张图里的金额数字改成 8888.88 其他所有内容 排版 颜色 字体都完全不要动",
+    "local-amount": "把这张图里的金额数字改成 8888.88 其他所有内容 排版 颜色 字体都完全不要动",
 }
 
 
@@ -78,8 +82,15 @@ def _post(url: str, key: str, payload: dict, timeout: int) -> dict:
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST", headers={
         "Content-Type": "application/json", "Authorization": "Bearer " + key})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:      # 把接口真正的错误内容带出来, 否则只看到 400 没法排查
+        try:
+            detail = e.read().decode("utf-8", "replace")[:400]
+        except Exception:
+            detail = ""
+        raise RuntimeError(f"HTTP {e.code}: {detail}") from None
 
 
 def main() -> None:
@@ -92,7 +103,8 @@ def main() -> None:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--n", type=int, default=50)
     ap.add_argument("--model", default="doubao-seedream-4-5-251128",
-                    help="如 doubao-seedream-5-0-pro-260628 / doubao-seedream-4-0-250828 / qwen-image-edit")
+                    help="可用(实测): doubao-seedream-5-0-pro-260628 / 4-5-251128 / 4-0-250828 / 5.0-lite。"
+                         "注意 qwen-image-edit 在 DMXAPI 这个端点不通(报 image content items), 别用")
     ap.add_argument("--prompt-mode", default="redraw", choices=list(_PROMPTS),
                     help="redraw=整张重画; local-amount=只改金额(测局部编辑盲区)")
     ap.add_argument("--prompt", default="", help="自定义提示词(盖过 --prompt-mode)")
