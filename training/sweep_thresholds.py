@@ -36,10 +36,12 @@ def _read(p: Path, col: str, require_located: bool = False) -> list[float]:
     return out
 
 
-def _top_rows(p: Path, col: str, n: int):
+def _top_rows(p: Path, col: str, n: int, require_located: bool = False):
     """分数最高的几张真图 —— 它们决定了严阈值下的召回上限, 看看是不是某种特定情况(如金额定位失败)。"""
     rows = []
     for r in csv.DictReader(open(p, encoding="utf-8-sig")):
+        if require_located and (r.get("roi_amount_located") or "1").strip() != "1":
+            continue          # 与统计口径保持一致, 否则列表里还出现被过滤掉的图会看晕
         v = (r.get(col) or "").strip()
         if v:
             try:
@@ -111,7 +113,7 @@ def main() -> None:
     print("若结论卡在边界, 需要用更多真图重跑(去掉 --limit)。")
 
     if args.show_top > 0:
-        top = _top_rows(args.genuine, "tile_max", args.show_top)
+        top = _top_rows(args.genuine, "tile_max", args.show_top, args.require_located)
         if top:
             print(f"\n分数最高的 {len(top)} 张真图(严阈值下就是被它们卡住的):")
             print("  分数     金额定位成功  文件名")
