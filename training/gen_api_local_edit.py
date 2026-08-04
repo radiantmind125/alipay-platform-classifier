@@ -113,6 +113,12 @@ def main() -> None:
                          "而我们只需要它**重新生成**金额那块以带上 Seedream 指纹 —— 改不改数字指纹完全一样。")
     ap.add_argument("--amount", default="8888.88", help="--prompt-mode amount 时把金额改成多少")
     ap.add_argument("--prompt", default="", help="完全自定义提示词(盖过 --prompt-mode)")
+    ap.add_argument("--send", default="crop", choices=["crop", "full"],
+                    help="crop(默认)=**只把金额那一小块发出去**重绘 —— 小块里没有姓名/账号/订单号, "
+                         "不触发风控('input image may contain sensitive information'), 且免去版面对齐; "
+                         "full=发整张(会被风控拒 且要重新定位对齐)")
+    ap.add_argument("--send-pad", type=float, default=0.5,
+                    help="crop 模式下发出去的小块比金额框上下左右各多留几倍框高(给模型一点上下文)")
     ap.add_argument("--save-crops", type=Path, default=None, help="同时存配对裁块(ai/ 与 nature/)")
     ap.add_argument("--crop-min", type=int, default=0,
                     help="0=紧贴改动区裁(训练用, 裁块内全是AI像素); >0=外扩到该最小边长(会混进真像素)")
@@ -163,8 +169,22 @@ def main() -> None:
                 skipped += 1
                 continue                      # 原图定位不到金额, 没法做局部替换
 
+            sx0, sy0, sx1, sy1 = loc_s[0], loc_s[1], loc_s[2], loc_s[3]
+            H, W = src.shape[:2]
+
+            if args.send == "crop":
+                # 只发金额那一小块: 里面没有姓名/账号/订单号 -> 不触发风控; 而且不用再做版面对齐
+                pad = int(max(8, (sy1 - sy0) * args.send_pad))
+                cx0, cy0 = max(0, sx0 - pad), max(0, sy0 - pad)
+                cx1, cy1 = min(W, sx1 + pad), min(H, sy1 + pad)
+                buf = io.BytesIO()
+                Image.fromarray(src[cy0:cy1, cx0:cx1]).save(buf, "JPEG", quality=95)
+                send_bytes = buf.getvalue()
+            else:
+                send_bytes = sp.read_bytes()
+
             payload = {"model": args.model, "prompt": prompt,
-                       "image": "data:image/jpeg;base64," + base64.b64encode(sp.read_bytes()).decode("ascii"),
+                       "image": "data:image/jpeg;base64," + base64.b64encode(send_bytes).decode("ascii"),
                        "response_format": "url", "size": args.size, "watermark": False}
             r = _post(args.base.rstrip("/") + "/v1/images/generations", key, payload, args.timeout)
             url = (r.get("data") or [{}])[0].get("url")
@@ -173,24 +193,27 @@ def main() -> None:
             with urllib.request.urlopen(url, timeout=args.timeout) as resp:
                 gen_im = Image.open(io.BytesIO(resp.read())).convert("RGB")
 
-            # 服务是按自己的分辨率整张重绘的 -> 先缩回原图尺寸, 才能按位置对齐
-            gen_im = gen_im.resize(src_im.size, Image.LANCZOS)
-            gen = np.asarray(gen_im)
-            loc_g = locate_amount(gen)
-            if not loc_g:
-                skipped += 1
-                continue                      # 重绘图里定位不到金额(版面漂了), 这张放弃
+            if args.send == "crop":
+                # 重绘结果缩回小块原尺寸, 再从中取出"金额框"那部分贴回原图(位置天然对齐)
+                gen = np.asarray(gen_im.resize((cx1 - cx0, cy1 - cy0), Image.LANCZOS))
+                ox, oy = sx0 - cx0, sy0 - cy0
+                piece = gen[oy:oy + (sy1 - sy0), ox:ox + (sx1 - sx0)]
+            else:
+                # 整图模式: 服务按自己分辨率重绘 -> 缩回原尺寸再重新定位金额才能对齐
+                gen = np.asarray(gen_im.resize(src_im.size, Image.LANCZOS))
+                loc_g = locate_amount(gen)
+                if not loc_g:
+                    skipped += 1
+                    continue                  # 重绘图里定位不到金额(版面漂了), 这张放弃
+                gx0, gy0, gx1, gy1 = loc_g[0], loc_g[1], loc_g[2], loc_g[3]
+                piece = cv2.resize(gen[gy0:gy1, gx0:gx1], (sx1 - sx0, sy1 - sy0), interpolation=cv2.INTER_LANCZOS4)
 
-            sx0, sy0, sx1, sy1 = loc_s[0], loc_s[1], loc_s[2], loc_s[3]
-            gx0, gy0, gx1, gy1 = loc_g[0], loc_g[1], loc_g[2], loc_g[3]
-            piece = cv2.resize(gen[gy0:gy1, gx0:gx1], (sx1 - sx0, sy1 - sy0), interpolation=cv2.INTER_LANCZOS4)
             out = _feather_paste(src, piece, (sx0, sy0, sx1, sy1))   # 只把金额那块换成 Seedream 生成的
 
             Image.fromarray(out).save(args.out / fn, quality=95)
             mw.writerow([fn, args.model, sp.name]); mf.flush()
 
             if args.save_crops:               # 配对裁块: 同位置 改过 vs 原始
-                H, W = src.shape[:2]
                 if args.crop_min <= 0:        # 紧贴改动区(躲开羽化边)-> 裁块内全是被AI动过的像素
                     a0, b0, a1, b1 = sy0 + 4, sx0 + 4, sy1 - 4, sx1 - 4
                 else:
