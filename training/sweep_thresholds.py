@@ -72,12 +72,31 @@ def main() -> None:
                     help="误杀预算(比例)")
     ap.add_argument("--show-top", type=int, default=10,
                     help="列出分数最高的 N 张真图(它们决定严阈值下的召回上限; 看是不是金额定位失败那批)")
+    ap.add_argument("--at", type=float, default=None,
+                    help="**按固定阈值**评估(不重新标定)。上线阈值是定死的, 想知道'换一批图进来会怎样'"
+                         "(比如都被压缩过)就用这个 —— 重新标定会掩盖真实退化")
     ap.add_argument("--require-located", action="store_true",
                     help="只统计**金额定位成功**的图(定位失败时打的不是金额区, 上线就该不出这个信号)。"
                          "用来量化'定位失败不出信号'这条规则能把尾巴清多干净")
     args = ap.parse_args()
     if args.require_located:
         print("(只统计金额定位成功的图: 定位失败的不出信号)")
+
+    if args.at is not None:          # 固定阈值模式: 上线阈值不变, 看换一批图进来会怎样
+        print(f"固定阈值 {args.at} (不重新标定 —— 这就是上线跑的那个数)")
+        print("聚合方式    假图召回    真图误杀    (样本 假/真)")
+        print("-" * 58)
+        for col in _COLS:
+            f = _read(args.fake, col, args.require_located)
+            g = _read(args.genuine, col, args.require_located)
+            if not f or not g:
+                print(f"{col:10s} 读不到数据")
+                continue
+            rec = sum(1 for x in f if x >= args.at) / len(f)
+            fp = sum(1 for x in g if x >= args.at) / len(g)
+            print(f"{col:10s}  {rec * 100:6.1f}%    {fp * 100:6.2f}%     ({len(f)}/{len(g)})")
+        print("-" * 58)
+        return
 
     print("聚合方式    误杀预算    阈值      假图召回(该阈值下)")
     print("-" * 58)
