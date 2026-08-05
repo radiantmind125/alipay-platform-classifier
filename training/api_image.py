@@ -46,6 +46,27 @@ def provider_of(model: str) -> str:
     return "seedream"
 
 
+def _ensure_min_side(image_bytes: bytes, min_side: int = 512) -> bytes:
+    """短边不足就等比放大再发。
+
+    实测万相对小图报 `InvalidParameter: Error validating image`:
+    400x120 / 480x160 / 600x200 都被拒, 800x256 / 1024x320 通过 -> 短边下限在 200~256 之间。
+    我们发的是"金额那一小条", 天然很小, 所以必须先放大。
+    放大无害: 调用方拿到出图后本来就要缩回原尺寸再贴回。
+    """
+    import io
+    from PIL import Image
+    im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    w, h = im.size
+    if min(w, h) >= min_side:
+        return image_bytes
+    r = min_side / max(1, min(w, h))
+    im = im.resize((max(min_side, int(w * r + 0.5)), max(min_side, int(h * r + 0.5))), Image.LANCZOS)
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=95)
+    return buf.getvalue()
+
+
 def _post(url: str, key: str, payload: dict, timeout: int) -> dict:
     req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST",
                                  headers={"Content-Type": "application/json",
@@ -66,6 +87,8 @@ def generate_image(model: str, prompt: str, image_bytes: bytes, key: str,
                    watermark: bool = False) -> bytes:
     """把 image_bytes 交给指定模型按 prompt 重绘, 返回出图的原始字节。"""
     prov = provider_of(model)
+    if prov == "wan":                      # 万相对小图会 InvalidParameter, 先把短边补到 512
+        image_bytes = _ensure_min_side(image_bytes, 512)
     data_uri = "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode("ascii")
 
     if prov == "wan":
