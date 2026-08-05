@@ -109,3 +109,49 @@ python training\eval_summary.py D:\probe\tamper_classic_ld\summary.csv --kind fa
 
 ## 发我什么
 1 的一对样图 + 2 的打印 + **4 的 sweep 输出(重点)** + 5 的召回。我据此定这条线成不成、要不要换方法、以及怎么和 v6 一起配置上线。
+
+---
+
+# 附: v2 —— 把蓝图也训进来(白图版已验证成功后做)
+
+**为什么**: 只训白图的模型**迁移不到蓝图**(实测: 白图 92.2% vs 蓝图只有 22.0% @0.1%误杀)。
+白字蓝底和深字白底长得太不一样, 对模型是分布外输入。
+**收益**: 开了蓝图定位器后, 真图能出信号的比例从 **952/2700(35%) 升到 2253/2700(83%)** —— 局部覆盖翻一倍还多。
+
+## v2-1 造蓝图配对裁块(3 个生成器, 累积到同一个 crops 目录)
+**必须用 `--tag` 区分**, 否则文件名会和白图那批撞车被覆盖(白图用的也是同样的模型名):
+```
+python training\gen_local_ai_edit.py --src-root D:\download\TempFakeImages --out D:\probe\le_blue_train --save-crops D:\localcrops --n 1500 --mode local --page-type blue --model stabilityai/sd-vae-ft-mse --tag blue-mse --seed 101 --device cuda
+python training\gen_local_ai_edit.py --src-root D:\download\TempFakeImages --out D:\probe\le_blue_train --save-crops D:\localcrops --n 1500 --mode local --page-type blue --model madebyollin/sdxl-vae-fp16-fix --tag blue-sdxl --seed 111 --device cuda
+python training\gen_local_ai_edit.py --src-root D:\download\TempFakeImages --out D:\probe\le_blue_train --save-crops D:\localcrops --n 1500 --mode local --page-type blue --model ostris/vae-kl-f8-d16 --tag blue-ostris --dtype bf16 --seed 121 --device cuda
+```
+- 源用 `D:\download\TempFakeImages`(蓝图在这个池子里多)。
+- **校验**(应看到 6 组: 3 个白图 tag + 3 个 blue- 开头的):
+```
+Get-ChildItem D:\localcrops\ai | Group-Object {($_.BaseName -split '_')[1]} | Select-Object Name,Count
+```
+- **质检**: 开一对 `crop_blue-mse_*`(ai 和 nature 同名), 应该是蓝底上的白色金额, 两张几乎一样。
+
+## v2-2 重建数据集 + 重训(白图蓝图一起训一个模型)
+```
+python training\build_crop_dataset.py --crops D:\localcrops --out D:\ssp_local2 --val-frac 0.15
+cd D:\SSP-AI-Generated-Image-Detection-main
+python train_val.py --image_root D:\ssp_local2 --gpu_id 0 --save_path .\snapshot\localdet2\ --jpg_prob 0.5 --blur_prob 0.1
+```
+(一个模型同时管两种页型, 部署简单; 前 5 轮同样看学没学动: loss 掉到 0.6 以下 + Accuracy 往上走。)
+
+## v2-3 验证(白图不能退步, 蓝图要大幅提升)
+```
+cd D:\alipay-platform-classifier
+$ld2 = "D:\SSP-AI-Generated-Image-Detection-main\snapshot\localdet2\Net_epoch_best.pth"
+:: 真图基线(两种页型都出信号)
+python training\predict_tiled.py --ssp-repo D:\SSP --model $ld2 --input D:\ssp_aigen_v5\imagenet_ai_0419_sdv4\val\nature --output_dir D:\probe\valnat_ld2 --roi-amount --amount-pad 0 --blue-locator --roi-top 0.6 --device cuda
+:: 白图(对照 92.5%)
+python training\predict_tiled.py --ssp-repo D:\SSP --model $ld2 --input D:\probe\localedit_heldout --output_dir D:\probe\le_white_ld2 --roi-amount --amount-pad 0 --blue-locator --roi-top 0.6 --device cuda
+:: 蓝图(对照 22.0%)
+python training\predict_tiled.py --ssp-repo D:\SSP --model $ld2 --input D:\probe\localedit_blue --output_dir D:\probe\le_blue_ld2 --roi-amount --amount-pad 0 --blue-locator --roi-top 0.6 --device cuda
+python training\sweep_thresholds.py --fake D:\probe\le_white_ld2\summary.csv --genuine D:\probe\valnat_ld2\summary.csv --require-located
+python training\sweep_thresholds.py --fake D:\probe\le_blue_ld2\summary.csv --genuine D:\probe\valnat_ld2\summary.csv --require-located
+```
+**判据**: 白图不明显退步(≥85%) 且 蓝图大幅提升(目标 ≥70%)→ 采用 localdet2, 覆盖从 35% 升到 83%。
+若蓝图上去了但白图掉了 → 说明一个模型吃不下两种页型, 那就**分开训两个**(推理时按页型分派, 代码已支持)。
