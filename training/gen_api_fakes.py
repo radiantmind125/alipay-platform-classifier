@@ -35,6 +35,8 @@ from pathlib import Path
 
 from PIL import Image
 
+from api_image import generate_image
+
 _EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 _OPT = (33434, 33437, 34855, 37386)   # 光学拍摄参数; 有=相机照片, 不当真图源
 
@@ -103,8 +105,9 @@ def main() -> None:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--n", type=int, default=50)
     ap.add_argument("--model", default="doubao-seedream-4-5-251128",
-                    help="可用(实测): doubao-seedream-5-0-pro-260628 / 4-5-251128 / 4-0-250828 / 5.0-lite。"
-                         "注意 qwen-image-edit 在 DMXAPI 这个端点不通(报 image content items), 别用")
+                    help="实测能图生图的: doubao-seedream-5-0-pro-260628 / 4-5-251128 / 4-0-250828 / 5.0-lite(豆包即梦); "
+                         "wan2.7-image / wan2.7-image-pro / wan2.6-image(阿里万相)。"
+                         "qwen-image-edit 在这平台端点不通; 可灵只有视频接口")
     ap.add_argument("--prompt-mode", default="redraw", choices=list(_PROMPTS),
                     help="redraw=整张重画; local-amount=只改金额(测局部编辑盲区)")
     ap.add_argument("--prompt", default="", help="自定义提示词(盖过 --prompt-mode)")
@@ -146,17 +149,10 @@ def main() -> None:
             skipped += 1
             continue
         try:
-            b64 = base64.b64encode(sp.read_bytes()).decode("ascii")
-            payload = {"model": args.model, "prompt": prompt,
-                       "image": "data:image/jpeg;base64," + b64,
-                       "response_format": "url", "size": args.size,
-                       "watermark": bool(args.watermark)}
-            r = _post(args.base.rstrip("/") + "/v1/images/generations", key, payload, args.timeout)
-            url = (r.get("data") or [{}])[0].get("url")
-            if not url:
-                raise RuntimeError("响应里没有图片 url: " + json.dumps(r)[:300])
-            with urllib.request.urlopen(url, timeout=args.timeout) as resp:
-                fp.write_bytes(resp.read())
+            # 各厂商请求格式不同(豆包 images/generations vs 万相 responses), 统一走 api_image
+            fp.write_bytes(generate_image(args.model, prompt, sp.read_bytes(), key,
+                                          base=args.base, size=args.size,
+                                          timeout=args.timeout, watermark=bool(args.watermark)))
             mw.writerow([fn, args.model, args.prompt_mode, sp.name]); mf.flush()
             made += 1
             if made % 10 == 0:

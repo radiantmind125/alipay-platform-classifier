@@ -34,6 +34,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
+from api_image import generate_image
 from engine_b_tamper import locate_amount
 
 _EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -106,7 +107,9 @@ def main() -> None:
     ap.add_argument("--src-root", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--n", type=int, default=100, help="**先用 2 试跑看质量**, 再放量(每张一次接口调用)")
-    ap.add_argument("--model", default="doubao-seedream-4-5-251128")
+    ap.add_argument("--model", default="doubao-seedream-4-5-251128",
+                    help="实测能图生图的: doubao-seedream-*(豆包/即梦) / wan2.7-image / wan2.7-image-pro(阿里万相)。"
+                         "可灵在这平台只有视频接口, 用不了")
     ap.add_argument("--prompt-mode", default="redraw", choices=["redraw", "amount"],
                     help="redraw(默认)=让它照原样重画; amount=让它把金额改成 --amount。"
                          "**默认用 redraw**: 要求改支付凭证金额会触发风控('input image may contain sensitive information')"
@@ -185,18 +188,13 @@ def main() -> None:
             else:
                 send_bytes = sp.read_bytes()
 
-            payload = {"model": args.model, "prompt": prompt,
-                       "image": "data:image/jpeg;base64," + base64.b64encode(send_bytes).decode("ascii"),
-                       "response_format": "url", "size": args.size, "watermark": False}
             gen_im = None
             for attempt in range(args.retries + 1):     # 超时/网络抖动重试; 风控拒图不重试(永久错)
                 try:
-                    r = _post(args.base.rstrip("/") + "/v1/images/generations", key, payload, args.timeout)
-                    url = (r.get("data") or [{}])[0].get("url")
-                    if not url:
-                        raise RuntimeError("响应没有图片 url: " + json.dumps(r)[:200])
-                    with urllib.request.urlopen(url, timeout=args.timeout) as resp:
-                        gen_im = Image.open(io.BytesIO(resp.read())).convert("RGB")
+                    # 各厂商请求格式不同(豆包 images/generations vs 万相 responses), 统一走 api_image
+                    out_bytes = generate_image(args.model, prompt, send_bytes, key,
+                                               base=args.base, size=args.size, timeout=args.timeout)
+                    gen_im = Image.open(io.BytesIO(out_bytes)).convert("RGB")
                     break
                 except Exception as e:  # noqa: BLE001
                     if "sensitive" in str(e) or attempt >= args.retries:
