@@ -32,6 +32,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from engine_b_tamper import locate_amount
+from locate_blue import is_blue_page, locate_amount_blue
 
 _EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 _OPT = (33434, 33437, 34855, 37386)   # 光学拍摄参数; 有=相机照片, 不当真图源
@@ -107,6 +108,8 @@ def main() -> None:
     ap.add_argument("--mode", default="local", choices=["local", "full"],
                     help="local=只重绘金额块(主测); full=整图往返(对照组)")
     ap.add_argument("--pad", type=int, default=6, help="金额框外扩像素(让重绘块自然点)")
+    ap.add_argument("--page-type", default="white", choices=["white", "blue", "auto"],
+                    help="白底账单详情用 white(默认); 蓝底转账页用 blue(白字蓝底的定位器); auto=按页型自动选")
     ap.add_argument("--save-crops", type=Path, default=None,
                     help="额外产出**配对训练块**: <dir>/ai=改动区裁块, <dir>/nature=同一张原图同一位置的裁块。"
                          "内容完全相同、只差有没有被 AI 动过 -> 训练局部篡改检测最干净的正负样本(标注免费)")
@@ -150,7 +153,14 @@ def main() -> None:
             if args.mode == "full":
                 out = _vae_roundtrip(vae, arr, args.device, dt)
             else:
-                loc = locate_amount(arr)
+                blue = is_blue_page(arr)
+                if args.page_type == "blue" or (args.page_type == "auto" and blue):
+                    loc = locate_amount_blue(arr)
+                elif args.page_type == "white" and blue:
+                    skipped += 1          # 指定只做白图, 遇到蓝图跳过(白图定位器在蓝图上会误锁红包卡)
+                    continue
+                else:
+                    loc = locate_amount(arr)
                 if not loc:
                     skipped += 1
                     continue

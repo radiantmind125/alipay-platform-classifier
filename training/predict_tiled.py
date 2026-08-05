@@ -104,6 +104,9 @@ def main() -> None:
                     help="**只看金额那一块**(用 locate_amount 定位, 外扩后切少量小块)。"
                          "篡改就发生在这里, 只看这儿 = 信号最强 + 误杀面最小。定位失败则退回 --roi-top。"
                          "注: 金额定位是按白底账单详情调的, 蓝图页可能定位不到。")
+    ap.add_argument("--blue-locator", action="store_true",
+                    help="蓝图改用**蓝图专用金额定位器**(白字蓝底)来出信号, 而不是跳过。"
+                         "要求模型见过蓝图金额区(白字蓝底和深字白底长得很不一样, 多半要把蓝图裁块加进训练)")
     ap.add_argument("--skip-blue", action="store_true",
                     help="蓝底转账页不出局部信号(默认关, 建议开)。蓝图金额是白字蓝底, locate_amount 看不见, "
                          "会误锁红包促销卡 -> 那是彩色合成图形, 打分偏高 = 系统性误杀源")
@@ -122,12 +125,17 @@ def main() -> None:
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
 
-    _locate = None
+    _locate = _locate_blue = None
     if args.roi_amount:                 # 复用 engine_b_tamper 的金额定位(同目录, 直接 import)
         try:
             from engine_b_tamper import locate_amount as _locate
         except Exception as exc:  # noqa: BLE001
             print(f"载入金额定位失败({exc}), --roi-amount 将退回 --roi-top", flush=True)
+        if args.blue_locator:
+            try:
+                from locate_blue import locate_amount_blue as _locate_blue
+            except Exception as exc:  # noqa: BLE001
+                print(f"载入蓝图定位失败({exc}), 蓝图将按 --skip-blue 处理", flush=True)
 
     sys.path.insert(0, str(Path(args.ssp_repo)))
     import torch
@@ -179,8 +187,13 @@ def main() -> None:
             cols, rows = args.cols, args.rows
             located = False
             if args.roi_amount:                   # 只看金额那块: 篡改就在这儿, 信号最强误杀面最小
-                # 蓝图上 locate_amount 会误锁红包促销卡(白字蓝底的真金额它看不见)-> 直接不出信号
-                loc = None if (args.skip_blue and _is_blue_page(arr)) else (_locate(arr) if _locate else None)
+                if _is_blue_page(arr):
+                    # 蓝图: 有专用定位器就用它; 否则不出信号
+                    # (白图定位器在蓝图上会误锁红包促销卡 -> 系统性误杀, 绝不能用)
+                    loc = _locate_blue(arr) if _locate_blue else (
+                        None if args.skip_blue else (_locate(arr) if _locate else None))
+                else:
+                    loc = _locate(arr) if _locate else None
                 if loc:
                     bx0, by0, bx1, by1 = loc[0], loc[1], loc[2], loc[3]
                     pad = int(max(8, (by1 - by0) * args.amount_pad))

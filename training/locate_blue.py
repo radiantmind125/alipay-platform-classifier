@@ -75,6 +75,18 @@ def locate_amount_blue(rgb: np.ndarray):
     return x0, y0, x1, y1, amt
 
 
+def locate_amount_auto(rgb: np.ndarray):
+    """按页型自动选定位器。返回 (loc, page_type); loc 为 None = 没定位到。
+
+    白图用 engine_b_tamper.locate_amount(浅底深字), 蓝图用本模块的 locate_amount_blue(白字蓝底)。
+    两者返回格式一致, 下游可以不关心页型。
+    """
+    if is_blue_page(rgb):
+        return locate_amount_blue(rgb), "blue"
+    from engine_b_tamper import locate_amount
+    return locate_amount(rgb), "white"
+
+
 def main() -> None:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
