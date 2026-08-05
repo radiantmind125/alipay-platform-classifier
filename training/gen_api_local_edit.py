@@ -122,7 +122,12 @@ def main() -> None:
                          "full=发整张(会被风控拒 且要重新定位对齐)")
     ap.add_argument("--send-pad", type=float, default=0.5,
                     help="crop 模式下发出去的小块比金额框上下左右各多留几倍框高(给模型一点上下文)")
-    ap.add_argument("--save-crops", type=Path, default=None, help="同时存配对裁块(ai/ 与 nature/)")
+    ap.add_argument("--save-crops", type=Path, default=None, help="同时存配对裁块(ai/ 与 nature/), 喂线路B训练")
+    ap.add_argument("--save-full", type=Path, default=None,
+                    help="**同时把整张重绘图也存下来**(仅 --send full 有效), 喂线路A训练。"
+                         "一次接口调用同时产出两条线的训练数据, 省一半 API 时间")
+    ap.add_argument("--tag", default="",
+                    help="裁块/整图文件名里的标记(默认取模型名)。多个模型往同一目录累积时必须区分, 否则互相覆盖")
     ap.add_argument("--crop-min", type=int, default=0,
                     help="0=紧贴改动区裁(训练用, 裁块内全是AI像素); >0=外扩到该最小边长(会混进真像素)")
     ap.add_argument("--base", default="https://www.dmxapi.cn")
@@ -139,9 +144,14 @@ def main() -> None:
         raise SystemExit('没读到 DMX_KEY。PowerShell: $env:DMX_KEY = "sk-xxxx" (同一窗口再跑本脚本)')
 
     args.out.mkdir(parents=True, exist_ok=True)
+    tag = args.tag or args.model.replace(".", "-").split("/")[-1]   # 防多模型累积时文件名撞车
     if args.save_crops:
         (args.save_crops / "ai").mkdir(parents=True, exist_ok=True)
         (args.save_crops / "nature").mkdir(parents=True, exist_ok=True)
+    if args.save_full:
+        if args.send != "full":
+            raise SystemExit("--save-full 需要配 --send full(crop 模式下我们只拿到小块, 没有整张重绘图)")
+        args.save_full.mkdir(parents=True, exist_ok=True)
 
     srcs = _collect(args.src_root, args.n * 6, args.seed)   # 多备货: 部分会被风控拒 + 部分定位失败
     if not srcs:
@@ -162,7 +172,7 @@ def main() -> None:
     for sp in srcs:
         if made >= args.n:
             break
-        fn = f"apilocal_{args.model.replace('.', '-')}_{made:05d}.jpg"
+        fn = f"apilocal_{tag}_{made:05d}.jpg"
         if (args.out / fn).exists():
             made += 1
             continue
@@ -203,6 +213,9 @@ def main() -> None:
             if gen_im is None:
                 raise RuntimeError("重试后仍失败")
 
+            if args.save_full:      # 整张重绘图本身就是线路A 的训练样本, 顺手存下来
+                gen_im.save(args.save_full / f"apifull_{tag}_{made:05d}.jpg", quality=95)
+
             if args.send == "crop":
                 # 重绘结果缩回小块原尺寸, 再从中取出"金额框"那部分贴回原图(位置天然对齐)
                 gen = np.asarray(gen_im.resize((cx1 - cx0, cy1 - cy0), Image.LANCZOS))
@@ -233,9 +246,9 @@ def main() -> None:
                     a1, b1 = min(H, cy + half), min(W, cx + half)
                 if a1 - a0 >= 32 and b1 - b0 >= 32:
                     Image.fromarray(out[a0:a1, b0:b1]).save(
-                        args.save_crops / "ai" / f"crop_seedream_{made:05d}.jpg", quality=95)
+                        args.save_crops / "ai" / f"crop_{tag}_{made:05d}.jpg", quality=95)
                     Image.fromarray(src[a0:a1, b0:b1]).save(
-                        args.save_crops / "nature" / f"crop_seedream_{made:05d}.jpg", quality=95)
+                        args.save_crops / "nature" / f"crop_{tag}_{made:05d}.jpg", quality=95)
             made += 1
             if made % 10 == 0:
                 print(f"  已造 {made} 张...", flush=True)
