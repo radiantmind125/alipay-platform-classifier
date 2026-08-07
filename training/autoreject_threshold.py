@@ -54,6 +54,13 @@ def main() -> None:
                     help="线路B 专用: 只统计金额定位成功的图(定位失败本来就不出信号)")
     ap.add_argument("--exclude", type=Path, default=None,
                     help="一个文本文件, 每行一个要排除的图片文件名(用来剔掉已确认是假图的'真图')")
+    ap.add_argument("--exclude-ext", nargs="*", default=None, metavar="EXT",
+                    help="按扩展名把某一类图移出**自动拒的适用人群**(不是当假图剔掉!)。"
+                         "典型用法 `--exclude-ext .jpeg`: 实测 .jpeg 只占 0.6% 却霸占高分区"
+                         "(线路A >=0.94 占比 5.43% vs png/jpg 的 0.00-0.03%), 因为它们是"
+                         "**过了修图App(醒图/美图秀秀)的图**。"
+                         "★这只有在**线上真的实现了'有修图痕迹就不自动拒, 一律走人工复核'**时才成立 —— "
+                         "否则就是在人为压低误杀率, 会标出过于激进的阈值。")
     args = ap.parse_args()
 
     drop = set()
@@ -66,6 +73,12 @@ def main() -> None:
     g = sorted(_scores(args.genuine, args.col, args.require_located), key=lambda t: -t[0])
     if drop:
         g = [(s, nm) for s, nm in g if Path(nm).name not in drop]
+    if args.exclude_ext:
+        exts = {e.lower() if e.startswith(".") else "." + e.lower() for e in args.exclude_ext}
+        before = len(g)
+        g = [(s, nm) for s, nm in g if Path(nm).suffix.lower() not in exts]
+        print(f"(已把 {before - len(g)} 张 {sorted(exts)} 移出自动拒的适用人群 —— "
+              f"**它们不是被当成假图, 而是改走人工复核**; 上线必须真的这么实现)")
     if not g:
         raise SystemExit("真图 summary 里没读到分数")
     n = len(g)
