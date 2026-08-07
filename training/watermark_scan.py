@@ -18,7 +18,7 @@ r"""扫 AIGC 水印(豆包/千问/…) —— **不看模型分数**的假图判
 不含任何金额/姓名/订单号**, 已逐张放大肉眼确认过才提交。
 厂商换了新版水印时, 用 `--doubao-ref` / `--qwen-ref` 指一张新样本即可重建。
 
-第二条独立证据: EXIF 里生成器**自报**的 AI 生成记录(比水印更硬)
+第二条独立证据: 文件元数据里 AI 服务**自报**的标记(比水印更硬, 且不挑厂商)
 ------------------------------------------------------------
 豆包 App 导出的图, 会在 EXIF 的 `UserComment`(0x9286) 里写一条 JSON:
 
@@ -31,9 +31,17 @@ r"""扫 AIGC 水印(豆包/千问/…) —— **不看模型分数**的假图判
 - 跟我们的模型完全无关, 不循环;
 - 自带 taskId, 可以看出是不是同一批作业。
 
-**实测基础率(2026-08-08)**: `top_suspect` 20 张里 **5 张**带 `product=doubao`;
-图池随机 4000 张里 **0 张**带 doubao(只有 1 张 `product=retouch`, 那是修图 App 不是生成器)。
-**5/20 对 0/4000 —— 富集程度极高。**
+**实测(2026-08-08, 8000 张图池随机样 vs top_suspect 20 张)**:
+| 标记 | 图池基础率 | top_suspect |
+|---|---|---|
+| `doubao` 串 | 0.037% | **12/20 (60%)** |
+| **TC260 国标** | 0.013% | **11/20 (55%)** |
+| **任一** | **0.125%** | **16/20 (80%)** |
+**富集 640 倍。**
+
+**第一版只解 EXIF 的 UserComment, 20 张里只认出 5 张 —— 漏了两块**:
+TC260 标签在 **XMP** 里不在 EXIF 里; 厂商串也常出现在 XMP。
+改成**直接在文件前 400KB 里搜字符串**后升到 16/20, 又快又简单, 不用解码像素。
 
 **★这条抓到了肉眼看不出来的**: `0.9799_...2072899103787978752` 这张,
 人工看过两遍都判"没实锤", 但它的 EXIF 里白纸黑字写着 `product=doubao` / 「AI 图片生成」 / taskId。
@@ -287,41 +295,40 @@ def _user_comment(blob: bytes):
     return None
 
 
-# 这些 product 值代表**生成**(铁证); 其余只代表过了某个 App(风险信号)
-_GEN_PRODUCTS = {"doubao"}
+# ---- AIGC 元数据标记 ----
+# **生成**的铁证。TC260 是国标: 中国的 AI 服务按规定都要打这个标, 所以它**不挑厂商**,
+# 千问/即梦/可灵 只要合规都会带 -> 比认某一家的串泛化得多。
+_AIGC_HARD = {
+    "TC260国标": re.compile(rb"tc260\.org\.cn/ns/AIGC", re.I),
+    "doubao":    re.compile(rb"doubao", re.I),
+    "jimeng":    re.compile(rb"jimeng", re.I),
+}
+# 只说明**过了某个 App**, 不是生成的铁证 -> 单独报, 不进排除名单
+_AIGC_SOFT = {
+    "retouch/醒图": re.compile(rb"retouch|xingtu", re.I),
+    "meitu/美图":   re.compile(rb"meitu", re.I),
+}
+_META_CAP = 400000          # 元数据都在文件前头, 读这么多就够
 
 
-def exif_ai_record(path: Path):
-    """返回 (product, anchorName解码后, taskId) —— 没有就返回 None。"""
+def aigc_metadata(path: Path):
+    """返回 (铁证标记集合, 软标记集合, 附加细节)。不解码像素, 很快。"""
     try:
-        d = path.read_bytes()
+        d = path.read_bytes()[:_META_CAP]
     except Exception:
-        return None
-    blob = _exif_blob(d)
-    if not blob:
-        return None
-    uc = _user_comment(blob)
-    if not uc:
-        return None
-    m = re.search(r"\{.*\}", uc, re.S)
-    if not m:
-        return None
-    try:
-        j = json.loads(m.group(0))
-    except Exception:
-        return None
-    dd = j.get("data", j)
-    if not isinstance(dd, dict):
-        return None
-    prod = str(dd.get("product", "") or "")
-    an = str(dd.get("anchorName", "") or "")
-    try:
-        an = base64.b64decode(an + "=" * (-len(an) % 4)).decode("utf-8", "replace")
-    except Exception:
-        pass
-    if not prod:
-        return None
-    return prod, an, str(dd.get("taskId", ""))[:24]
+        return set(), set(), ""
+    hard = {k for k, r in _AIGC_HARD.items() if r.search(d)}
+    soft = {k for k, r in _AIGC_SOFT.items() if r.search(d)}
+    detail = ""
+    if hard:
+        m = re.search(rb'"taskId"\s*:\s*"([0-9]{6,24})"', d)
+        if m:
+            detail = "task=" + m.group(1).decode("ascii", "replace")
+        m2 = re.search(rb"<TC260:AIGC>(.{0,120})", d, re.S)
+        if m2:
+            txt = m2.group(1).decode("latin1", "replace").replace("&quot;", '"')
+            detail = (detail + "  " + txt.split("<")[0][:70]).strip()
+    return hard, soft, detail
 
 
 def _norm(a: np.ndarray) -> tuple[np.ndarray, float]:
@@ -501,24 +508,25 @@ def main() -> None:
     rows = scan(files)
     hit = [r for r in rows if r[0] >= args.thr]
 
-    # 第二条证据: EXIF 里生成器自报的记录(很快, 只读文件头)
+    # 第二条证据: 文件元数据里 AI 服务自报的标记(很快, 只读文件头, 不解码像素)
     gen_hits, other_prod = [], []
     for p in files:
-        rec = exif_ai_record(p)
-        if not rec:
-            continue
-        (gen_hits if rec[0] in _GEN_PRODUCTS else other_prod).append((p, rec))
-    print(f"\nEXIF 自报记录: **生成类 {len(gen_hits)} 张**"
-          f"(product 属于 {sorted(_GEN_PRODUCTS)}), 其它 App 记录 {len(other_prod)} 张")
-    for p, r in gen_hits[:args.show]:
-        print(f"  ★ product={r[0]:8s} {r[1]:12s} task={r[2]:20s} {p.name[:52]}")
+        hard, soft, detail = aigc_metadata(p)
+        if hard:
+            gen_hits.append((p, hard, detail))
+        elif soft:
+            other_prod.append((p, soft))
+    print(f"\nAIGC 元数据标记: **铁证 {len(gen_hits)} 张**, 仅修图App痕迹 {len(other_prod)} 张")
+    print(f"  (铁证标记: {sorted(_AIGC_HARD)} —— TC260 是国标, 合规的国产生成器都会打, 不挑厂商)")
+    for p, hard, detail in gen_hits[:args.show]:
+        print(f"  ★ {'+'.join(sorted(hard)):22s} {detail[:46]:48s} {p.name[:46]}")
     if other_prod:
-        print(f"  (其它 product: {Counter(r[0] for _, r in other_prod).most_common()} "
-              f"—— 只说明过了某个 App, **不是生成的铁证, 不进排除名单**)")
+        print(f"  (仅修图痕迹: {Counter(k for _, ss in other_prod for k in ss).most_common()} "
+              f"—— **不是生成的铁证, 不进排除名单**, 但建议走人工复核)")
     wm_names = {p.name for _, _, p in hit}
-    only_exif = [p for p, _ in gen_hits if p.name not in wm_names]
-    print(f"  其中 **{len(only_exif)} 张水印扫不出来但 EXIF 认了** —— 这就是这条证据的价值"
-          f"(裁掉水印也去不掉 EXIF)")
+    only_exif = [p for p, _, _ in gen_hits if p.name not in wm_names]
+    print(f"  其中 **{len(only_exif)} 张水印扫不出来但元数据认了** —— 这就是这条证据的价值"
+          f"(水印能裁掉, 元数据裁不掉)")
     print(f"\n扫了 {len(rows):,} 张, 相关 >= {args.thr} 的有 **{len(hit)} 张** "
           f"({len(hit)/max(1,len(rows))*100:.3f}%)")
     for n, c in Counter(n for _, n, _ in hit).most_common():
@@ -527,7 +535,7 @@ def main() -> None:
     for s, n, p in sorted(hit, reverse=True)[:args.show]:
         print(f"  {s:6.3f}  {n:10s} {p.name[:60]}")
     if args.out:
-        names = sorted(wm_names | {p.name for p, _ in gen_hits})
+        names = sorted(wm_names | {p.name for p, _, _ in gen_hits})
         args.out.write_text("\n".join(names) + "\n", encoding="utf-8")
         print(f"\n已写出 {len(names)} 个文件名 -> {args.out}"
               f"  (水印 {len(wm_names)} + 只有EXIF认的 {len(only_exif)})")
