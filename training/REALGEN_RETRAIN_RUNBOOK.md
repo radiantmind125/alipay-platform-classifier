@@ -24,8 +24,12 @@
 ```
 cd D:\alipay-platform-classifier
 git pull
-$env:DMX_KEY = "sk-LpU2oFfNd1enysKC9Fu69cUUlZiKrOEHBkCL6wFh1N40nL8y"
+$env:DMX_KEY = "sk-你自己的key"      # 只在本机设, 别写进任何文件
 ```
+
+> ⚠ **key 绝对不能写进这个仓库 —— 仓库是公开的。**
+> 这里以前真的贴过一个 key(commit b457f79), 已经泄露过一次, 那个 key 必须作废重申请。
+> 正确做法: 每次开 PowerShell 临时 `$env:DMX_KEY = "..."`, 或者放系统环境变量, **不进版本库**。
 
 **万相(优先, 因为它最弱)**:
 ```
