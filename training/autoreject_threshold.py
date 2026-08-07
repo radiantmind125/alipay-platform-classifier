@@ -58,7 +58,9 @@ def main() -> None:
 
     drop = set()
     if args.exclude and args.exclude.exists():
-        drop = {ln.strip() for ln in args.exclude.read_text(encoding="utf-8").splitlines() if ln.strip()}
+        # utf-8-sig: PowerShell 的 `Out-File -Encoding utf8` 会写 BOM, 不吃掉的话第一行永远匹配不上
+        drop = {ln.strip().lstrip("﻿")
+                for ln in args.exclude.read_text(encoding="utf-8-sig").splitlines() if ln.strip()}
         print(f"(已排除 {len(drop)} 个确认为假图的文件)")
 
     g = sorted(_scores(args.genuine, args.col, args.require_located), key=lambda t: -t[0])
