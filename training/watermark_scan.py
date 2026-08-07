@@ -18,6 +18,29 @@ r"""扫 AIGC 水印(豆包/千问/…) —— **不看模型分数**的假图判
 不含任何金额/姓名/订单号**, 已逐张放大肉眼确认过才提交。
 厂商换了新版水印时, 用 `--doubao-ref` / `--qwen-ref` 指一张新样本即可重建。
 
+第二条独立证据: EXIF 里生成器**自报**的 AI 生成记录(比水印更硬)
+------------------------------------------------------------
+豆包 App 导出的图, 会在 EXIF 的 `UserComment`(0x9286) 里写一条 JSON:
+
+    {"data":{"os":"ios","anchorId":"401348598627...","taskId":"401348598627...",
+             "anchorName":"QUkg5Zu+54mH55Sf5oiQ","product":"doubao","appVersion":"14.0.0.41"}}
+
+`product` 是 `doubao`; `anchorName` 是 base64, 解出来正好是「**AI 图片生成**」; 还带**生成任务号**和 App 版本。
+**这是生成器自己写的记录, 比可见水印更硬**:
+- **裁掉水印也去不掉它**(它不在像素里);
+- 跟我们的模型完全无关, 不循环;
+- 自带 taskId, 可以看出是不是同一批作业。
+
+**实测基础率(2026-08-08)**: `top_suspect` 20 张里 **5 张**带 `product=doubao`;
+图池随机 4000 张里 **0 张**带 doubao(只有 1 张 `product=retouch`, 那是修图 App 不是生成器)。
+**5/20 对 0/4000 —— 富集程度极高。**
+
+**★这条抓到了肉眼看不出来的**: `0.9799_...2072899103787978752` 这张,
+人工看过两遍都判"没实锤", 但它的 EXIF 里白纸黑字写着 `product=doubao` / 「AI 图片生成」 / taskId。
+
+**注意区分**: `product=doubao` 且 anchorName 是「AI 图片生成」= **生成**, 铁证;
+其它 product(如 `retouch` 醒图)只说明**过了修图 App**, 是风险信号不是铁证 —— 单独报, 不进排除名单。
+
 已编目(实测相对坐标)
 --------------------
   豆包AI生成   右下角  x 0.820-0.990  y 0.970-0.995   已内嵌
@@ -68,7 +91,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import os
+import re
+import struct
 import sys
 import zlib
 from collections import Counter
@@ -199,6 +225,103 @@ _TEMPLATES = {
 _OFFSETS = [(dx, dy) for dx in (-0.012, 0.0, 0.012) for dy in (-0.010, 0.0, 0.010)]
 # 中心排第一, 这样才能"中心分低就早退"
 _OFFSETS_CENTER_FIRST = [(0.0, 0.0)] + [o for o in _OFFSETS if o != (0.0, 0.0)]
+
+
+def _exif_blob(d: bytes):
+    """从 JPEG(APP1) 或 PNG(eXIf) 里取出 EXIF 字节。"""
+    if d[:2] == b"\xff\xd8":
+        i = 2
+        while i < len(d) - 4:
+            if d[i] != 0xFF:
+                return None
+            m = d[i + 1]
+            if m in (0xD8, 0xD9) or 0xD0 <= m <= 0xD7:
+                i += 2
+                continue
+            ln = struct.unpack(">H", d[i + 2:i + 4])[0]
+            if m == 0xE1 and d[i + 4:i + 10] == b"Exif\x00\x00":
+                return d[i + 10:i + 2 + ln]
+            if m == 0xDA:
+                return None
+            i += 2 + ln
+    elif d[:8] == b"\x89PNG\r\n\x1a\n":
+        i = 8
+        while i < len(d) - 8:
+            L = struct.unpack(">I", d[i:i + 4])[0]
+            t = d[i + 4:i + 8]
+            if t == b"eXIf":
+                return d[i + 8:i + 8 + L]
+            if t in (b"IDAT", b"IEND"):
+                return None
+            i += 12 + L
+    return None
+
+
+def _user_comment(blob: bytes):
+    """取 EXIF 的 UserComment(0x9286)。"""
+    try:
+        end = ">" if blob[:2] == b"MM" else "<"
+        stack = [struct.unpack(end + "I", blob[4:8])[0]]
+        seen = set()
+        while stack:
+            off = stack.pop()
+            if off in seen or off + 2 > len(blob):
+                continue
+            seen.add(off)
+            n = struct.unpack(end + "H", blob[off:off + 2])[0]
+            if n > 200:
+                continue
+            for k in range(n):
+                e = off + 2 + k * 12
+                if e + 12 > len(blob):
+                    break
+                tag, typ, cnt = struct.unpack(end + "HHI", blob[e:e + 8])
+                if tag in (0x8769, 0x8825):
+                    stack.append(struct.unpack(end + "I", blob[e + 8:e + 12])[0])
+                elif tag == 0x9286:
+                    q = struct.unpack(end + "I", blob[e + 8:e + 12])[0]
+                    raw = blob[e + 8:e + 12][:cnt] if cnt <= 4 else blob[q:q + cnt]
+                    return raw.decode("latin1", "replace")
+    except Exception:
+        pass
+    return None
+
+
+# 这些 product 值代表**生成**(铁证); 其余只代表过了某个 App(风险信号)
+_GEN_PRODUCTS = {"doubao"}
+
+
+def exif_ai_record(path: Path):
+    """返回 (product, anchorName解码后, taskId) —— 没有就返回 None。"""
+    try:
+        d = path.read_bytes()
+    except Exception:
+        return None
+    blob = _exif_blob(d)
+    if not blob:
+        return None
+    uc = _user_comment(blob)
+    if not uc:
+        return None
+    m = re.search(r"\{.*\}", uc, re.S)
+    if not m:
+        return None
+    try:
+        j = json.loads(m.group(0))
+    except Exception:
+        return None
+    dd = j.get("data", j)
+    if not isinstance(dd, dict):
+        return None
+    prod = str(dd.get("product", "") or "")
+    an = str(dd.get("anchorName", "") or "")
+    try:
+        an = base64.b64decode(an + "=" * (-len(an) % 4)).decode("utf-8", "replace")
+    except Exception:
+        pass
+    if not prod:
+        return None
+    return prod, an, str(dd.get("taskId", ""))[:24]
 
 
 def _norm(a: np.ndarray) -> tuple[np.ndarray, float]:
@@ -374,8 +497,28 @@ def main() -> None:
 
     if not args.input:
         raise SystemExit("要么 --selftest, 要么给 --input")
-    rows = scan(_imgs(args.input))
+    files = _imgs(args.input)
+    rows = scan(files)
     hit = [r for r in rows if r[0] >= args.thr]
+
+    # 第二条证据: EXIF 里生成器自报的记录(很快, 只读文件头)
+    gen_hits, other_prod = [], []
+    for p in files:
+        rec = exif_ai_record(p)
+        if not rec:
+            continue
+        (gen_hits if rec[0] in _GEN_PRODUCTS else other_prod).append((p, rec))
+    print(f"\nEXIF 自报记录: **生成类 {len(gen_hits)} 张**"
+          f"(product 属于 {sorted(_GEN_PRODUCTS)}), 其它 App 记录 {len(other_prod)} 张")
+    for p, r in gen_hits[:args.show]:
+        print(f"  ★ product={r[0]:8s} {r[1]:12s} task={r[2]:20s} {p.name[:52]}")
+    if other_prod:
+        print(f"  (其它 product: {Counter(r[0] for _, r in other_prod).most_common()} "
+              f"—— 只说明过了某个 App, **不是生成的铁证, 不进排除名单**)")
+    wm_names = {p.name for _, _, p in hit}
+    only_exif = [p for p, _ in gen_hits if p.name not in wm_names]
+    print(f"  其中 **{len(only_exif)} 张水印扫不出来但 EXIF 认了** —— 这就是这条证据的价值"
+          f"(裁掉水印也去不掉 EXIF)")
     print(f"\n扫了 {len(rows):,} 张, 相关 >= {args.thr} 的有 **{len(hit)} 张** "
           f"({len(hit)/max(1,len(rows))*100:.3f}%)")
     for n, c in Counter(n for _, n, _ in hit).most_common():
@@ -384,8 +527,10 @@ def main() -> None:
     for s, n, p in sorted(hit, reverse=True)[:args.show]:
         print(f"  {s:6.3f}  {n:10s} {p.name[:60]}")
     if args.out:
-        args.out.write_text("\n".join(sorted(p.name for _, _, p in hit)) + "\n", encoding="utf-8")
-        print(f"\n已写出 {len(hit)} 个文件名 -> {args.out}")
+        names = sorted(wm_names | {p.name for p, _ in gen_hits})
+        args.out.write_text("\n".join(names) + "\n", encoding="utf-8")
+        print(f"\n已写出 {len(names)} 个文件名 -> {args.out}"
+              f"  (水印 {len(wm_names)} + 只有EXIF认的 {len(only_exif)})")
     print("\n★ 这些是**带水印的假图**, 证据独立于我们的模型, 可以放心从训练集里挪走(挪不是删, 留证)。")
     print("  但**去了水印的假图这条判据抓不到** —— 所以这是'保证删对', 不是'删干净'。")
 
