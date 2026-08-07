@@ -75,6 +75,26 @@ def main() -> None:
             cells.append(f"{rec * 100:13.1f}%")
         print(f"{label:14s} {thr:8.4f}   " + "  ".join(cells))
 
+    # 按文件格式分开看: 训练集被 reencode 成了全 JPEG, 真实提交里的 PNG 是**分布外**输入。
+    # PNG 是无损的, 高频细节全保留, 而我们的模型正是看高频 -> PNG 真图可能被系统性打高分。
+    by_ext: dict[str, list[float]] = {}
+    for s, nm in g:
+        ext = Path(nm).suffix.lower() or "(无)"
+        by_ext.setdefault(ext, []).append(s)
+    if len(by_ext) > 1:
+        print()
+        print("按文件格式分开看真图分数(看 PNG 是不是被系统性打高):")
+        print("格式      张数    占比    中位数   90分位   99分位    最高分   >=0.94占比")
+        for ext, ss in sorted(by_ext.items(), key=lambda kv: -len(kv[1])):
+            ss = sorted(ss)
+            m = len(ss)
+            q = lambda f: ss[min(m - 1, int(m * f))]  # noqa: E731
+            hi = sum(1 for x in ss if x >= 0.94) / m
+            print(f"{ext:8s} {m:6d} {m / n * 100:6.1f}% {q(0.5):8.4f} {q(0.90):8.4f} "
+                  f"{q(0.99):8.4f} {ss[-1]:9.4f} {hi * 100:9.2f}%")
+        print("=> 若 PNG 的高分位/最高分明显高于 JPG, 说明**训练集被统一成JPEG导致PNG是分布外**,")
+        print("   这不是模型不行, 是数据格式缺口 —— 把无损PNG真图加进训练即可, 自动拒的线能往下放。")
+
     print()
     print(f"分数最高的 {min(args.show_top, n)} 张真图(自动拒的线就是被这几张卡住的):")
     for s, nm in g[:args.show_top]:
