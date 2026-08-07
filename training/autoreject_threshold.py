@@ -21,9 +21,11 @@ from pathlib import Path
 _BUDGETS = [(1, 1000), (1, 5000), (1, 10000), (1, 20000), (0, 0)]
 
 
-def _scores(p: Path, col: str = "final_ai_score") -> list[tuple[float, str]]:
+def _scores(p: Path, col: str = "final_ai_score", require_located: bool = False) -> list[tuple[float, str]]:
     out = []
     for r in csv.DictReader(open(p, encoding="utf-8-sig")):
+        if require_located and (r.get("roi_amount_located") or "1").strip() != "1":
+            continue                      # 金额没定位到 = 这条线不出信号
         v = (r.get(col) or "").strip()
         if not v:
             continue
@@ -45,13 +47,27 @@ def main() -> None:
     ap.add_argument("--genuine", type=Path, required=True, help="大批真图的 summary.csv")
     ap.add_argument("--fake", type=Path, nargs="+", required=True, help="若干假图集的 summary.csv")
     ap.add_argument("--show-top", type=int, default=15, help="列出分数最高的 N 张真图(卡住阈值的就是它们)")
+    ap.add_argument("--col", default="final_ai_score",
+                    help="用哪一列打分。线路B(predict_tiled)的 CSV 里有 tile_max/tile_top3/tile_mean, "
+                         "上线用哪个聚合就填哪个(现在线路B 用 tile_top3), 这样不用重新打分")
+    ap.add_argument("--require-located", action="store_true",
+                    help="线路B 专用: 只统计金额定位成功的图(定位失败本来就不出信号)")
+    ap.add_argument("--exclude", type=Path, default=None,
+                    help="一个文本文件, 每行一个要排除的图片文件名(用来剔掉已确认是假图的'真图')")
     args = ap.parse_args()
 
-    g = sorted(_scores(args.genuine), key=lambda t: -t[0])
+    drop = set()
+    if args.exclude and args.exclude.exists():
+        drop = {ln.strip() for ln in args.exclude.read_text(encoding="utf-8").splitlines() if ln.strip()}
+        print(f"(已排除 {len(drop)} 个确认为假图的文件)")
+
+    g = sorted(_scores(args.genuine, args.col, args.require_located), key=lambda t: -t[0])
+    if drop:
+        g = [(s, nm) for s, nm in g if Path(nm).name not in drop]
     if not g:
         raise SystemExit("真图 summary 里没读到分数")
     n = len(g)
-    fakes = {p.parent.name or p.stem: _scores(p) for p in args.fake}
+    fakes = {p.parent.name or p.stem: _scores(p, args.col, args.require_located) for p in args.fake}
 
     print(f"真图 {n} 张 | 假图集: " + ", ".join(f"{k}({len(v)})" for k, v in fakes.items()))
     print(f"真图最高分 {g[0][0]:.4f} | 能可靠分辨的最小误杀率 ≈ 1/{n}")
