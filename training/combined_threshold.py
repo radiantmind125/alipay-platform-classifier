@@ -66,6 +66,12 @@ def main() -> None:
     ap.add_argument("--a-thr", type=float, default=None)
     ap.add_argument("--b-thr", type=float, default=None)
     ap.add_argument("--exclude", type=Path, default=None, help="已确认是假图的文件名清单")
+    ap.add_argument("--a-fake", type=Path, nargs="*", default=None,
+                    help="线路A 的假图 summary.csv(可多个) —— 扫阈值时一并显示召回")
+    ap.add_argument("--b-fake", type=Path, nargs="*", default=None,
+                    help="线路B 的假图 summary.csv(可多个)")
+    ap.add_argument("--b-located", action="store_true", default=True,
+                    help="线路B 的假图也只算金额定位成功的(默认开)")
     ap.add_argument("--target", type=int, default=None,
                     help="给一个并集预算(比如 5000 表示 1/5000), 扫出能达标的阈值组合")
     args = ap.parse_args()
@@ -109,34 +115,46 @@ def main() -> None:
         return
 
     if args.target:
+        fa = {p.parent.name or p.stem: _load(p, args.a_col, False) for p in (args.a_fake or [])}
+        fb = {p.parent.name or p.stem: _load(p, args.b_col, args.b_located)
+              for p in (args.b_fake or [])}
         print()
         print(f"扫阈值组合, 目标: 并集误杀 <= 1/{args.target}")
-        print(f"{'线路A阈值':>10} {'线路B阈值':>10} {'A命中':>7} {'B命中':>7} "
-              f"{'并集':>7} {'并集误杀':>12}")
+        cols = ("".join(f"{k[:9]:>10s}" for k in fa) + ("|" if fa and fb else "")
+                + "".join(f"{k[:9]:>10s}" for k in fb))
+        print(f"{'线路A阈值':>10} {'线路B阈值':>10} {'并集':>6} {'并集误杀':>11}  {cols}")
         sa = sorted(A.values(), reverse=True)
         sb = sorted((B[k] for k in set(B) & universe), reverse=True)
-        cand = []
-        for ka in (0, 1, 2, 3, 5, 8, 12, 20, 30, 50):
-            for kb in (0, 1, 2, 3, 5, 8, 12, 20, 30, 50):
+        cand, seen = [], set()
+        for ka in (0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 30, 50, 80):
+            for kb in (0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 30, 50, 80):
                 if ka >= len(sa) or kb >= len(sb):
                     continue
                 ta, tb = sa[ka] + 1e-9, sb[kb] + 1e-9
-                a_hit, b_hit, both = union_rate(ta, tb)
-                if len(both) and n / len(both) < args.target:
+                key = (round(ta, 4), round(tb, 4))
+                if key in seen:
                     continue
-                cand.append((len(both), ta, tb, len(a_hit), len(b_hit)))
-        cand.sort(key=lambda t: (-t[1] - t[2]))       # 阈值越低越好(召回越高)
-        seen = set()
-        for nb, ta, tb, na, nbh in cand[:18]:
-            key = (round(ta, 4), round(tb, 4))
-            if key in seen:
-                continue
-            seen.add(key)
-            print(f"{ta:10.4f} {tb:10.4f} {na:7d} {nbh:7d} {nb:7d} "
-                  f"{'1/' + format(n / max(1, nb), ',.0f'):>12}")
+                seen.add(key)
+                a_hit, b_hit, both = union_rate(ta, tb)
+                rate = n / len(both) if both else float("inf")
+                if rate < args.target:
+                    continue
+                cand.append((ta, tb, len(both), rate))
+        # 阈值越低召回越高 -> 按两个阈值之和**升序**排, 最好的排最前面
+        cand.sort(key=lambda t: t[0] + t[1])
+        for ta, tb, nb, rate in cand[:20]:
+            cells = "".join(f"{sum(1 for s in v.values() if s >= ta) / max(1, len(v)) * 100:9.1f}%"
+                            for v in fa.values())
+            if fa and fb:
+                cells += "|"
+            cells += "".join(f"{sum(1 for s in v.values() if s >= tb) / max(1, len(v)) * 100:9.1f}%"
+                             for v in fb.values())
+            print(f"{ta:10.4f} {tb:10.4f} {nb:6d} {'1/' + format(rate, ',.0f'):>11}  {cells}")
         print()
-        print("怎么挑: **两个阈值都尽量低**(召回高), 同时并集仍然达标。")
-        print("拿到组合之后, 再用 autoreject_threshold.py 各自看该阈值下每个假图集的召回。")
+        print("★ 表按'两个阈值之和'**升序**排, 所以**第一行就是达标组合里召回最高的那个**。")
+        print("  最后几列是该阈值下各假图集的召回(左边线路A, 右边线路B)。")
+        print(f"  注意: 刚好差一点点的组合被过滤掉了(比如并集 1/4,994 达不到 1/{args.target}),")
+        print("  想看这些就把 --target 调松一点再跑。")
         return
 
     raise SystemExit("要么同时给 --a-thr 和 --b-thr, 要么给 --target")
