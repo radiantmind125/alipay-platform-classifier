@@ -48,21 +48,42 @@ python training\autoreject_threshold.py --col tile_top3 --require-located --genu
 
 ---
 
-## 4(更大的收益)把训练集也清一遍
+## 4(更大的收益)把训练集也清一遍 —— ★方法已改, 别再用交叉筛清训练集
+
 训练集的 nature 类是从同一个池子抽的 → **大概率也混着这种假图**。
 混进去的后果: 模型被教"带豆包水印的图是真图", 直接压低上限。
 
-```
-:: 给训练集的 nature 打分(两条线)
-cd D:\SSP
-python predict_all_models.py --model_root D:\SSP-AI-Generated-Image-Detection-main\snapshot\aigen_v7\Net_epoch_best.pth --input D:\ssp_aigen_v5\imagenet_ai_0419_sdv4\train\nature --output_dir D:\probe\trainnat_v7 --device cuda
-cd D:\alipay-platform-classifier
-python training\predict_tiled.py --ssp-repo D:\SSP --model D:\SSP-AI-Generated-Image-Detection-main\snapshot\localdet3\Net_epoch_best.pth --input D:\ssp_aigen_v5\imagenet_ai_0419_sdv4\train\nature --output_dir D:\probe\trainnat_ld3 --roi-amount --amount-pad 0 --blue-locator --roi-top 0.6 --device cuda
+### ★★先看这段: 为什么不能用 cross_flag 清训练集(2026-08-07 修正)
 
-:: 交叉筛出训练集里的假图
-python training\cross_flag.py --a D:\probe\trainnat_v7\summary.csv --b D:\probe\trainnat_ld3\summary.csv --out D:\probe\trainnat_bad.txt
+清池子标阈值用 cross_flag 是**可以的**; 但**清训练集不行**, 因为会循环论证:
+
+> cross_flag 挑的是**两条线都打高分**的图。这批里既有真假图, **也有本来就难的真图**(困难负样本)。
+> **困难负样本正是模型最需要的东西。** 删了它们 → 模型对难的真图变得更自信 →
+> **线下每个指标都变好, 线上误杀反而变差。**
+> 这跟"把转发压缩过的真图当假图剔掉"是同一个坑, 只是更深 —— **它直接烙进权重里, 不只是一个阈值。**
+
+**所以清训练集只能用"跟我们模型无关"的独立证据。水印就是这种证据** —— 它是生成器自己盖的。
+
+### 正确做法: 按水印清
+
 ```
-抽查几张确认后, 把这些文件从 `train\nature` 挪走(**别删, 挪到别处留证**), 然后重训 v8 / localdet4。
+cd D:\alipay-platform-classifier
+git pull
+
+:: 先自检(必跑, 30秒) —— 确认阈值在你的数据上也成立
+python training\watermark_scan.py --selftest --fakes D:\probe\top_suspect --genuine D:\probe\genuine_20k
+
+:: 扫训练集的 nature 类
+python training\watermark_scan.py --input D:\ssp_aigen_v5\imagenet_ai_0419_sdv4\train\nature --out D:\probe\trainnat_watermarked.txt
+```
+
+**自检要看的**: 阈值 0.30 那一行, 假图命中率应该很高、**真图命中率(误报)要接近 0**。
+本地实测: **带水印的 11/11 全抓到; 3000 张真图里命中 2 张, 而那 2 张人工确认确实带豆包水印(零误报)。**
+
+确认后把命中的文件从 `train\nature` **挪走**(别删, 挪到别处留证), 然后重训 v8 / localdet4。
+
+**诚实的边界**: 这条判据只抓**还带着水印**的图, **裁掉/洗掉水印的一张也抓不到**。
+所以它保证"**删对**", 不保证"**删干净**"。**清训练集要的正是"删对"。**
 **预期: 训练标签变干净 → 模型上限提高 → 严预算下的自动拒覆盖率进一步上升。**
 
 ## 发我什么
