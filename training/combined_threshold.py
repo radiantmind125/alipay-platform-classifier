@@ -19,14 +19,22 @@ r"""两条线**合起来**的误杀率 —— 之前一直是分开标的, 但�
 
     拒绝 = (A分 >= thrA) 或 (B定位成功 且 B分 >= thrB)
 
-用法
-----
-  # 给定两条线的阈值, 算合起来的误杀
-  python training/combined_threshold.py --a D:\probe\genuine_20k_v7\summary.csv --a-thr 0.8881 \
-      --b D:\probe\genuine_20k_ld3\summary.csv --b-thr 0.9183 --exclude D:\probe\exclude_evidence.txt
+用法(三选一)
+------------
+  # 1) 最省事: 直接给预算, 脚本**自己算两条线的阈值** —— 不用手抄, 也就不会抄错
+  python training/combined_threshold.py --a D:\probe\genuine_20k_v7\summary.csv \
+      --b D:\probe\genuine_20k_ld3\summary.csv --exclude D:\probe\exclude_evidence.txt --budget 5000
 
-  # 反过来: 给一个并集预算, 扫出能达标的阈值组合
-  python training/combined_threshold.py --a ... --b ... --exclude ... --target 5000
+  # 2) 自己指定两个阈值
+  python training/combined_threshold.py --a ... --a-thr 0.8881 --b ... --b-thr 0.9183 --exclude ...
+
+  # 3) 给一个并集预算, 扫出能达标的阈值组合(带各假图集的召回)
+  python training/combined_threshold.py --a ... --b ... --exclude ... --target 4000 \
+      --a-fake D:\probe\wan_full_v7\summary.csv --b-fake D:\probe\wan_ld3\summary.csv
+
+**为什么加第 1 种**: 原来只能先跑 autoreject_threshold 看到阈值, 再手动抄进来。
+抄这一步既容易抄错, 又容易把占位符原样粘进去(PowerShell 里 `<` 是保留的重定向符, 直接报错)。
+现在给个预算就行, 阈值由脚本按**和 autoreject_threshold.py 完全一致**的算法自己算。
 """
 
 from __future__ import annotations
@@ -65,6 +73,11 @@ def main() -> None:
     ap.add_argument("--b-col", default="tile_top3")
     ap.add_argument("--a-thr", type=float, default=None)
     ap.add_argument("--b-thr", type=float, default=None)
+    ap.add_argument("--budget", type=int, default=None,
+                    help="直接给预算(比如 5000 = 1/5000), 脚本**自己算两条线的阈值** —— "
+                         "不用手抄, 也就不会抄错。算法和 autoreject_threshold.py 完全一致")
+    ap.add_argument("--a-budget", type=int, default=None, help="只给线路A 单独的预算(默认跟 --budget)")
+    ap.add_argument("--b-budget", type=int, default=None, help="只给线路B 单独的预算(默认跟 --budget)")
     ap.add_argument("--exclude", type=Path, default=None, help="已确认是假图的文件名清单")
     ap.add_argument("--a-fake", type=Path, nargs="*", default=None,
                     help="线路A 的假图 summary.csv(可多个) —— 扫阈值时一并显示召回")
@@ -96,6 +109,21 @@ def main() -> None:
         a_hit = {k for k in universe if A[k] >= ta}
         b_hit = {k for k in universe if k in B and B[k] >= tb}
         return a_hit, b_hit, a_hit | b_hit
+
+    # 给了预算就自己算阈值 —— 和 autoreject_threshold.py 同一套算法(各用各自的样本量)
+    ab, bb = args.a_budget or args.budget, args.b_budget or args.budget
+    if ab or bb:
+        sa = sorted(A.values(), reverse=True)
+        sb = sorted((B[k] for k in set(B) & universe), reverse=True)
+        if ab:
+            ka = max(0, int(len(sa) / ab))
+            args.a_thr = (sa[ka] if ka < len(sa) else 0.0) + 1e-6
+            print(f"线路A 预算 1/{ab}: 样本 {len(sa):,} 张 -> 容忍 {ka} 张 -> 阈值 {args.a_thr:.4f}")
+        if bb:
+            kb = max(0, int(len(sb) / bb))
+            args.b_thr = (sb[kb] if kb < len(sb) else 0.0) + 1e-6
+            print(f"线路B 预算 1/{bb}: 样本 {len(sb):,} 张(仅金额定位成功) -> "
+                  f"容忍 {kb} 张 -> 阈值 {args.b_thr:.4f}")
 
     if args.a_thr is not None and args.b_thr is not None:
         a_hit, b_hit, both = union_rate(args.a_thr, args.b_thr)
@@ -157,7 +185,8 @@ def main() -> None:
         print("  想看这些就把 --target 调松一点再跑。")
         return
 
-    raise SystemExit("要么同时给 --a-thr 和 --b-thr, 要么给 --target")
+    raise SystemExit("用法三选一: --budget 5000(最省事, 自己算阈值) / "
+                     "同时给 --a-thr 和 --b-thr / --target 扫组合")
 
 
 if __name__ == "__main__":
