@@ -107,7 +107,8 @@ def main() -> None:
     ap.add_argument("--model", default="doubao-seedream-4-5-251128",
                     help="实测能图生图的: doubao-seedream-5-0-pro-260628 / 4-5-251128 / 4-0-250828 / 5.0-lite(豆包即梦); "
                          "wan2.7-image / wan2.7-image-pro / wan2.6-image(阿里万相)。"
-                         "qwen-image-edit 在这平台端点不通; 可灵只有视频接口")
+                         "qwen-image-edit(千问, 走 DashScope 形状的 body, api_image 已处理); "
+                         "可灵只有视频接口; 即梦/SeedEdit 这平台没渠道")
     ap.add_argument("--prompt-mode", default="redraw", choices=list(_PROMPTS),
                     help="redraw=整张重画; local-amount=只改金额(测局部编辑盲区)")
     ap.add_argument("--prompt", default="", help="自定义提示词(盖过 --prompt-mode)")

@@ -201,7 +201,7 @@ def main() -> None:
             gen_im = None
             for attempt in range(args.retries + 1):     # 超时/网络抖动重试; 风控拒图不重试(永久错)
                 try:
-                    # 各厂商请求格式不同(豆包 images/generations vs 万相 responses), 统一走 api_image
+                    # 各厂商请求格式不同(豆包 images/generations / 万相 responses / 千问 images端点但DashScope形状), 统一走 api_image
                     out_bytes = generate_image(args.model, prompt, send_bytes, key,
                                                base=args.base, size=args.size, timeout=args.timeout)
                     gen_im = Image.open(io.BytesIO(out_bytes)).convert("RGB")

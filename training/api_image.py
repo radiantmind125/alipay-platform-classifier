@@ -7,8 +7,22 @@ r"""聚合平台(DMXAPI)上不同厂商的图生图接口 —— 各家格式不
   `{model, input:{messages:[{role:"user", content:[{image}, {text}]}]}, parameters:{size,n}}`,
   出图在 `output[0].content[0].text`。
   (注: 官方文档写的是"仅文生图", 但实测 content 里塞 image 是能做图生图的。)
+- **千问 qwen-image-edit**: `POST /v1/images/generations`, 但 body 是 **DashScope 格式**
+  `{model, input:{messages:[{role:"user", content:[{image}, {text}]}]}, parameters:{n}}`。
+  **注意它和万相端点不同**: 万相走 `/v1/responses`, 千问走 `/v1/images/generations`,
+  但两家的 body 都是 DashScope 的 `input.messages` 形状。
 - **可灵 Kling**: 在这个平台上**只有视频**(模型列表里全是 image2video/text2video; 平台导航也把它归在 AI视频)。
   图生图的 doc 页存在但 `/kling/v1/images/generations` 实际没路由(返回网站 HTML)。**对我们(伪造收据截图)没用。**
+- **即梦 jimeng / SeedEdit**: 这个平台上**没有渠道**(`model_not_found 无可用渠道`)。
+  但**即梦和豆包同属 Seedream 系**, 已有的 doubao-seedream 就是同一族。
+
+**2026-08-08 更正**: 之前记的"qwen-image-edit 在这平台端点不通"**是错的**。
+当时只试了豆包那种 `{model, prompt, image}` 的 body, 平台回的是
+`For image editing, the message must contain 1~3 image content items. Got 0 image items.`
+—— **那不是"模型不存在", 是"图片没放对地方"**。换成 DashScope 的 `input.messages` 就通了。
+**教训: 400 带具体报错 ≠ 模型不可用, 要把报错读完再下结论。**
+同理 `qwen-image` / `qwen-image-plus` 当时报的是 `Invalid size format: 2K`, 也只是 size 格式问题;
+但实测这两个是**文生图**(完全不参考输入图, 出来的是数字显示屏照片), **对我们没用**, 所以没接进来。
 
 用法:
     from api_image import generate_image, SUPPORTED
@@ -32,6 +46,7 @@ SUPPORTED = {
     "wan2.7-image": "wan",
     "wan2.7-image-pro": "wan",
     "wan2.6-image": "wan",
+    "qwen-image-edit": "qwen",
 }
 
 
@@ -41,6 +56,8 @@ def provider_of(model: str) -> str:
         return SUPPORTED[model]
     if model.startswith("wan"):
         return "wan"
+    if model.startswith("qwen"):
+        return "qwen"
     if model.startswith("kling"):
         raise ValueError("可灵在这个平台上只有视频接口, 做不了图生图 —— 对伪造收据截图没用")
     return "seedream"
@@ -82,16 +99,48 @@ def _post(url: str, key: str, payload: dict, timeout: int) -> dict:
         raise RuntimeError(f"HTTP {e.code}: {detail}") from None
 
 
+def _dig_url(r) -> str:
+    """各家把出图 url 放的位置都不一样, 挨个位置找一遍。
+
+    **别截断 url** —— DashScope 的地址带签名参数, 截了就 403。
+    """
+    if not isinstance(r, dict):
+        return ""
+    d = r.get("data")
+    if isinstance(d, list) and d and isinstance(d[0], dict) and d[0].get("url"):
+        return d[0]["url"]
+    for path in (lambda x: x["output"][0]["content"][0]["text"],
+                 lambda x: x["output"]["choices"][0]["message"]["content"][0]["image"],
+                 lambda x: x["output"]["results"][0]["url"]):
+        try:
+            v = path(r)
+            if isinstance(v, str) and v.startswith("http"):
+                return v
+        except Exception:
+            pass
+    return ""
+
+
 def generate_image(model: str, prompt: str, image_bytes: bytes, key: str,
                    base: str = BASE, size: str = "2K", timeout: int = 300,
                    watermark: bool = False) -> bytes:
     """把 image_bytes 交给指定模型按 prompt 重绘, 返回出图的原始字节。"""
     prov = provider_of(model)
-    if prov == "wan":                      # 万相对小图会 InvalidParameter, 先把短边补到 512
+    if prov in ("wan", "qwen"):            # 阿里两家对小图都会 InvalidParameter, 先把短边补到 512
         image_bytes = _ensure_min_side(image_bytes, 512)
     data_uri = "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode("ascii")
 
-    if prov == "wan":
+    if prov == "qwen":
+        # 千问: 端点是豆包那个, body 却是 DashScope 的 input.messages 形状
+        payload = {"model": model,
+                   "input": {"messages": [{"role": "user",
+                                           "content": [{"image": data_uri}, {"text": prompt}]}]},
+                   "parameters": {"n": 1}}
+        r = _post(base.rstrip("/") + "/v1/images/generations", key, payload, timeout)
+        url = _dig_url(r)
+        if not url:
+            raise RuntimeError("千问响应里没找到图片 url: " + json.dumps(r)[:300])
+    elif prov == "wan":
         payload = {"model": model,
                    "input": {"messages": [{"role": "user",
                                            "content": [{"image": data_uri}, {"text": prompt}]}]},
