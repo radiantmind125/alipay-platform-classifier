@@ -87,6 +87,12 @@ def main() -> None:
                     help="线路B 的假图也只算金额定位成功的(默认开)")
     ap.add_argument("--target", type=int, default=None,
                     help="给一个并集预算(比如 5000 表示 1/5000), 扫出能达标的阈值组合")
+    ap.add_argument("--fa", type=Path, default=None,
+                    help="**同一批假图**被线路A 打分的 summary.csv(配 --fb 用)")
+    ap.add_argument("--fb", type=Path, default=None,
+                    help="**同一批假图**被线路B 打分的 summary.csv。"
+                         "给了这两个就算**并集召回** —— 上线是两条线一起跑, "
+                         "任一条命中就算抓到, 所以单条召回是**低估**")
     args = ap.parse_args()
 
     drop = set()
@@ -124,6 +130,31 @@ def main() -> None:
             args.b_thr = (sb[kb] if kb < len(sb) else 0.0) + 1e-6
             print(f"线路B 预算 1/{bb}: 样本 {len(sb):,} 张(仅金额定位成功) -> "
                   f"容忍 {kb} 张 -> 阈值 {args.b_thr:.4f}")
+
+    # ★并集召回: 同一批假图两条线都打过分, 任一条命中就算抓到
+    if args.fa and args.fb and args.a_thr is not None and args.b_thr is not None:
+        FA = _load(args.fa, args.a_col, False)
+        FB = _load(args.fb, args.b_col, True)          # 线路B 只在定位成功时出信号
+        uni = set(FA)                                  # 以线路A 为全集: 每张假图都过线路A
+        if not uni:
+            raise SystemExit("--fa 里没读到分数")
+        ah = {k for k in uni if FA[k] >= args.a_thr}
+        bh = {k for k in uni if k in FB and FB[k] >= args.b_thr}
+        n_f = len(uni)
+        print()
+        print("=" * 70)
+        print(f"并集召回(同一批假图 {n_f} 张; 线路B 能出信号的 {len(set(FB) & uni)} 张)")
+        print("=" * 70)
+        print(f"  只靠线路A 抓到 : {len(ah):4d}  = {len(ah)/n_f*100:5.1f}%")
+        print(f"  只靠线路B 抓到 : {len(bh):4d}  = {len(bh)/n_f*100:5.1f}%")
+        print(f"  两条都抓到     : {len(ah & bh):4d}")
+        print(f"  **并集(实际能抓到的): {len(ah | bh)} = {len(ah | bh)/n_f*100:.1f}%**")
+        miss = uni - (ah | bh)
+        print(f"  两条都没抓到   : {len(miss):4d}  = {len(miss)/n_f*100:5.1f}%  <- 真正漏掉的只有这些")
+        print()
+        print("★ 单看一条线的召回是**低估** —— 上线两条一起跑, 任一条命中就拒。")
+        print("  评估某个生成器覆盖得够不够, 要看这个并集数。")
+        return
 
     if args.a_thr is not None and args.b_thr is not None:
         a_hit, b_hit, both = union_rate(args.a_thr, args.b_thr)
