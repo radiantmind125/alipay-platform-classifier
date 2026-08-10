@@ -38,8 +38,14 @@ _DIR_EXPECT: dict[str, int | None] = {
     r"probe\api_local_wan":       401,   # 万相 旧测试集(**训练测试同源, 已弃用**)
     r"probe\localedit_heldout":   300,   # 白图 留一测试集(sd-vae-ft-ema, 未进训练)
     r"probe\localedit_blue":      300,   # 蓝图 留一测试集
-    r"download\TempFakeImages":  None,   # 源图池 A(千问/豆包 训练源)
-    r"download2\TempFakeImages": None,   # 源图池 B(万相 训练源 / 千问豆包 测试源)
+}
+
+# 源图池: 数量会变(还在收集), 所以查**下限**而不是精确值。
+# ★教训: 第一版把这两个写成 None(无基准), 结果 download2 只剩 1 个文件却报"全部通过" ——
+#   **没有基准的检查等于没检查, 还会给出虚假的安心。宁可给个粗略下限, 也不要留 None。**
+_DIR_MIN: dict[str, int] = {
+    r"download\TempFakeImages":  50000,   # 源图池 A
+    r"download2\TempFakeImages": 50000,   # 源图池 B
 }
 
 # 打分结果 CSV -> 应有行数
@@ -145,6 +151,20 @@ def main() -> None:
         bad += (ok is False)
         print(f"  {mark(ok)} {rel:30s} 实际 {n:7d}" + (f"  应有 {exp:7d}" if exp else "  (无基准)"))
 
+    print("\n[3b] 源图池 (查下限, 不查精确值 —— 池子还在增长)")
+    for rel, floor in _DIR_MIN.items():
+        p = R / rel
+        if not p.exists():
+            print(f"  !!!! {rel:30s} 目录不存在")
+            bad += 1
+            continue
+        n = count_files(p)
+        deep = sum(1 for _ in p.rglob("*") if _.is_file()) if n < floor else n
+        ok = (max(n, deep) >= floor)
+        bad += (not ok)
+        extra = "" if n == deep else f"  (递归数 {deep} —— 文件在子目录里)"
+        print(f"  {mark(ok)} {rel:30s} 实际 {n:7d}  下限 {floor:7d}{extra}")
+
     print("\n[4] 打分结果 CSV 行数")
     for rel, exp in _CSV_EXPECT.items():
         p = R / rel
@@ -180,7 +200,9 @@ def main() -> None:
         at_root = (R / name).exists()
         at_stray = (stray / name).exists()
         where = "根目录" if at_root else ("**还在 SSP_work_images 里**" if at_stray else "!!! 两处都找不到")
-        n = count_files(R / name) if at_root else (count_files(stray / name) if at_stray else -1)
+        base = (R / name) if at_root else (stray / name)
+        # **要递归数** —— localcrops 底下是 ai/ 和 nature/ 两个子目录, 直接数会得到 0, 看着像空的
+        n = sum(1 for _ in base.rglob("*") if _.is_file()) if (at_root or at_stray) else -1
         flag = "OK  " if at_root else ("??  " if at_stray else "!!!!")
         bad += (not at_root and not at_stray)
         print(f"  {flag} {name:24s} {where:28s} 文件 {n}")
