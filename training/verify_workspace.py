@@ -44,9 +44,16 @@ _DIR_EXPECT: dict[str, int | None] = {
 # ★教训: 第一版把这两个写成 None(无基准), 结果 download2 只剩 1 个文件却报"全部通过" ——
 #   **没有基准的检查等于没检查, 还会给出虚假的安心。宁可给个粗略下限, 也不要留 None。**
 _DIR_MIN: dict[str, int] = {
-    r"download\TempFakeImages":  50000,   # 源图池 A
-    r"download2\TempFakeImages": 50000,   # 源图池 B
+    r"download\TempFakeImages":  50000,   # 造样本的源图池
 }
+# **`download2` 不在这里, 是故意的。** 它不是图池, 而是下载器 `B6.AI.Tools.Download.exe`
+# 的安装目录, 底下的 `TempFakeImages` 是**会被清空的暂存输出**(实测只剩 1 张 2026-08-01 的新图)。
+# 拿它当"池子"去查下限只会天天误报。
+#
+# ★但由此暴露一个更要紧的问题: 既然 download2 的东西会被搬走(很可能并进 download),
+#   那"训练用一个池、测试用另一个池"**从来就不是真正的隔离保证**。
+#   **判断训练测试有没有重叠, 只能靠比对 manifest 里的源文件名, 不能靠池子的名字。**
+#   万相已经这样比过(重叠 0); 千问/豆包也必须比过才能信它们的召回数。
 
 # 打分结果 CSV -> 应有行数
 _CSV_EXPECT: dict[str, int] = {
