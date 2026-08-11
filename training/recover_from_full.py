@@ -161,12 +161,15 @@ def main() -> None:
     ap.add_argument("--src-root", type=Path, nargs="+",
                     default=[Path(r"D:\download\TempFakeImages"), Path(r"D:\download2\OtherImages")])
     ap.add_argument("--sample", type=int, default=40, help="--list 时每个目录抽几张判版式")
-    ap.add_argument("--limit", type=int, default=0, help="最多重做几张(0=全部)")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="**处理多少个输入文件**(不是产出多少张; 0=全部)。"
+                         "★ 一开始写成'产出多少张', 那样切两半会重叠: `--limit 250` 为了凑够 250 张成功, "
+                         "实际会多吃掉几个失败的文件, 于是 `--skip 250` 起头的那半"
+                         "和前半**共用了几个源图**。按输入文件数切, 两半才真的不相交。")
     ap.add_argument("--skip", type=int, default=0,
-                    help="先跳过前几张再开始。配合 --limit 可以把**同一批**切成互不重叠的两半, "
+                    help="先跳过前几个输入文件。配合 --limit 把**同一批**切成互不重叠的两半, "
                          "例如 `--limit 250` 做训练, `--skip 250 --limit 150` 做测试。"
-                         "文件按名字排序处理, 而一次生成里每张对应不同源图, 所以这样切出来的"
-                         "两半**源图天然不重叠**, 不用事后再剔。")
+                         "文件按名字排序, 一次生成里每张对应不同源图, 所以这样切出来的两半源图不相交。")
     args = ap.parse_args()
 
     if args.list:
@@ -194,16 +197,18 @@ def main() -> None:
     why: Counter[str] = Counter()
     files = sorted(e.name for e in os.scandir(args.full)
                    if e.is_file() and os.path.splitext(e.name)[1].lower() in _EXTS)
+    n_all = len(files)
     if args.skip:
-        if args.skip >= len(files):
-            raise SystemExit(f"--skip {args.skip} 超过了这批的张数 {len(files)}")
+        if args.skip >= n_all:
+            raise SystemExit(f"--skip {args.skip} 超过了这批的文件数 {n_all}")
         files = files[args.skip:]
-    print(f"整图重绘 {len(files)} 张" + (f"(已跳过前 {args.skip} 张)" if args.skip else "")
+    if args.limit:
+        files = files[:args.limit]      # ★ 按**输入文件**切, 不按产出张数 —— 否则两半会重叠
+    print(f"这批共 {n_all} 个文件, 本次处理 {len(files)} 个"
+          + (f"(跳过前 {args.skip} 个)" if args.skip else "")
           + " -> 开始离线重做(不调接口)", flush=True)
 
     for nm in files:
-        if args.limit and made >= args.limit:
-            break
         parsed = split_full_name(Path(nm).stem)
         if not parsed:
             why["文件名不认识"] += 1
@@ -265,7 +270,7 @@ def main() -> None:
             print(f"  已重做 {made} 张...", flush=True)
 
     mf.close()
-    print(f"完成: 重做 {made} 张 -> {args.out}")
+    print(f"完成: 处理 {len(files)} 个文件, 成功重做 {made} 张 -> {args.out}")
     print(f"版式: 蓝图 {page_n.get('blue', 0)} 张, 白图 {page_n.get('white', 0)} 张(按像素判)")
     if why:
         print("没做成的原因:")
