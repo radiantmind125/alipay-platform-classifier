@@ -43,17 +43,19 @@ _EXT = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
 # ---- 应有清单写死在这里。**少一格必须大声报** ----
 # (教训: verify_workspace.py:44-45 —— 没有基准的检查等于没检查, 还会给出虚假的安心)
-_CELLS: list[tuple[str, str]] = [
-    ("万相 白", "wanwhite_ld6"),
-    ("万相 蓝", "wanblue_ld6"),
-    ("豆包 白", "seedwhite_ld6"),
-    ("豆包 蓝", "seedblue_ld6"),
-    ("千问 白", "qwenwhite_ld6"),
-    ("千问 蓝", "qwenblue_ld6"),
-    ("合成 白", "white_ld6"),
-    ("合成 蓝", "blue_ld6"),
-    ("真图池",  "genuine_20k_ld6"),
+_CELL_BASE: list[tuple[str, str]] = [
+    ("万相 白", "wanwhite"),
+    ("万相 蓝", "wanblue"),
+    ("豆包 白", "seedwhite"),
+    ("豆包 蓝", "seedblue"),
+    ("千问 白", "qwenwhite"),
+    ("千问 蓝", "qwenblue"),
+    ("合成 白", "white"),
+    ("合成 蓝", "blue"),
+    ("真图池",  "genuine_20k"),
 ]
+# 打分输出目录的后缀随模型版本变(ld6 / ld7 / ld7v ...), 用 --suffix 指定。
+_CELLS: list[tuple[str, str]] = [(a, f"{b}_ld6") for a, b in _CELL_BASE]
 
 # 仓库已经记过的脏数据源(verify_workspace.py:37-38)
 _DEPRECATED = {
@@ -419,7 +421,12 @@ def main() -> None:
     ap.add_argument("--emit-clean", type=Path, default=None,
                     help="把与训练同源的那几张从 summary.csv 里剔掉, 写出 <cell>_clean.csv。"
                          "少量重叠的集合(几张)靠这个补救, 不必整批作废")
+    ap.add_argument("--suffix", default="ld6",
+                    help="打分输出目录的后缀, 例如 ld6 / ld7 / ld7v。默认 ld6")
     args = ap.parse_args()
+
+    global _CELLS
+    _CELLS = [(a, f"{b}_{args.suffix}") for a, b in _CELL_BASE]
 
     found = sec1_inventory(args.probe)
     inputs = sec2_csv(found)
