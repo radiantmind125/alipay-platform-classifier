@@ -118,19 +118,21 @@ def audit_tags(crops: Path, manifest_root: Path, src_roots: list[Path], sample: 
                 used_b += 1
             else:
                 amb += 1
-        sbp = sb * 100.0 / max(1, sn)
+        # ★ sn=0 时**不能打印 0%** —— 那是除零兜底出来的数字, 会被当成"源图都是白图"的证据。
+        #   没测到就要显示成没测到。宁可空着, 也不要给一个看起来像结论的数。
+        sbp_s = f"{sb * 100.0 / sn:7.0f}%" if sn else "     --"
         if sn == 0:
             verdict = "源图查不到, 判不了 —— **不等于没问题**, 先把 --src-root 指对"
         elif used_w + used_b == 0:
             verdict = "尺寸都对不上, 多半不是 --crop-min 0 造的, 需人工看"
-        elif sbp > 60 and used_w > used_b:
+        elif sn and sb * 100.0 / sn > 60 and used_w > used_b:
             verdict = "**蓝图却用了白图定位器 -> 切到红包卡, 该剔**"
             bad.append(tag)
-        elif sbp > 60:
+        elif sn and sb * 100.0 / sn > 60:
             verdict = "蓝图金额区裁块, 对"
         else:
             verdict = "白图金额区裁块, 对"
-        print(f"  {tag:26s} {len(names):7d} {sbp:8.0f}% {used_w:9d} {used_b:9d} {amb:7d}   {verdict}")
+        print(f"  {tag:26s} {len(names):7d} {sbp_s:>8s} {used_w:9d} {used_b:9d} {amb:7d}   {verdict}")
 
     print()
     if bad:
