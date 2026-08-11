@@ -54,19 +54,52 @@ def _is_clean_screenshot(im: Image.Image) -> bool:
     return (not any(t in ifd for t in _OPT)) and short <= 1500 and 1.6 <= aspect <= 2.6
 
 
-def _collect(root: Path, n: int, seed: int) -> list[Path]:
+def _used_srcs(paths: list[Path]) -> set[str]:
+    """把已经用过的源图文件名收集起来 —— 传 manifest.csv 或含 manifest 的目录都行。
+
+    **为什么必须有这个**: 这个脚本挑源图是 `rglob + 随机打乱`, 两次运行只要种子和源目录
+    一样, 挑到的就是同一批图。历史上因此出过大事故:
+    豆包白测试集 397 张里有 394 张和训练用的是同一批原图(99.2%), 整个召回数作废;
+    万相白 6 张、千问白 3 张也有重叠。
+
+    **事后靠比对 manifest 去剔, 是补救; 造之前就排除掉, 才是解决。**
+    """
+    used: set[str] = set()
+    for p in paths:
+        mps = sorted(p.glob("*/manifest.csv")) if p.is_dir() else [p]
+        for mp in mps:
+            if not mp.exists():
+                continue
+            try:
+                for r in csv.DictReader(open(mp, encoding="utf-8-sig")):
+                    s = (r.get("src") or "").strip()
+                    if s:
+                        used.add(Path(s).name)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  读不了 {mp}: {exc}", flush=True)
+    return used
+
+
+def _collect(root: Path, n: int, seed: int, exclude: set[str] | None = None) -> list[Path]:
     files = [p for p in root.rglob("*") if p.suffix.lower() in _EXTS]
     random.Random(seed).shuffle(files)
+    ex = exclude or set()
     out: list[Path] = []
+    skipped_used = 0
     for p in files:
         if len(out) >= n:
             break
+        if p.name in ex:
+            skipped_used += 1
+            continue                      # 这张已经被别的批次用过, 换一张, 不给自己埋同源的雷
         try:
             with Image.open(p) as im:
                 if _is_clean_screenshot(im):
                     out.append(p)
         except Exception:
             continue
+    if ex:
+        print(f"排除已用源图 {len(ex)} 个, 本次跳过其中 {skipped_used} 张", flush=True)
     return out
 
 
@@ -137,6 +170,11 @@ def main() -> None:
                     help="超时/网络错时重试几次(风控拒图那种永久性错误不重试, 重试也没用)")
     ap.add_argument("--sleep", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--exclude-src", type=Path, nargs="*", default=None, metavar="PATH",
+                    help="**造之前就把已经用过的源图排除掉**, 避免训练测试同源。"
+                         "可以给 manifest.csv, 也可以给包含若干 <批次>/manifest.csv 的目录(如 D:\\probe)。"
+                         "教训: 豆包白测试集 397 张里 394 张和训练同源, 整个召回数作废 —— "
+                         "事后剔是补救, 造之前排除才是解决。")
     args = ap.parse_args()
 
     key = os.environ.get("DMX_KEY", "").strip()
@@ -153,7 +191,8 @@ def main() -> None:
             raise SystemExit("--save-full 需要配 --send full(crop 模式下我们只拿到小块, 没有整张重绘图)")
         args.save_full.mkdir(parents=True, exist_ok=True)
 
-    srcs = _collect(args.src_root, args.n * 6, args.seed)   # 多备货: 部分会被风控拒 + 部分定位失败
+    excl = _used_srcs(list(args.exclude_src)) if args.exclude_src else set()
+    srcs = _collect(args.src_root, args.n * 6, args.seed, excl)   # 多备货: 部分会被风控拒 + 部分定位失败
     if not srcs:
         print("没采到真图源"); return
     prompt = args.prompt or (
