@@ -257,7 +257,7 @@ def sec4_edit(inputs: dict[str, Path], roots: list[Path], limit: int,
     print("=" * 104)
     verdict: dict[str, str] = {}
     targets = [(n, d) for _l, n in _CELLS for d in [inputs.get(n)]
-               if d is not None and n != "genuine_20k_ld6" and (d / "manifest.csv").exists()]
+               if d is not None and not n.startswith("genuine_20k") and (d / "manifest.csv").exists()]
     if not targets:
         print("  没有带 manifest 的假图集, 跳过。")
         return verdict
@@ -364,15 +364,39 @@ def sec5_leak(inputs: dict[str, Path], crops: Path, probe: Path,
         print(f"  !!!! {len(collided)} 个生成图名对应多个源图 —— 同 tag 跑过两次, 裁块被成对覆盖")
         print("       (made 计数器每次从 0 重数; ai 和 nature 仍一样多, verify_workspace 那条断言照样报 OK)")
 
+    def write_clean(name: str, leaked: set[str], note: str) -> None:
+        """**每个有 summary.csv 的格都写一份 clean.csv**, 哪怕一行都不用剔。
+
+        ★ 第一版只在"有重叠"时才写, 结果下游命令按固定文件名去读, 没重叠的那些直接
+          FileNotFoundError。**产物名字要可预期, 不能取决于检查结果。**
+        """
+        if emit is None:
+            return
+        sp_csv = found.get(name)
+        if sp_csv is None:
+            return
+        srows = list(csv.DictReader(open(sp_csv, encoding="utf-8-sig")))
+        if not srows:
+            return
+        keep = [r for r in srows if (r.get("image_name") or "").strip() not in leaked]
+        emit.mkdir(parents=True, exist_ok=True)
+        op = emit / f"{name}_clean.csv"
+        with open(op, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.DictWriter(f, fieldnames=list(srows[0]))
+            w.writeheader()
+            w.writerows(keep)
+        print(f"         -> {op.name}  {len(keep)} 行 (剔 {len(srows)-len(keep)}){note}")
+
     print()
     for _label, name in _CELLS:
         d = inputs.get(name)
-        if d is None or name == "genuine_20k_ld6":
+        if d is None or name.startswith("genuine_20k"):
             continue
         mp = d / "manifest.csv"
         if not mp.exists():
             verdict[name] = "无 manifest, 查不了"
             print(f"  ??   {name:20s} 没有 manifest.csv -> **不等于干净, 是查不了**")
+            write_clean(name, set(), "  **同源未验证, 一行没剔**")
             continue
         rows = list(csv.DictReader(open(mp, encoding="utf-8-sig")))
         src = [Path((r.get("src") or "").strip()).name for r in rows if (r.get("src") or "").strip()]
@@ -384,20 +408,9 @@ def sec5_leak(inputs: dict[str, Path], crops: Path, probe: Path,
             print(f"         {s}")
         # 少量重叠不必整批作废 —— **把那几张剔掉再算**才是对的补救。
         # (只有 seedwhite 那种 99% 重叠才是真的没救。)
-        if ov and emit is not None:
-            leaked = {(r.get("file") or "").strip() for r in rows
-                      if Path((r.get("src") or "").strip()).name in allsrc}
-            sp_csv = found.get(name)
-            if sp_csv is not None:
-                srows = list(csv.DictReader(open(sp_csv, encoding="utf-8-sig")))
-                keep = [r for r in srows if (r.get("image_name") or "").strip() not in leaked]
-                emit.mkdir(parents=True, exist_ok=True)
-                op = emit / f"{name}_clean.csv"
-                with open(op, "w", newline="", encoding="utf-8-sig") as f:
-                    w = csv.DictWriter(f, fieldnames=list(srows[0]))
-                    w.writeheader()
-                    w.writerows(keep)
-                print(f"         -> 剔除 {len(srows)-len(keep)} 行, 写出 {op} ({len(keep)} 行)")
+        leaked = {(r.get("file") or "").strip() for r in rows
+                  if Path((r.get("src") or "").strip()).name in allsrc}
+        write_clean(name, leaked, "")
     print()
     print("  判读: 重叠必须 0。>0 = 测的是记忆效应。'无 manifest' 只是查不了, 报数时要标注'未验证同源'。")
     return verdict
