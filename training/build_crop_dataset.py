@@ -34,7 +34,17 @@ def main() -> None:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--val-frac", type=float, default=0.15)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--exclude-tags", nargs="*", default=None, metavar="TAG",
+                    help="按 tag 剔掉某几组裁块(文件名形如 crop_<tag>_<编号>.jpg)。"
+                         "**2026-08-11 加**: API 那条路的蓝图裁块切的是红包促销卡不是金额区"
+                         "(gen_api_local_edit 当时写死用白图定位器), 要把那几组剔掉重训。"
+                         "本地 VAE 那条路一直用的 locate_amount_auto, 蓝图裁块是对的, 不用剔。")
+    ap.add_argument("--only-tags", nargs="*", default=None, metavar="TAG",
+                    help="反过来, 只保留这几组(和 --exclude-tags 互斥)")
+    ap.add_argument("--list-tags", action="store_true", help="只列出有哪些 tag 和各自多少对, 不建数据集")
     args = ap.parse_args()
+    if args.exclude_tags and args.only_tags:
+        raise SystemExit("--exclude-tags 和 --only-tags 只能给一个")
 
     ai_dir, nat_dir = args.crops / "ai", args.crops / "nature"
     if not ai_dir.is_dir() or not nat_dir.is_dir():
@@ -46,6 +56,40 @@ def main() -> None:
     if not pairs:
         raise SystemExit("没有配对的裁块(ai/ 与 nature/ 里没有同名文件)")
     lonely = len(ai_names ^ nat_names)
+
+    def tag_of(nm: str) -> str:
+        """crop_<tag>_<编号>.jpg -> tag。**从右边切**, tag 里带下划线也不会切错。"""
+        stem = Path(nm).stem
+        if not stem.startswith("crop_"):
+            return "(命名不认识)"
+        return stem[len("crop_"):].rpartition("_")[0] or "(命名不认识)"
+
+    from collections import Counter
+    tags = Counter(tag_of(nm) for nm in pairs)
+    if args.list_tags:
+        print(f"配对 {len(pairs)} 对, 共 {len(tags)} 组:")
+        for t, c in sorted(tags.items(), key=lambda kv: -kv[1]):
+            print(f"  {t:26s} {c:6d} 对")
+        print("\n要剔掉某几组: --exclude-tags <tag1> <tag2> ...")
+        return
+
+    if args.exclude_tags:
+        drop = set(args.exclude_tags)
+        unknown = drop - set(tags)
+        if unknown:
+            raise SystemExit(f"这几个 tag 在裁块里不存在, 先用 --list-tags 看一眼: {', '.join(sorted(unknown))}")
+        before = len(pairs)
+        pairs = [nm for nm in pairs if tag_of(nm) not in drop]
+        print(f"剔掉 {len(drop)} 组 tag, 去掉 {before - len(pairs)} 对, 剩 {len(pairs)} 对")
+    elif args.only_tags:
+        keep = set(args.only_tags)
+        unknown = keep - set(tags)
+        if unknown:
+            raise SystemExit(f"这几个 tag 在裁块里不存在, 先用 --list-tags 看一眼: {', '.join(sorted(unknown))}")
+        pairs = [nm for nm in pairs if tag_of(nm) in keep]
+        print(f"只保留 {len(keep)} 组 tag, 剩 {len(pairs)} 对")
+    if not pairs:
+        raise SystemExit("剔完之后没有裁块了")
 
     rng = random.Random(args.seed)
     rng.shuffle(pairs)
@@ -66,6 +110,8 @@ def main() -> None:
         return sum(1 for _ in d.iterdir())
 
     print(f"配对 {len(pairs)} 对(未配对的忽略 {lonely} 个)")
+    used = Counter(tag_of(nm) for nm in pairs)
+    print("  各组: " + "  ".join(f"{t}={c}" for t, c in sorted(used.items(), key=lambda kv: -kv[1])))
     print(f"数据集 -> {base}")
     print(f"  train/nature={n(dirs[('train','nature')])}  train/ai={n(dirs[('train','ai')])}")
     print(f"  val/nature  ={n(dirs[('val','nature')])}  val/ai  ={n(dirs[('val','ai')])}")
