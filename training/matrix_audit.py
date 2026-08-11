@@ -166,22 +166,31 @@ def sec2_csv(found: dict[str, Path | None]) -> dict[str, Path]:
             print(f"  !!!! {name:20s} 空文件")
             continue
         loc = sum(1 for r in rows if (r.get("roi_amount_located") or "").strip() == "1")
-        ne = sum(1 for r in rows if (r.get("final_ai_score") or "") != (r.get("tile_max") or ""))
+        # ★ 别再拿"final 等不等于 tile_max"当对错标准。跑分时传了 --agg top3, final 就该等于
+        #   tile_top3 而不是 tile_max —— 第一版把这个写成 "final≠max 必须=0", 于是正确的
+        #   top3 批次全被标成 !!!!。真正要查的是: final 是不是**始终**等于同一个聚合列。
+        #   始终对得上某一列 = 这批口径一致; 一列都对不上 = 混了不同 --agg 的批次。
+        match = {c: sum(1 for r in rows if (r.get("final_ai_score") or "") == (r.get(c) or ""))
+                 for c in ("tile_max", "tile_top3", "tile_mean")}
+        agg = [c.replace("tile_", "") for c, v in match.items() if v == len(rows)]
+        agg_s = "/".join(agg) if agg else "**混批**"
         nt = Counter((r.get("n_tiles") or "?") for r in rows)
         src = sorted({str(Path(r.get("image") or "").parent) for r in rows})
         total = sum(count_images(Path(s)) for s in src if Path(s).is_dir())
         for s in src:
             inputs[name] = Path(s)
         nts = " ".join(f"{k}块x{v}" for k, v in sorted(nt.items(), key=lambda kv: int(kv[0]) if kv[0].isdigit() else 0))
-        flag = "OK  " if (total == len(rows) and ne == 0) else "!!!!"
+        flag = "OK  " if (total == len(rows) and agg) else "!!!!"
         print(f"  {flag} {name:20s} CSV={len(rows):6d} 源={total:6d} 差={total-len(rows):+5d} "
-              f"定位={loc*100.0/len(rows):5.1f}% [{nts}] final≠max={ne}")
+              f"定位={loc*100.0/len(rows):5.1f}% [{nts}] 口径={agg_s}")
         print(f"       输入: {' ; '.join(src)}")
         if len(src) > 1:
             print("       !!!! 这个 CSV 混了多个输入目录")
     print()
     print("  判读: 差必须=0(否则打分失败的图不写行, 分母偷偷变小, 召回虚高, predict_tiled.py:228-229);")
-    print("        final≠max 必须=0(否则混了不同 --agg 的批次);")
+    print("        口径 = final_ai_score 始终等于哪个聚合列。跑分传了 --agg top3 就该显示 top3;")
+    print("        显示 **混批** 才是问题(一列都对不上 = 混了不同 --agg 的批次);")
+    print("        分数全 0 的行三列相等, 所以偶尔会同时显示 max/top3/mean, 正常;")
     print("        切块数只该有 4(定位成功 2x2) 和 18(退回 3x6) 两种。")
     return inputs
 

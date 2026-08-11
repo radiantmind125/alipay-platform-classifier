@@ -82,7 +82,21 @@ def main() -> None:
     if not g:
         raise SystemExit("真图 summary 里没读到分数")
     n = len(g)
-    fakes = {p.parent.name or p.stem: _scores(p, args.col, args.require_located) for p in args.fake}
+    # ★ 名字要按**文件**取, 不能只按父目录名。
+    #   踩过的坑: 两个清洗后的 CSV 放在同一个目录里(_clean_ld7\wanwhite_...csv 和
+    #   _clean_ld7\qwenwhite_...csv), 用父目录名当 key 时**字典把前一个静默覆盖了**,
+    #   表里只剩一列, 而且列名还是目录名, 完全看不出少了一个假图集。
+    #   约定: 文件名叫 summary.csv 就用父目录名(老用法), 否则用文件名本身。
+    def _key(p: Path) -> str:
+        return p.parent.name if p.stem == "summary" else p.stem
+
+    keys = [_key(p) for p in args.fake]
+    dup = sorted({k for k in keys if keys.count(k) > 1})
+    if dup:
+        raise SystemExit(f"假图集重名, 会互相覆盖: {', '.join(dup)} —— 把文件改名或分开放")
+    fakes = {k: _scores(p, args.col, args.require_located) for k, p in zip(keys, args.fake)}
+    if len(fakes) != len(args.fake):
+        raise SystemExit(f"给了 {len(args.fake)} 个假图集, 只认出 {len(fakes)} 个")
 
     print(f"真图 {n} 张 | 假图集: " + ", ".join(f"{k}({len(v)})" for k, v in fakes.items()))
     print(f"真图最高分 {g[0][0]:.4f} | 能可靠分辨的最小误杀率 ≈ 1/{n}")
