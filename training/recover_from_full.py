@@ -162,6 +162,11 @@ def main() -> None:
                     default=[Path(r"D:\download\TempFakeImages"), Path(r"D:\download2\OtherImages")])
     ap.add_argument("--sample", type=int, default=40, help="--list 时每个目录抽几张判版式")
     ap.add_argument("--limit", type=int, default=0, help="最多重做几张(0=全部)")
+    ap.add_argument("--skip", type=int, default=0,
+                    help="先跳过前几张再开始。配合 --limit 可以把**同一批**切成互不重叠的两半, "
+                         "例如 `--limit 250` 做训练, `--skip 250 --limit 150` 做测试。"
+                         "文件按名字排序处理, 而一次生成里每张对应不同源图, 所以这样切出来的"
+                         "两半**源图天然不重叠**, 不用事后再剔。")
     args = ap.parse_args()
 
     if args.list:
@@ -189,7 +194,12 @@ def main() -> None:
     why: Counter[str] = Counter()
     files = sorted(e.name for e in os.scandir(args.full)
                    if e.is_file() and os.path.splitext(e.name)[1].lower() in _EXTS)
-    print(f"整图重绘 {len(files)} 张 -> 开始离线重做(不调接口)", flush=True)
+    if args.skip:
+        if args.skip >= len(files):
+            raise SystemExit(f"--skip {args.skip} 超过了这批的张数 {len(files)}")
+        files = files[args.skip:]
+    print(f"整图重绘 {len(files)} 张" + (f"(已跳过前 {args.skip} 张)" if args.skip else "")
+          + " -> 开始离线重做(不调接口)", flush=True)
 
     for nm in files:
         if args.limit and made >= args.limit:
