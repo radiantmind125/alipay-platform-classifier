@@ -15,13 +15,130 @@ r"""把 gen_local_ai_edit --save-crops 产出的配对裁块, 组装成官方 SS
 from __future__ import annotations
 
 import argparse
+import csv
 import random
 import shutil
 import sys
+from collections import Counter, defaultdict
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 _DIR = "imagenet_ai_0419_sdv4"
 _EXTS = {".jpg", ".jpeg", ".png"}
+
+
+def audit_tags(crops: Path, manifest_root: Path, src_roots: list[Path], sample: int,
+               tag_of, pairs: list[str]) -> None:
+    """按**像素**判定每组裁块切得对不对 —— 不看 tag 名字。
+
+    为什么不能看名字: 实测 `apiwantest` 这组其实是**蓝图**, 名字里却没有 blue。
+    本项目已经在"拿目录名/参数名当证据"上栽过好几次, 这里一律用像素。
+
+    判据(**精确, 不是颜色启发式**):
+      裁块是 `src[sy0+4:sy1-4, sx0+4:sx1-4]`(gen_api_local_edit.py:241), 所以
+        裁块高 = 框高 - 8, 裁块宽 = 框宽 - 8
+      定位器是确定性的, 于是把源图重新跑一遍两个定位器, 拿框的尺寸和裁块实际尺寸对:
+      对得上哪个, 当初用的就是哪个。
+
+      源图是蓝图 + 当初用的是白图定位器 -> **切到红包促销卡了, 该剔**
+      源图是蓝图 + 当初用的是蓝图定位器 -> 蓝图金额区裁块, 对
+      源图是白图 + 用白图定位器          -> 白图金额区裁块, 对
+
+    (最早写的是"看裁块底色是不是蓝"—— 那个不靠谱: 紧贴金额框的裁块几乎全是白色数字笔画,
+     蓝底占比很小, 判不出来。尺寸对比是精确的。)
+    """
+    import numpy as np
+    from PIL import Image
+
+    from engine_b_tamper import locate_amount
+    from locate_blue import is_blue_page, locate_amount_blue
+
+    def load(p: Path):
+        try:
+            return np.asarray(Image.open(p).convert("RGB"))
+        except Exception:
+            return None
+
+    # 裁块 -> 生成图名 -> manifest 的 src
+    src_of: dict[str, str] = {}
+    for mp in sorted(manifest_root.glob("*/manifest.csv")):
+        try:
+            for r in csv.DictReader(open(mp, encoding="utf-8-sig")):
+                f, s = (r.get("file") or "").strip(), (r.get("src") or "").strip()
+                if f and s:
+                    src_of[f] = Path(s).name
+        except Exception:
+            continue
+    index: dict[str, Path] = {}
+    for root in src_roots:
+        if root.is_dir():
+            for cur, _d, files in __import__("os").walk(root):
+                for f in files:
+                    if Path(f).suffix.lower() in _EXTS:
+                        index.setdefault(f, Path(cur) / f)
+    print(f"manifest 记录 {len(src_of)} 条 | 源图池索引 {len(index)} 张")
+
+    by_tag: dict[str, list[str]] = defaultdict(list)
+    for nm in pairs:
+        by_tag[tag_of(nm)].append(nm)
+
+    def box_size(loc) -> tuple[int, int] | None:
+        """定位框换算成裁块应有的尺寸(四周各让 4 像素, 见 gen_api_local_edit.py:241)。"""
+        if not loc:
+            return None
+        return (loc[3] - loc[1] - 8, loc[2] - loc[0] - 8)
+
+    print()
+    print(f"  {'组':26s} {'对数':>7s} {'源图蓝图':>9s} {'用白定位':>9s} {'用蓝定位':>9s} {'判不了':>7s}   判定")
+    print("  " + "-" * 104)
+    bad: list[str] = []
+    for tag in sorted(by_tag, key=lambda t: -len(by_tag[t])):
+        names = by_tag[tag]
+        pick = names if len(names) <= sample else random.Random(0).sample(names, sample)
+        sb = sn = used_w = used_b = amb = 0
+        for nm in pick:
+            a = load(crops / "ai" / nm)
+            gen = f"apilocal_{tag}_{Path(nm).stem.rpartition('_')[2]}.jpg"
+            sp = index.get(src_of.get(gen, ""))
+            if a is None or sp is None:
+                amb += 1
+                continue
+            s = load(sp)
+            if s is None:
+                amb += 1
+                continue
+            sn += 1
+            sb += int(is_blue_page(s))
+            csz = a.shape[:2]
+            wsz, bsz = box_size(locate_amount(s)), box_size(locate_amount_blue(s))
+            if wsz == csz and bsz != csz:
+                used_w += 1
+            elif bsz == csz and wsz != csz:
+                used_b += 1
+            else:
+                amb += 1
+        sbp = sb * 100.0 / max(1, sn)
+        if sn == 0:
+            verdict = "源图查不到, 判不了 —— **不等于没问题**, 先把 --src-root 指对"
+        elif used_w + used_b == 0:
+            verdict = "尺寸都对不上, 多半不是 --crop-min 0 造的, 需人工看"
+        elif sbp > 60 and used_w > used_b:
+            verdict = "**蓝图却用了白图定位器 -> 切到红包卡, 该剔**"
+            bad.append(tag)
+        elif sbp > 60:
+            verdict = "蓝图金额区裁块, 对"
+        else:
+            verdict = "白图金额区裁块, 对"
+        print(f"  {tag:26s} {len(names):7d} {sbp:8.0f}% {used_w:9d} {used_b:9d} {amb:7d}   {verdict}")
+
+    print()
+    if bad:
+        print("  按像素判定该剔掉的组:")
+        print("    --exclude-tags " + " ".join(bad))
+        print(f"  (共 {sum(len(by_tag[t]) for t in bad)} 对)")
+    else:
+        print("  没有判定为错区域的组。若源图大面积查不到, 说明源图池路径给得不对, 用 --src-root 指对再跑。")
 
 
 def main() -> None:
@@ -31,7 +148,8 @@ def main() -> None:
         pass
     ap = argparse.ArgumentParser(description="配对裁块 -> SSP 训练目录")
     ap.add_argument("--crops", type=Path, required=True, help="含 ai/ 与 nature/ 的目录")
-    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--out", type=Path, default=None,
+                    help="输出的数据集目录。--list-tags / --audit-tags 只看不建, 可以不给")
     ap.add_argument("--val-frac", type=float, default=0.15)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--exclude-tags", nargs="*", default=None, metavar="TAG",
@@ -42,6 +160,13 @@ def main() -> None:
     ap.add_argument("--only-tags", nargs="*", default=None, metavar="TAG",
                     help="反过来, 只保留这几组(和 --exclude-tags 互斥)")
     ap.add_argument("--list-tags", action="store_true", help="只列出有哪些 tag 和各自多少对, 不建数据集")
+    ap.add_argument("--audit-tags", action="store_true",
+                    help="**按像素**判每组裁块切得对不对(源图版式 vs 裁块底色), 并直接给出该剔哪几组。"
+                         "别看 tag 名字 —— 实测 apiwantest 其实是蓝图, 名字里没有 blue")
+    ap.add_argument("--manifest-root", type=Path, default=Path(r"D:\probe"))
+    ap.add_argument("--src-root", type=Path, nargs="+",
+                    default=[Path(r"D:\download\TempFakeImages"), Path(r"D:\download2\OtherImages")])
+    ap.add_argument("--audit-sample", type=int, default=40, help="每组抽多少个裁块做判定")
     args = ap.parse_args()
     if args.exclude_tags and args.only_tags:
         raise SystemExit("--exclude-tags 和 --only-tags 只能给一个")
@@ -64,8 +189,11 @@ def main() -> None:
             return "(命名不认识)"
         return stem[len("crop_"):].rpartition("_")[0] or "(命名不认识)"
 
-    from collections import Counter
     tags = Counter(tag_of(nm) for nm in pairs)
+    if args.audit_tags:
+        audit_tags(args.crops, args.manifest_root, list(args.src_root),
+                   args.audit_sample, tag_of, pairs)
+        return
     if args.list_tags:
         print(f"配对 {len(pairs)} 对, 共 {len(tags)} 组:")
         for t, c in sorted(tags.items(), key=lambda kv: -kv[1]):
@@ -90,6 +218,8 @@ def main() -> None:
         print(f"只保留 {len(keep)} 组 tag, 剩 {len(pairs)} 对")
     if not pairs:
         raise SystemExit("剔完之后没有裁块了")
+    if args.out is None:
+        raise SystemExit("要真的建数据集就得给 --out(只想看的话用 --list-tags 或 --audit-tags)")
 
     rng = random.Random(args.seed)
     rng.shuffle(pairs)
