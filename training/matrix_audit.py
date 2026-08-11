@@ -314,7 +314,8 @@ def sec4_edit(inputs: dict[str, Path], roots: list[Path], limit: int,
     return verdict
 
 
-def sec5_leak(inputs: dict[str, Path], crops: Path, probe: Path) -> dict[str, str]:
+def sec5_leak(inputs: dict[str, Path], crops: Path, probe: Path,
+              found: dict[str, Path | None], emit: Path | None) -> dict[str, str]:
     print()
     print("=" * 104)
     print("[5] 训练测试是否同源 (裁块源图 vs 测试集源图, 按源图文件名求交)")
@@ -376,9 +377,25 @@ def sec5_leak(inputs: dict[str, Path], crops: Path, probe: Path) -> dict[str, st
         ov = sorted({s for s in src if s in allsrc})
         verdict[name] = "干净" if not ov else f"**重叠 {len(ov)}**"
         print(f"  {'OK  ' if not ov else '!!!!'} {name:20s} 行 {len(rows):5d} 有src {len(src):5d} 重叠 {len(ov):5d}"
-              + ("" if not ov else "  **这个召回数是记忆效应, 不能报**"))
+              + ("" if not ov else f"  ({len(ov)*100.0/max(1,len(rows)):.1f}% 的图与训练同源)"))
         for s in ov[:10]:
             print(f"         {s}")
+        # 少量重叠不必整批作废 —— **把那几张剔掉再算**才是对的补救。
+        # (只有 seedwhite 那种 99% 重叠才是真的没救。)
+        if ov and emit is not None:
+            leaked = {(r.get("file") or "").strip() for r in rows
+                      if Path((r.get("src") or "").strip()).name in allsrc}
+            sp_csv = found.get(name)
+            if sp_csv is not None:
+                srows = list(csv.DictReader(open(sp_csv, encoding="utf-8-sig")))
+                keep = [r for r in srows if (r.get("image_name") or "").strip() not in leaked]
+                emit.mkdir(parents=True, exist_ok=True)
+                op = emit / f"{name}_clean.csv"
+                with open(op, "w", newline="", encoding="utf-8-sig") as f:
+                    w = csv.DictWriter(f, fieldnames=list(srows[0]))
+                    w.writeheader()
+                    w.writerows(keep)
+                print(f"         -> 剔除 {len(srows)-len(keep)} 行, 写出 {op} ({len(keep)} 行)")
     print()
     print("  判读: 重叠必须 0。>0 = 测的是记忆效应。'无 manifest' 只是查不了, 报数时要标注'未验证同源'。")
     return verdict
@@ -399,6 +416,9 @@ def main() -> None:
     ap.add_argument("--full-thresh", type=float, default=0.5)
     ap.add_argument("--hit", type=float, default=0.5)
     ap.add_argument("--skip-edit", action="store_true", help="跳过第4节(最慢)")
+    ap.add_argument("--emit-clean", type=Path, default=None,
+                    help="把与训练同源的那几张从 summary.csv 里剔掉, 写出 <cell>_clean.csv。"
+                         "少量重叠的集合(几张)靠这个补救, 不必整批作废")
     args = ap.parse_args()
 
     found = sec1_inventory(args.probe)
@@ -406,7 +426,7 @@ def main() -> None:
     ident = sec3_identity(inputs, args.sample)
     edit = {} if args.skip_edit else sec4_edit(inputs, list(args.src_root), args.limit,
                                                args.full_thresh, args.hit)
-    leak = sec5_leak(inputs, args.crops, args.probe)
+    leak = sec5_leak(inputs, args.crops, args.probe, found, args.emit_clean)
 
     print()
     print("=" * 104)

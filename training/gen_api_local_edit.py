@@ -35,7 +35,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from api_image import generate_image
-from engine_b_tamper import locate_amount
+from locate_blue import locate_amount_auto
 
 _EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 _OPT = (33434, 33437, 34855, 37386)
@@ -169,6 +169,7 @@ def main() -> None:
         mw.writerow(["file", "model", "src"])
 
     made = failed = skipped = 0
+    page_n = {"blue": 0, "white": 0}          # 造出来的图各是什么版式, 收工时报一下, 免得再靠目录名猜
     for sp in srcs:
         if made >= args.n:
             break
@@ -179,7 +180,12 @@ def main() -> None:
         try:
             src_im = ImageOps.exif_transpose(Image.open(sp)).convert("RGB")
             src = np.asarray(src_im)
-            loc_s = locate_amount(src)
+            # ★ 必须按版式分派。**2026-08-11 修正**: 这里原来写死用白图定位器 locate_amount,
+            # 而它的判据是 gray<140 的深字浅底; 支付宝蓝底转账页的蓝约 gray=106, 整个背景都被判成"深",
+            # 金额是白字反而成了洞 —> 要么定位不到(整张被跳过), 要么锁到页面里唯一的深字浅底元素:
+            # **红包促销卡**。于是造出来的"蓝图假图"改的是红包卡不是金额, 用同一个框存下的
+            # 蓝图训练裁块也是红包卡的裁块。实测: 万相蓝 38/40、豆包蓝 12/12 全改错了地方。
+            loc_s, page_s = locate_amount_auto(src)
             if not loc_s:
                 skipped += 1
                 continue                      # 原图定位不到金额, 没法做局部替换
@@ -224,7 +230,7 @@ def main() -> None:
             else:
                 # 整图模式: 服务按自己分辨率重绘 -> 缩回原尺寸再重新定位金额才能对齐
                 gen = np.asarray(gen_im.resize(src_im.size, Image.LANCZOS))
-                loc_g = locate_amount(gen)
+                loc_g, _ = locate_amount_auto(gen)
                 if not loc_g:
                     skipped += 1
                     continue                  # 重绘图里定位不到金额(版面漂了), 这张放弃
@@ -250,6 +256,7 @@ def main() -> None:
                     Image.fromarray(src[a0:a1, b0:b1]).save(
                         args.save_crops / "nature" / f"crop_{tag}_{made:05d}.jpg", quality=95)
             made += 1
+            page_n[page_s] = page_n.get(page_s, 0) + 1
             if made % 10 == 0:
                 print(f"  已造 {made} 张...", flush=True)
             time.sleep(args.sleep)
@@ -265,6 +272,8 @@ def main() -> None:
 
     mf.close()
     print(f"完成: {made} 张 -> {args.out}(跳过 {skipped} 张定位失败, 失败 {failed} 次)")
+    print(f"版式: 蓝图 {page_n.get('blue', 0)} 张, 白图 {page_n.get('white', 0)} 张 "
+          f"(按像素判, 与 predict_tiled 同口径 —— 别再靠目录名猜版式)")
     print("**先开 2-3 张看一眼**: 应该整张就是原来那张真图, 只有金额数字变了、且看不出拼接痕迹。")
     print("若金额那块明显歪/糊/有方框, 告诉我(说明版面对齐没对上, 我调对齐方式)。")
 
