@@ -406,7 +406,13 @@ def sec5_leak(inputs: dict[str, Path], crops: Path, probe: Path,
             w = csv.DictWriter(f, fieldnames=list(srows[0]))
             w.writeheader()
             w.writerows(keep)
-        print(f"         -> {op.name}  {len(keep)} 行 (剔 {len(srows)-len(keep)}){note}")
+        # 同名清单给 combined_threshold --fake-exclude 用。
+        # ★ 并集召回那条通路**不吃 clean.csv**(它要 A/B 两侧同一批文件名), 所以必须给清单,
+        #   否则并集召回用全量、拆分表用 clean, 两张表口径对不上。
+        lp = emit / f"{name}_leaked.txt"
+        lp.write_text("\n".join(sorted(leaked)) + ("\n" if leaked else ""), encoding="utf-8")
+        print(f"         -> {op.name}  {len(keep)} 行 (剔 {len(srows)-len(keep)}){note}"
+              + (f"  | {lp.name} {len(leaked)} 个" if leaked else ""))
 
     print()
     for _label, name in _CELLS:

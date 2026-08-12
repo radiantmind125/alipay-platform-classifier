@@ -71,6 +71,9 @@ def main() -> None:
                     choices=["tile_top3", "tile_max", "tile_mean", "final_ai_score"],
                     help="用哪一列。注意 final_ai_score 取决于跑分时的 --agg, 跨批次不一定可比, "
                          "所以默认用明确的 tile_top3")
+    ap.add_argument("--min-fail", type=int, default=15,
+                    help="'定位失败'那一桶至少要有这么多张, 才允许下'缺口在定位器'的结论。"
+                         "样本太少时那一列纯属噪声(实测千问蓝只有 1 张定位失败, 0.0% 照样触发了提示)")
     ap.add_argument("--kind", default="fake", choices=["fake", "genuine"],
                     help="fake=报召回率(越高越好); genuine=报误杀率(越低越好)")
     args = ap.parse_args()
@@ -102,10 +105,15 @@ def main() -> None:
         hn = sum(1 for s in no if s >= args.threshold)
 
         # 判读: 定位率低本身就是覆盖缺口, 和模型强弱是两回事
+        # ★ "定位失败"那一桶常常只有 1~4 张, 拿 1/4 或 0/1 去下"缺口在定位器"的结论就是噪声当发现。
+        #   实测: 千问蓝 143 张里只有 1 张定位失败, 那个 0.0% 照样触发了提示。
+        #   所以先要求这一桶有足够样本(--min-fail), 不够就只说样本太少。
         rate = len(yes) * 100.0 / n
         if rate < 60:
             note = f"**定位率只有 {rate:.0f}% —— 这个数主要在测退回通路, 不是测模型**"
-        elif args.kind == "fake" and len(yes) and len(no) and \
+        elif len(no) and len(no) < args.min_fail:
+            note = f"(定位失败只有 {len(no)} 张, 那一列不作数)"
+        elif args.kind == "fake" and len(yes) and len(no) >= args.min_fail and \
                 (hy / len(yes) - hn / len(no)) > 0.25:
             note = "定位成败差距大 -> 缺口在定位器, 不在模型"
         else:

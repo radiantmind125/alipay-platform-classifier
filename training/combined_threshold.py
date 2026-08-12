@@ -87,6 +87,11 @@ def main() -> None:
                     help="线路B 的假图也只算金额定位成功的(默认开)")
     ap.add_argument("--target", type=int, default=None,
                     help="给一个并集预算(比如 5000 表示 1/5000), 扫出能达标的阈值组合")
+    ap.add_argument("--fake-exclude", type=Path, default=None,
+                    help="假图侧要剔掉的文件名清单(与训练同源的那几张)。"
+                         "**--exclude 只管真图, 假图必须用这个** —— 否则并集召回被记忆效应抬高, "
+                         "而且和 locate_split 用的 clean.csv 口径对不上。"
+                         "清单由 matrix_audit --emit-clean 一并写出(<格名>_leaked.txt)。")
     ap.add_argument("--fa", type=Path, default=None,
                     help="**同一批假图**被线路A 打分的 summary.csv(配 --fb 用)")
     ap.add_argument("--fb", type=Path, default=None,
@@ -136,6 +141,18 @@ def main() -> None:
         FA = _load(args.fa, args.a_col, False)
         FB = _load(args.fb, args.b_col, True)          # 线路B 只在定位成功时出信号
         uni = set(FA)                                  # 以线路A 为全集: 每张假图都过线路A
+        # ★ 和训练同源的那几张必须剔掉, 否则并集召回被记忆效应抬高。
+        #   `--exclude` 只作用于真图, 假图这边要单独给 —— 之前这里没有任何过滤,
+        #   于是并集召回用的是**全量**测试集(含同源图), 而按定位成败拆分那张表用的是
+        #   已剔除的 clean.csv, 两张表口径不一致。豆包蓝同源率 8.2%, 影响不可忽略。
+        if args.fake_exclude:
+            drop = {ln.strip().lstrip("﻿") for ln in
+                    args.fake_exclude.read_text(encoding="utf-8-sig").splitlines() if ln.strip()}
+            before = len(uni)
+            uni = {k for k in uni if k not in drop}
+            print(f"(假图侧已剔除 {before - len(uni)} 张与训练同源的图)")
+            if not uni:
+                raise SystemExit("剔完之后假图集空了")
         if not uni:
             raise SystemExit("--fa 里没读到分数")
         ah = {k for k in uni if FA[k] >= args.a_thr}
