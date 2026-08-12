@@ -41,8 +41,51 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
+def _same_row(comps, tol: float = 0.5):
+    """把连通域按**同一行**聚类: 纵向重叠 >= 较矮那个高度的一半, 就算同一行。
+
+    金额的每一位数字都在同一条基线上; 商家头像不在。这一条就是下面那个修正的全部依据。
+    """
+    rows: list[list] = []
+    for c in sorted(comps, key=lambda c: c[1]):
+        for r in rows:
+            ry0 = min(k[1] for k in r)
+            ry1 = max(k[1] + k[3] for k in r)
+            if min(c[1] + c[3], ry1) - max(c[1], ry0) >= tol * min(c[3], ry1 - ry0):
+                r.append(c)
+                break
+        else:
+            rows.append([c])
+    return rows
+
+
 def locate_amount(rgb: np.ndarray):
-    """白底深色金额:上半部分最大的深色文字块。返回 (x0,y0,x1,y1, glyphs) 或 None。"""
+    """白底深色金额:上部**同一行里字最高的那一行**。返回 (x0,y0,x1,y1, glyphs) 或 None。
+
+    **2026-08-12 修正: 原来按"最高的连通域"选, 被商家头像顶掉了。**
+
+    原实现取 `maxh = 最高连通域`, 再留下 `高度 >= 0.6*maxh` 的块当金额。
+    账单详情页顶部有个**商家头像**(圆形, 实测 125~138 px, 宽高比约 1:1),
+    而金额数字只有 71~78 px。于是 `0.6 * 138 = 82.8 > 78`, **金额被过滤掉了**,
+    只剩头像一个块 -> `len(amt) < 2` -> 返回 None。三种后果:
+
+      1. 头像明显高于数字 -> 定位**失败**(白图受影响最大)
+      2. 头像高度接近数字 -> 两者都留下 -> 框从头像一路罩到金额, **巨大且偏移**
+      3. 头像本身裂成两块  -> `len(amt) >= 2` 成立 -> **框直接落在头像上**
+
+    实测(本地白图池随机 300 张): 原实现定位率 **73.0%**, 其中 14 张框高超过页高 15%(跨到头像);
+    改成按行聚类后 **98.0%**, 且两者都定位到时只有 67% 的框重合 —— 剩下 33% 就是上面那些错框。
+
+    **修正**: 先把连通域按同一行聚类(`_same_row`), 再在"至少两个块、横跨 >= 10% 页宽"的行里,
+    取**中位高度最大**的那一行。金额是页面上最大的一行字, 头像自己单独占一行且只有一两个块,
+    自然被排除。
+
+    ★ 蓝图定位器 `locate_blue.locate_amount_blue` 是另一套, **不受本次修正影响**。
+
+    ★★ 这个改动会同时改变**造样本**和**打分**两侧的取框, 所以:
+        已有的白图训练裁块是按**旧框**切的, 必须用 `recover_from_full.py` 从
+        `api_full_*` 重做一遍再重训, 否则训练区域和推理区域对不上 —— 和蓝图那次是同一类错误。
+    """
     h, w = rgb.shape[:2]
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     y0b, y1b = int(h * 0.08), int(h * 0.55)
@@ -56,15 +99,24 @@ def locate_amount(rgb: np.ndarray):
         comps.append([int(x), int(y + y0b), int(ww), int(hh), int(area)])
     if not comps:
         return None
-    maxh = max(c[3] for c in comps)
-    amt = [c for c in comps if c[3] >= 0.6 * maxh]        # 大字块 = 金额(数字/负号/点)
-    amt.sort(key=lambda c: c[0])
-    if len(amt) < 2:                                       # 至少要有几位数字
+
+    best = None
+    for r in _same_row(comps):
+        if len(r) < 2:                                     # 至少要有几位数字
+            continue
+        x0 = min(c[0] for c in r)
+        x1 = max(c[0] + c[2] for c in r)
+        if (x1 - x0) < 0.1 * w:                            # 太窄的一行不是金额
+            continue
+        med = sorted(c[3] for c in r)[len(r) // 2]         # 用中位高度, 一个异常块带不偏
+        if best is None or med > best[0]:
+            best = (med, r)
+    if best is None:
         return None
+
+    amt = sorted(best[1], key=lambda c: c[0])
     x0 = min(c[0] for c in amt); x1 = max(c[0] + c[2] for c in amt)
     ya = min(c[1] for c in amt); yb = max(c[1] + c[3] for c in amt)
-    if (x1 - x0) < 0.1 * w:
-        return None
     return x0, ya, x1, yb, amt
 
 
