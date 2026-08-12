@@ -71,7 +71,12 @@ def main() -> None:
     ap.add_argument("--test", type=Path, nargs="+", required=True,
                     help="测试集的**输入目录**(里面要有 manifest.csv), 可多个")
     ap.add_argument("--show", type=int, default=20, help="重叠时最多列出几个源图名")
+    ap.add_argument("--exclude-tags", nargs="*", default=None, metavar="TAG",
+                    help="建数据集时 --exclude-tags 剔掉的那些组。**必须和建数据集时一致** —— "
+                         "没进训练的裁块不该参与同源判定, 否则会把干净的测试集误报成大面积泄漏。"
+                         "(实测: 豆包蓝曾因此被误报 147/147 全泄漏, 真实只有 12。)")
     args = ap.parse_args()
+    ex_tags = set(args.exclude_tags) if args.exclude_tags else set()
 
     # ---- 1. 训练裁块 -> 生成图文件名 ----
     if not args.crops.is_dir():
@@ -88,10 +93,15 @@ def main() -> None:
             n_bad += 1
             continue
         tag, idx = parsed
+        if tag in ex_tags:
+            continue                      # 没进训练的组, 不参与同源判定
         owner[f"apilocal_{tag}_{idx}.jpg"] = tag
         per_tag[tag] += 1
     print("=" * 96)
-    print(f"训练裁块 {n_crop} 个 | 文件名可解析 {len(owner)} 个 | 解析不了 {n_bad} 个")
+    print(f"训练裁块 {n_crop} 个 | 文件名可解析 {len(owner)} 个 | 解析不了 {n_bad} 个"
+          + (f" | 已按 --exclude-tags 排除 {len(ex_tags)} 组" if ex_tags else ""))
+    if not ex_tags:
+        print("  注: 没传 --exclude-tags。若建数据集时剔过组, 这里会把它们也算进同源, **会误报**。")
     if n_bad:
         print("  (解析不了的多半是 VAE 那几组, 命名规则不同, 本来就不经过 manifest)")
 
