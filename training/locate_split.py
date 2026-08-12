@@ -48,6 +48,13 @@ def load(path: Path, agg: str) -> tuple[list[float], list[float]]:
     return yes, no
 
 
+def label_of(p: Path) -> str:
+    """数据集名字。**别只用父目录名** —— 多个清洗后的 CSV 放在同一个目录里时,
+    每行都会印成同一个目录名, 表格完全读不出哪行是哪个集合(实测 8 行全印 `_clean_ld8`)。
+    约定同 autoreject_threshold: 叫 summary.csv 就用父目录名, 否则用文件名。"""
+    return p.parent.name if p.stem == "summary" else p.stem
+
+
 def pct(hit: int, n: int) -> str:
     return f"{hit * 100.0 / n:5.1f}%" if n else "   -- "
 
@@ -89,7 +96,7 @@ def main() -> None:
         yes, no = load(p, args.agg)
         n = len(yes) + len(no)
         if n == 0:
-            print(f"  {p.parent.name:28s} 空文件")
+            print(f"  {label_of(p):28s} 空文件")
             continue
         hy = sum(1 for s in yes if s >= args.threshold)
         hn = sum(1 for s in no if s >= args.threshold)
@@ -103,7 +110,7 @@ def main() -> None:
             note = "定位成败差距大 -> 缺口在定位器, 不在模型"
         else:
             note = ""
-        print(f"  {p.parent.name:28s} {n:6d} {pct(len(yes), n)} | "
+        print(f"  {label_of(p):28s} {n:6d} {pct(len(yes), n)} | "
               f"{pct(hy + hn, n):>8s} {pct(hy, len(yes)):>10s} {pct(hn, len(no)):>10s}   {note}")
 
     print()

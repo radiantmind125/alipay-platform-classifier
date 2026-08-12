@@ -326,7 +326,8 @@ def sec4_edit(inputs: dict[str, Path], roots: list[Path], limit: int,
 
 
 def sec5_leak(inputs: dict[str, Path], crops: Path, probe: Path,
-              found: dict[str, Path | None], emit: Path | None) -> dict[str, str]:
+              found: dict[str, Path | None], emit: Path | None,
+              exclude_tags: set[str] | None = None) -> dict[str, str]:
     print()
     print("=" * 104)
     print("[5] 训练测试是否同源 (裁块源图 vs 测试集源图, 按源图文件名求交)")
@@ -335,9 +336,14 @@ def sec5_leak(inputs: dict[str, Path], crops: Path, probe: Path,
     if not crops.is_dir():
         print(f"  !!!! 裁块目录不存在: {crops} —— 这一节做不了")
         return verdict
+    # ★ 只有**真正进了训练**的裁块才算同源。建数据集时 --exclude-tags 剔掉的那些组,
+    #   它们的源图不在模型里, 拿它们去判泄漏就是**假阳性**。
+    #   实测代价: 豆包蓝测试集因为和已剔除的 apiseedblue 同源, 被误判 147/147 全泄漏,
+    #   clean.csv 写出 0 行, 整格数据直接消失。
+    ex = exclude_tags or set()
     owner: dict[str, str] = {}
     per_tag: Counter[str] = Counter()
-    n_crop = n_bad = 0
+    n_crop = n_bad = n_ex = 0
     with os.scandir(crops) as it:
         for e in it:
             if not e.is_file() or os.path.splitext(e.name)[1].lower() not in _EXT:
@@ -348,9 +354,15 @@ def sec5_leak(inputs: dict[str, Path], crops: Path, probe: Path,
                 n_bad += 1
                 continue
             tag, idx = parsed
+            if tag in ex:
+                n_ex += 1
+                continue                  # 没进训练的组, 不参与同源判定
             owner[f"apilocal_{tag}_{idx}.jpg"] = tag
             per_tag[tag] += 1
-    print(f"  裁块 {n_crop} 个 | 文件名可解析 {len(owner)} 个 | 解析不了 {n_bad} 个(VAE 那几组命名不同, 正常)")
+    print(f"  裁块 {n_crop} 个 | 文件名可解析 {len(owner)} 个 | 解析不了 {n_bad} 个(VAE 那几组命名不同, 正常)"
+          + (f" | **已按 --exclude-tags 排除 {n_ex} 个(没进训练, 不算同源)**" if n_ex else ""))
+    if not ex:
+        print("     注: 没传 --exclude-tags。若建数据集时剔过组, 这里会把它们也算进同源, **会误报**。")
 
     allsrc: set[str] = set()
     dup: dict[str, set[str]] = {}
@@ -443,6 +455,9 @@ def main() -> None:
     ap.add_argument("--emit-clean", type=Path, default=None,
                     help="把与训练同源的那几张从 summary.csv 里剔掉, 写出 <cell>_clean.csv。"
                          "少量重叠的集合(几张)靠这个补救, 不必整批作废")
+    ap.add_argument("--exclude-tags", nargs="*", default=None, metavar="TAG",
+                    help="建数据集时用 --exclude-tags 剔掉的那些组。**必须和建数据集时传的一致** —— "
+                         "没进训练的裁块不该参与同源判定, 否则会把干净的测试集误报成 100% 泄漏。")
     ap.add_argument("--suffix", default="ld6",
                     help="打分输出目录的后缀, 例如 ld6 / ld7 / ld7v。默认 ld6")
     args = ap.parse_args()
@@ -455,7 +470,8 @@ def main() -> None:
     ident = sec3_identity(inputs, args.sample)
     edit = {} if args.skip_edit else sec4_edit(inputs, list(args.src_root), args.limit,
                                                args.full_thresh, args.hit)
-    leak = sec5_leak(inputs, args.crops, args.probe, found, args.emit_clean)
+    leak = sec5_leak(inputs, args.crops, args.probe, found, args.emit_clean,
+                     set(args.exclude_tags) if args.exclude_tags else None)
 
     print()
     print("=" * 104)
