@@ -51,19 +51,50 @@ def _is_clean_screenshot(im: Image.Image) -> bool:
     return (not any(t in ifd for t in _OPT)) and short <= 1500 and 1.6 <= aspect <= 2.6
 
 
-def _collect(root: Path, n: int, seed: int) -> list[Path]:
+def _used_srcs(paths: list[Path]) -> set[str]:
+    """已经被别的批次用过的源图文件名。传 manifest.csv 或含 <批次>/manifest.csv 的目录都行。
+
+    **2026-08-12 加**: 这条路以前既不写 manifest 也不排除已用源图, 结果是
+    VAE 那几组裁块的同源情况**根本没法查**(`matrix_audit` 第5节对 `white`/`blue`
+    两格一直只能打"无 manifest, 查不了")。API 那条路早就补上了, 这条也要有,
+    否则新造的训练裁块可能和 `localedit_heldout` 共用源图, 而且查都查不出来。
+    """
+    import csv as _csv
+    used: set[str] = set()
+    for p in paths:
+        for mp in (sorted(p.glob("*/manifest.csv")) if p.is_dir() else [p]):
+            if not mp.exists():
+                continue
+            try:
+                for r in _csv.DictReader(open(mp, encoding="utf-8-sig")):
+                    s = (r.get("src") or "").strip()
+                    if s:
+                        used.add(Path(s).name)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  读不了 {mp}: {exc}", flush=True)
+    return used
+
+
+def _collect(root: Path, n: int, seed: int, exclude: set[str] | None = None) -> list[Path]:
     files = [p for p in root.rglob("*") if p.suffix.lower() in _EXTS]
     random.Random(seed).shuffle(files)
+    ex = exclude or set()
     out: list[Path] = []
+    skipped_used = 0
     for p in files:
         if len(out) >= n:
             break
+        if p.name in ex:
+            skipped_used += 1
+            continue                      # 别的批次用过, 换一张, 不给自己埋同源的雷
         try:
             with Image.open(p) as im:
                 if _is_clean_screenshot(im):
                     out.append(p)
         except Exception:
             continue
+    if ex:
+        print(f"排除已用源图 {len(ex)} 个, 本次跳过其中 {skipped_used} 张", flush=True)
     return out
 
 
@@ -123,6 +154,10 @@ def main() -> None:
     ap.add_argument("--dtype", default="fp16", choices=["fp16", "bf16", "fp32"])
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--exclude-src", type=Path, nargs="*", default=None, metavar="PATH",
+                    help=r"造之前就排除已经用过的源图, 避免训练测试同源。可给 manifest.csv, "
+                         r"也可给包含 <批次>/manifest.csv 的目录(如 D:\probe)。"
+                         r"**这条路以前不写 manifest 也不排除**, 所以 VAE 那几组的同源情况一直查不了。")
     args = ap.parse_args()
 
     try:
@@ -136,10 +171,16 @@ def main() -> None:
     if args.save_crops:
         (args.save_crops / "ai").mkdir(parents=True, exist_ok=True)
         (args.save_crops / "nature").mkdir(parents=True, exist_ok=True)
-    srcs = _collect(args.src_root, args.n * 3, args.seed)   # 多取些, 定位不到金额的会跳过
+    excl = _used_srcs(list(args.exclude_src)) if args.exclude_src else set()
+    srcs = _collect(args.src_root, args.n * 3, args.seed, excl)   # 多取些, 定位不到金额的会跳过
     if not srcs:
         print("没采到真图源"); return
     tag = args.tag or args.model.rstrip("/").split("/")[-1]     # 文件名标记, 防多生成器互相覆盖
+    import csv as _csv
+    _mp = args.out / "manifest.csv"; _new = not _mp.exists()
+    _mf = open(_mp, "a", newline="", encoding="utf-8-sig"); _mw = _csv.writer(_mf)
+    if _new:
+        _mw.writerow(["file", "model", "src"])       # 表头与 gen_api_local_edit 一致, 下游工具通用
     print(f"真图源 {len(srcs)} 张, 模式 {args.mode}, 标记 {tag}, 加载 VAE...", flush=True)
     vae = AutoencoderKL.from_pretrained(args.model, torch_dtype=dt).to(args.device).eval()
 
@@ -190,7 +231,9 @@ def main() -> None:
                             args.save_crops / "ai" / f"crop_{tag}_{made:06d}.jpg", quality=95)
                         Image.fromarray(arr[a0:a1, b0:b1]).save(
                             args.save_crops / "nature" / f"crop_{tag}_{made:06d}.jpg", quality=95)
-            Image.fromarray(out).save(args.out / f"ailocal_{args.mode}_{tag}_{made:06d}.jpg", quality=95)
+            _fn = f"ailocal_{args.mode}_{tag}_{made:06d}.jpg"
+            Image.fromarray(out).save(args.out / _fn, quality=95)
+            _mw.writerow([_fn, args.model, sp.name]); _mf.flush()
             made += 1
             if made % 50 == 0:
                 print(f"  已造 {made} 张...", flush=True)
@@ -199,6 +242,7 @@ def main() -> None:
                 print("失败", sp.name, exc)
             skipped += 1
 
+    _mf.close()
     print(f"造了 {made} 张({args.mode}) -> {args.out}; 跳过 {skipped} 张(多为定位不到金额)")
     if args.save_crops:
         print(f"配对训练块 -> {args.save_crops}\\ai 与 {args.save_crops}\\nature(同位置 同内容 只差有没有被AI动过)")
