@@ -118,7 +118,12 @@ def main() -> None:
                          "而金额等关键字段都在上部。经理给 OCR 定的'裁掉下面减少误差'同一个道理。")
     ap.add_argument("--patch_size", type=int, default=32)
     ap.add_argument("--agg", default="max", choices=["max", "top3", "mean"])
-    ap.add_argument("--limit", type=int, default=0, help="只跑前 N 张(真图量大时先抽样看趋势; 0=全跑)")
+    ap.add_argument("--limit", type=int, default=0, help="只跑**排序后的前 N 张**(先看趋势用; 0=全跑)")
+    ap.add_argument("--sample", type=int, default=0,
+                    help="**随机**抽 N 张(0=不抽)。文件名是 s3_voucher_<雪花ID>_<时间戳>, "
+                         "排序≈按时间排序, 所以 `--limit` 抽到的永远是**最早那一批** —— "
+                         "拿它当标定池会带时间偏置。**标定池必须用 --sample。**")
+    ap.add_argument("--sample-seed", type=int, default=0, help="--sample 的随机种子, 便于复现")
     ap.add_argument("--reject_threshold", type=float, default=0.90)
     ap.add_argument("--review_threshold", type=float, default=0.60)
     ap.add_argument("--ai_label", type=int, default=0, choices=[0, 1])
@@ -171,7 +176,11 @@ def main() -> None:
 
     root = Path(args.input)
     imgs = sorted(p for p in root.rglob("*") if p.suffix.lower() in _EXTS) if root.is_dir() else [root]
-    if args.limit > 0:
+    if args.sample > 0 and len(imgs) > args.sample:
+        import random
+        imgs = sorted(random.Random(args.sample_seed).sample(imgs, args.sample))
+        print(f"随机抽样 {len(imgs)} 张(种子 {args.sample_seed})", flush=True)
+    elif args.limit > 0:
         imgs = imgs[:args.limit]
     if not imgs:
         print("没找到图片"); return

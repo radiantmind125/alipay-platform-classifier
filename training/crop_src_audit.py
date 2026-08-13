@@ -71,6 +71,10 @@ def main() -> None:
     ap.add_argument("--test", type=Path, nargs="+", required=True,
                     help="测试集的**输入目录**(里面要有 manifest.csv), 可多个")
     ap.add_argument("--show", type=int, default=20, help="重叠时最多列出几个源图名")
+    ap.add_argument("--emit-used-srcs", type=Path, default=None, metavar="PATH",
+                    help="把**训练侧用过的源图文件名**写到这个文件, 一行一个。"
+                         "建大真图标定池时要拿它当排除名单 —— 这些图的金额区已经当 nature 裁块喂过模型, "
+                         "留在标定池里会把误杀率算得偏低。可以直接和 exclude_evidence.txt 拼起来传给 --exclude。")
     ap.add_argument("--exclude-tags", nargs="*", default=None, metavar="TAG",
                     help="建数据集时 --exclude-tags 剔掉的那些组。**必须和建数据集时一致** —— "
                          "没进训练的裁块不该参与同源判定, 否则会把干净的测试集误报成大面积泄漏。"
