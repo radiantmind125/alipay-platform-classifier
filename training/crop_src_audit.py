@@ -152,6 +152,16 @@ def main() -> None:
     for v in train_src.values():
         allsrc |= v
     print(f"\n训练侧源图合计 {len(allsrc)} 张(去重后)")
+    if args.emit_used_srcs:
+        args.emit_used_srcs.parent.mkdir(parents=True, exist_ok=True)
+        args.emit_used_srcs.write_text("\n".join(sorted(allsrc)) + ("\n" if allsrc else ""),
+                                       encoding="utf-8")
+        print(f"  -> 已写出排除名单 {args.emit_used_srcs}({len(allsrc)} 行)")
+        if not allsrc:
+            print("     !!!! 名单是空的 —— 多半是 --exclude-tags 把有 manifest 的组全剔掉了")
+    # ★ 提醒: VAE 那几组(约 9,000 个裁块)没有 manifest, 源图**追不到**, 所以不会出现在这份名单里。
+    #   其中蓝图那 4,500 个的源图就在 D:\download\TempFakeImages —— 也就是建标定池要抽的那个池子。
+    #   影响可控(被记住的图分数低, 只是稀释, 不影响决定阈值的高分尾巴), 但报数时要写明。
 
     # ---- 4. 与各测试集求交 ----
     print()
