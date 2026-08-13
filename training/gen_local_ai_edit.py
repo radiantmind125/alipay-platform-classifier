@@ -75,8 +75,29 @@ def _used_srcs(paths: list[Path]) -> set[str]:
     return used
 
 
-def _collect(root: Path, n: int, seed: int, exclude: set[str] | None = None) -> list[Path]:
-    files = [p for p in root.rglob("*") if p.suffix.lower() in _EXTS]
+def _ext(fmt: str, src: Path) -> str:
+    """输出用什么扩展名。auto = **跟着源图走**(源是 png 就存 png)。
+
+    为什么要有这个开关: 以前这里写死 .jpg quality=95, 于是**我们造的每一张假图都被 JPEG 压过一道**,
+    而真图标定池里 55.6% 是从没压过的 png。压缩史在两类之间是不对称的, 召回表因此量的不是纯粹的
+    "改没改过"。要把这个混淆拆开, 就得能造出**和 png 真图同压缩史**的假图。
+    """
+    if fmt == "auto":
+        return ".png" if src.suffix.lower() == ".png" else ".jpg"
+    return "." + fmt
+
+
+def _save_im(im: Image.Image, dst: Path) -> None:
+    """png 走无损, jpg 固定 q95(和以前逐字一致, 不改已有批次的含义)。"""
+    if dst.suffix.lower() == ".png":
+        im.save(dst, "PNG", optimize=True)
+    else:
+        im.convert("RGB").save(dst, "JPEG", quality=95)
+
+
+def _collect(root: Path, n: int, seed: int, exclude: set[str] | None = None,
+             exts: set[str] | None = None) -> list[Path]:
+    files = [p for p in root.rglob("*") if p.suffix.lower() in (exts or _EXTS)]
     random.Random(seed).shuffle(files)
     ex = exclude or set()
     out: list[Path] = []
@@ -154,6 +175,15 @@ def main() -> None:
     ap.add_argument("--dtype", default="fp16", choices=["fp16", "bf16", "fp32"])
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--save-format", default="jpg", choices=["jpg", "png", "auto"],
+                    help="假图存成什么格式。**默认 jpg 就是老行为, 已有批次的含义不变。**"
+                         "auto=跟着源图走; png=强制无损。"
+                         "为什么需要: 我们所有假图都是 jpg q95, 而真图池 55.6% 是从没压过的 png —— "
+                         "**从来没有量过一张 png 假图**。而'打开 png 截图 改金额 存 png'是最自然的一种做法。")
+    ap.add_argument("--src-ext", nargs="*", default=None, metavar="EXT",
+                    help="只从这些扩展名的真图里挑源(如 --src-ext .png)。"
+                         "配合 --save-format png 用, 才能造出**全程没被 JPEG 压过**的假图: "
+                         "源是 jpg 的话, 压缩痕迹已经烙在像素里了, 存成 png 也洗不掉。")
     ap.add_argument("--exclude-src", type=Path, nargs="*", default=None, metavar="PATH",
                     help=r"造之前就排除已经用过的源图, 避免训练测试同源。可给 manifest.csv, "
                          r"也可给包含 <批次>/manifest.csv 的目录(如 D:\probe)。"
@@ -172,7 +202,8 @@ def main() -> None:
         (args.save_crops / "ai").mkdir(parents=True, exist_ok=True)
         (args.save_crops / "nature").mkdir(parents=True, exist_ok=True)
     excl = _used_srcs(list(args.exclude_src)) if args.exclude_src else set()
-    srcs = _collect(args.src_root, args.n * 3, args.seed, excl)   # 多取些, 定位不到金额的会跳过
+    _se = {e.lower() if e.startswith(".") else "." + e.lower() for e in args.src_ext} if args.src_ext else None
+    srcs = _collect(args.src_root, args.n * 3, args.seed, excl, _se)   # 多取些, 定位不到金额的会跳过
     if not srcs:
         print("没采到真图源"); return
     tag = args.tag or args.model.rstrip("/").split("/")[-1]     # 文件名标记, 防多生成器互相覆盖
@@ -227,12 +258,15 @@ def main() -> None:
                         a0, b0 = max(0, cy - half), max(0, cx - half)
                         a1, b1 = min(h, cy + half), min(w, cx + half)
                     if a1 - a0 >= 32 and b1 - b0 >= 32:
-                        Image.fromarray(out[a0:a1, b0:b1]).save(
-                            args.save_crops / "ai" / f"crop_{tag}_{made:06d}.jpg", quality=95)
-                        Image.fromarray(arr[a0:a1, b0:b1]).save(
-                            args.save_crops / "nature" / f"crop_{tag}_{made:06d}.jpg", quality=95)
-            _fn = f"ailocal_{args.mode}_{tag}_{made:06d}.jpg"
-            Image.fromarray(out).save(args.out / _fn, quality=95)
+                        # ai 和 nature 必须**用同一个扩展名**: 两类的压缩史一旦不一样,
+                        # 模型就能靠"压没压过"走捷径, 训练集自己就废了。
+                        _ce = _ext(args.save_format, sp)
+                        _save_im(Image.fromarray(out[a0:a1, b0:b1]),
+                                 args.save_crops / "ai" / f"crop_{tag}_{made:06d}{_ce}")
+                        _save_im(Image.fromarray(arr[a0:a1, b0:b1]),
+                                 args.save_crops / "nature" / f"crop_{tag}_{made:06d}{_ce}")
+            _fn = f"ailocal_{args.mode}_{tag}_{made:06d}{_ext(args.save_format, sp)}"
+            _save_im(Image.fromarray(out), args.out / _fn)
             _mw.writerow([_fn, args.model, sp.name]); _mf.flush()
             made += 1
             if made % 50 == 0:
