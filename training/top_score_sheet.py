@@ -55,6 +55,9 @@ def main() -> None:
     ap.add_argument("--cols", type=int, default=6)
     ap.add_argument("--cell-w", type=int, default=200)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--copy-to", type=Path, default=None, metavar="DIR",
+                    help="顺便把这几张原图拷到一个目录, 方便单独看大图或传给别人。"
+                         "文件名前面加排名和分数, 排序后就是分数序。")
     args = ap.parse_args()
 
     drop: set[str] = set()
@@ -118,6 +121,19 @@ def main() -> None:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(args.out)
     print(f"-> {args.out}  ({W}x{H})")
+
+    if args.copy_to:
+        import shutil
+        args.copy_to.mkdir(parents=True, exist_ok=True)
+        ok = miss = 0
+        for i, (s_, path, nm) in enumerate(top, 1):
+            src = Path(path)
+            if not src.exists():
+                miss += 1
+                continue
+            shutil.copy2(src, args.copy_to / f"{i:02d}_{s_:.4f}_{nm}")
+            ok += 1
+        print(f"-> 原图已拷 {ok} 张到 {args.copy_to}" + (f" (源图找不到 {miss})" if miss else ""))
     print()
     print("怎么判:")
     print("  **一眼就假**(金额字体不对/边缘糊/拼接痕/排版错位) -> 加进排除名单, 分数线能往下放")
