@@ -53,6 +53,10 @@ def main() -> None:
     ap.add_argument("--col", default="final_ai_score",
                     help="用哪一列打分。线路B(predict_tiled)的 CSV 里有 tile_max/tile_top3/tile_mean, "
                          "上线用哪个聚合就填哪个(现在线路B 用 tile_top3), 这样不用重新打分")
+    ap.add_argument("--budgets", type=int, nargs="*", default=None, metavar="N",
+                    help="自定义误杀预算, 给分母即可(如 --budgets 1000 2000 2500 3000 5000)。"
+                         "默认档位之间跳得太大: 1/1000 召回 96%, 1/5000 只剩 62%, 中间那段很陡。"
+                         "**按经理已经接受过的误杀率去找工作点**, 比在预设档里二选一合理。")
     ap.add_argument("--require-located", action="store_true",
                     help="线路B 专用: 只统计金额定位成功的图(定位失败本来就不出信号)")
     ap.add_argument("--exclude", type=Path, default=None,
@@ -113,7 +117,8 @@ def main() -> None:
     print("误杀上限        分数线      " + "  ".join(f"{k[:14]:>14s}" for k in fakes))
     print("-" * (28 + 16 * len(fakes)))
 
-    for num, den in _BUDGETS:
+    budgets = ([(1, b) for b in sorted(args.budgets)] + [(0, 0)]) if args.budgets else _BUDGETS
+    for num, den in budgets:
         if den == 0:                       # 零误杀: 阈值必须高过最高的那张真图
             thr = g[0][0] + 1e-6
             label = "0(零误杀)"
