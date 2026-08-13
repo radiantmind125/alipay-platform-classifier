@@ -43,7 +43,16 @@ def main() -> None:
     ap.add_argument("--csv", type=Path, nargs="+", required=True, help="predict_tiled 出的 summary.csv, 可多个")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--copy", action="store_true", help="强制拷贝而不是硬链接(跨卷时会自动退回拷贝)")
+    ap.add_argument("--split", type=int, default=1, metavar="N",
+                    help="把这批图**均分成 N 份**, 配合 --part 用。"
+                         "线路A 的 predict_all_models 是一张图一次前向(repeat=16 < batch_size=32), "
+                         "GPU 大半时间在等 CPU 解图 —— 拆成几份**并行跑几个进程**能接近线性加速, "
+                         "而且不改任何计算语义, 结果和单进程逐字一致。")
+    ap.add_argument("--part", type=int, default=0, metavar="K",
+                    help="取第 K 份(从 0 开始)。按排序后的序号取模切分, 各份**互不重叠且合起来是全集**。")
     args = ap.parse_args()
+    if args.split < 1 or not (0 <= args.part < args.split):
+        raise SystemExit(f"--split 要 >=1, --part 要在 0..{max(0, args.split-1)} 之间")
 
     want: dict[str, Path] = {}          # basename -> 源路径
     dup = 0
@@ -65,6 +74,11 @@ def main() -> None:
               f"并集是按裸文件名对齐的, 同名本身就会让两条线对错 —— 值得回头查一下。")
     if not want:
         raise SystemExit("CSV 里没读到 image 列")
+
+    if args.split > 1:
+        keys = sorted(want)                       # 排序后按序号取模, 各份互不重叠
+        want = {k: want[k] for i, k in enumerate(keys) if i % args.split == args.part}
+        print(f"  切分: 第 {args.part + 1}/{args.split} 份 -> {len(want)} 张")
 
     args.out.mkdir(parents=True, exist_ok=True)
     linked = copied = missing = existed = 0
