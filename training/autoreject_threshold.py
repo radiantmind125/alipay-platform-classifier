@@ -44,7 +44,10 @@ def main() -> None:
     except Exception:
         pass
     ap = argparse.ArgumentParser(description="标定自动拒绝的安全分数线")
-    ap.add_argument("--genuine", type=Path, required=True, help="大批真图的 summary.csv")
+    ap.add_argument("--genuine", type=Path, nargs="+", required=True,
+                    help="大批真图的 summary.csv, **可给多个**(会合并当成一个池子)。"
+                         "标定池要做大就得跨目录: 蓝图一份白图一份, 直接两个都传, "
+                         "不用自己拼 CSV(拼的时候最容易在编码和重复表头上翻车)。")
     ap.add_argument("--fake", type=Path, nargs="+", required=True, help="若干假图集的 summary.csv")
     ap.add_argument("--show-top", type=int, default=15, help="列出分数最高的 N 张真图(卡住阈值的就是它们)")
     ap.add_argument("--col", default="final_ai_score",
@@ -70,7 +73,13 @@ def main() -> None:
                 for ln in args.exclude.read_text(encoding="utf-8-sig").splitlines() if ln.strip()}
         print(f"(已排除 {len(drop)} 个确认为假图的文件)")
 
-    g = sorted(_scores(args.genuine, args.col, args.require_located), key=lambda t: -t[0])
+    _all = []
+    for _gp in args.genuine:
+        _one = _scores(_gp, args.col, args.require_located)
+        if len(args.genuine) > 1:
+            print(f"  真图池 {_gp} -> {len(_one)} 张(定位成功)")
+        _all.extend(_one)
+    g = sorted(_all, key=lambda t: -t[0])
     if drop:
         g = [(s, nm) for s, nm in g if Path(nm).name not in drop]
     if args.exclude_ext:
