@@ -245,8 +245,14 @@ def main() -> None:
         wcsv.writeheader(); wcsv.writerows(rows_out)
     print(f"完成 {len(rows_out)} 张 -> {sp}")
     if args.roi_amount:
-        print(f"其中 {n_located}/{len(rows_out)} 张成功定位到金额区(其余按 --roi-top 处理)。"
-              f"定位率低说明这批不是白底账单详情页。")
+        _r = n_located / max(1, len(rows_out))
+        print(f"其中 {n_located}/{len(rows_out)} 张成功定位到金额区"
+              f"({_r * 100:.1f}%, 其余按 --roi-top 处理)。")
+        if _r < 0.90:      # 以前这句无条件打印, 100% 定位时也在喊"定位率低" —— 看久了就当噪声忽略了
+            print(f"  !!!! 定位率只有 {_r * 100:.1f}%, 明显偏低。多半是**版式不对**: "
+                  f"蓝图忘了加 --blue-locator, 或这批根本不是收据页。"
+                  f"定不到的只由 --roi-top 兜底, 信号弱得多, 而且**下游 --require-located 一过就整批消失** —— "
+                  f"别看见'完成 N 张'就当跑通了。")
     print("下一步: python training/eval_summary.py <上面的 summary.csv> --kind fake|genuine")
     print("提示: CSV 存了 tile_max/tile_top3/tile_mean, 换聚合方式不用重跑。")
 
