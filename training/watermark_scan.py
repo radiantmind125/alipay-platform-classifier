@@ -504,7 +504,16 @@ def main() -> None:
 
     if not args.input:
         raise SystemExit("要么 --selftest, 要么给 --input")
+    # ★ 目录不存在/是空的必须**当场报错退出**, 不能一路跑完打印"命中 0 张"。
+    #   实测踩过: 目标目录压根没建出来, 脚本照常跑完输出"铁证 0 张 / 扫了 0 张",
+    #   而"扫了 0 张所以 0 命中"和"扫了 10 万张确认 0 命中"长得一模一样 ——
+    #   前者是故障, 后者是结论, 混淆的代价是把没洗过的池子当成洗干净的。
+    if not args.input.exists():
+        raise SystemExit(f"!!!! 目录不存在: {args.input}(先确认路径, 别把'没扫'当成'没命中')")
     files = _imgs(args.input)
+    if not files:
+        raise SystemExit(f"!!!! {args.input} 里一张图都没有(先确认路径, 别把'没扫'当成'没命中')")
+    print(f"待扫 {len(files)} 张", flush=True)
     rows = scan(files)
     hit = [r for r in rows if r[0] >= args.thr]
 
