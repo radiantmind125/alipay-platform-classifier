@@ -176,13 +176,36 @@ def generate_image(model: str, prompt: str, image_bytes: bytes, key: str,
         return base64.b64decode(b64)           # 直接就是图片字节, 不用再去下载
 
     if prov == "qwen_resp":
-        # 新版千问: 端点同万相(/v1/responses), 但尺寸只认 "宽*高", 给 "2K" 会被拒
-        sz = size if "*" in size else "1024*1024"
+        # 新版千问: 端点同万相(/v1/responses), 但尺寸只认 "宽*高", 给 "2K" 会被拒。
+        #
+        # ★ 这里踩过一次大坑: 最初写死成 "1024*1024"(那是探端点时随手填的方形),
+        #   而我们 --send crop 发出去的是**金额那一条**, 又扁又宽。模型按方形出图,
+        #   调用方再 resize 回原来的扁框 -> **数字被垂直压扁压糊**。
+        #   实测 150 张里只有 14 张还能定位到金额(9.3%), 而正常应该在 96% 以上。
+        #   探端点时只要求"能返回一张图", 尺寸对不对根本没检查, 于是这个值被原样带进了批量生成。
+        #
+        # 现在按**输入图的真实尺寸**要图, 保持长宽比。
+        if "*" in size:
+            sz = size
+        else:
+            import io as _io
+            from PIL import Image as _Im
+            with _Im.open(_io.BytesIO(image_bytes)) as _im:
+                _w, _h = _im.size
+            # 取 64 的整数倍, 并夹在接口能接受的范围内
+            _r = lambda v: max(512, min(2048, int(round(v / 64)) * 64))
+            sz = f"{_r(_w)}*{_r(_h)}"
         payload = {"model": model,
                    "input": {"messages": [{"role": "user",
                                            "content": [{"image": data_uri}, {"text": prompt}]}]},
                    "parameters": {"size": sz, "n": 1}}
-        r = _post(base.rstrip("/") + "/v1/responses", key, payload, timeout)
+        try:
+            r = _post(base.rstrip("/") + "/v1/responses", key, payload, timeout)
+        except RuntimeError as exc:
+            if "size" not in str(exc).lower():
+                raise
+            payload["parameters"].pop("size", None)     # 尺寸被拒就干脆不指定, 让它跟随输入
+            r = _post(base.rstrip("/") + "/v1/responses", key, payload, timeout)
         url = _dig_url(r)
         if not url:
             raise RuntimeError("新版千问响应里没找到图片 url: " + json.dumps(r)[:300])
