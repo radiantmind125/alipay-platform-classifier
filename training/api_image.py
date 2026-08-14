@@ -110,6 +110,36 @@ def _post(url: str, key: str, payload: dict, timeout: int) -> dict:
         raise RuntimeError(f"HTTP {e.code}: {detail}") from None
 
 
+def _check_aspect(out_bytes: bytes, in_bytes: bytes, model: str, tol: float = 0.25) -> bytes:
+    """出图的长宽比必须和输入大致一致, 否则**直接报错**。
+
+    为什么要有这一道
+    ----------------
+    上一轮把 `qwen-image-edit-plus` 的尺寸写死成方形, 而 `--send crop` 发的是
+    **金额那一条**(长宽比约 3)。模型按方形出图, 调用方再 resize 回扁框 ->
+    数字被垂直压扁压糊。**150 张全废, 而且一路上没有任何报错** ——
+    生成日志写着"失败 0 次", 定位率却从 96% 掉到 9.3%, 直到人工看拼图才发现。
+
+    比例对不上是**机械性错误**, 不是模型能力问题, 应该当场停, 不该产出一堆坏样本。
+    上层 `gen_api_local_edit` 连续失败十次会自动早停, 所以系统性的比例问题会立刻暴露。
+    """
+    try:
+        import io as _io
+        from PIL import Image as _Im
+        with _Im.open(_io.BytesIO(in_bytes)) as a:
+            iw, ih = a.size
+        with _Im.open(_io.BytesIO(out_bytes)) as b:
+            ow, oh = b.size
+    except Exception:
+        return out_bytes                        # 读不出来就不拦, 交给下游
+    ri, ro = iw / max(1, ih), ow / max(1, oh)
+    if ri > 0 and abs(ro - ri) / ri > tol:
+        raise RuntimeError(
+            f"{model} 出图长宽比对不上: 输入 {iw}x{ih}(比 {ri:.2f}) -> 出图 {ow}x{oh}(比 {ro:.2f})。"
+            f"贴回去会把金额压变形 —— 先把 size 参数调对再造, 别产出坏样本。")
+    return out_bytes
+
+
 def _post_multipart(url: str, key: str, fields: dict, img: bytes, timeout: int) -> dict:
     """OpenAI 的 /v1/images/edits 只吃 multipart/form-data, 不吃 JSON。"""
     b = "----dmxgen4b1c7e2f"
@@ -166,14 +196,17 @@ def generate_image(model: str, prompt: str, image_bytes: bytes, key: str,
     data_uri = "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode("ascii")
 
     if prov == "openai":
-        # 端点/编码/返回三样都和别家不同: /v1/images/edits + multipart + b64_json(没有 url)
+        # 端点/编码/返回三样都和别家不同: /v1/images/edits + multipart + b64_json(没有 url)。
+        # ★ size 用 "auto": OpenAI 只收固定几档(1024x1024 / 1536x1024 / 1024x1536),
+        #   而我们发的金额条长宽比约 3, 任何一档都对不上 —— 写死方形就是上一轮把 150 张
+        #   千问样本压变形的那个错。下面 `_check_aspect` 会兜住这种情况。
         r = _post_multipart(base.rstrip("/") + "/v1/images/edits", key,
-                            {"model": model, "prompt": prompt, "size": "1024x1024"},
+                            {"model": model, "prompt": prompt, "size": "auto"},
                             image_bytes, timeout)
         b64 = (r.get("data") or [{}])[0].get("b64_json")
         if not b64:
             raise RuntimeError("OpenAI 响应里没找到 b64_json: " + json.dumps(r)[:300])
-        return base64.b64decode(b64)           # 直接就是图片字节, 不用再去下载
+        return _check_aspect(base64.b64decode(b64), image_bytes, model)
 
     if prov == "qwen_resp":
         # 新版千问: 端点同万相(/v1/responses), 但尺寸只认 "宽*高", 给 "2K" 会被拒。
@@ -238,4 +271,4 @@ def generate_image(model: str, prompt: str, image_bytes: bytes, key: str,
             raise RuntimeError("豆包响应里没找到图片 url: " + json.dumps(r)[:300])
 
     with urllib.request.urlopen(url, timeout=timeout) as resp:
-        return resp.read()
+        return _check_aspect(resp.read(), image_bytes, model)
