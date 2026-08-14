@@ -66,6 +66,10 @@ def main() -> None:
                     help="按从严到松给, 默认就是当前两档的线路B 阈值")
     ap.add_argument("--lo-pct", type=float, default=1.0, help="真图几何的下界分位")
     ap.add_argument("--hi-pct", type=float, default=99.0, help="真图几何的上界分位")
+    ap.add_argument("--page", choices=["blue", "white"], default=None,
+                    help="**只看这一种版式**。几何表里同名行分不清是哪一格的时候必须给 —— "
+                         "只喂蓝图的分数却不限版式的话, 白图那些同名几何行会配到蓝图的分数, "
+                         "白图那一段就整段是错的(照样打得出来)。")
     args = ap.parse_args()
 
     # 1) 从真图几何定出每种版式的"合理区间"
@@ -130,12 +134,26 @@ def main() -> None:
 
     # 3) 连接
     fake = _read(args.geom_fake)
+    if args.page:
+        fake = [r for r in fake if r["page"] == args.page]
+        print(f"  (--page {args.page}: 几何表只留 {len(fake)} 行)")
+
+    # ★ 几何表自己也可能有跨格同名 —— 同一个名字既有蓝图行又有白图行,
+    #   这时无法判断分数该归给哪一行, 只能整组丢掉, 绝不能猜。
+    seen = Counter(r["image_name"] for r in fake)
+    gdup = {k for k, v in seen.items() if v > 1}
+    if gdup:
+        print(f"\n  !!!! **几何表里有 {len(gdup)} 个名字出现多次**(蓝白两批同名), "
+              f"分不清分数该归哪一行 -> 这些行**全部剔除不参与统计**。")
+        print(f"       想把它们算进来, 就加 --page blue 或 --page white 单独跑一次。")
+        fake = [r for r in fake if r["image_name"] not in gdup]
+
     miss = sum(1 for r in fake if r["image_name"] not in score)
     if miss:
         print(f"  !!!! 有 {miss} 张在几何表里但**分数表里没有**, 这些不参与统计 —— "
               f"两边不是同一批图的话结论就不成立, 值得回头看一眼")
 
-    for page in ("white", "blue"):
+    for page in ([args.page] if args.page else ("white", "blue")):
         rows = [r for r in fake if r["page"] == page and r["image_name"] in score]
         if not rows:
             continue
