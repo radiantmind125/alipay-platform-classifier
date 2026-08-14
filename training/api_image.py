@@ -47,6 +47,17 @@ SUPPORTED = {
     "wan2.7-image-pro": "wan",
     "wan2.6-image": "wan",
     "qwen-image-edit": "qwen",
+    # ★ 2026 年的新版千问编辑模型**换端点了**: 走 /v1/responses 而不是 /v1/images/generations,
+    #   而且尺寸只认 "宽*高", 给 "2K" 会报 `Invalid size format`。
+    #   **必须显式登记** —— 否则 provider_of 的 startswith("qwen") 兜底会把它们按老千问路由, 直接 404。
+    "qwen-image-edit-plus-20260226": "qwen_resp",
+    "qwen-image-edit-max-2026-01-16": "qwen_resp",
+    "qwen-image-edit-plus": "qwen_resp",
+    # ★ OpenAI 的图像编辑在 /v1/images/edits, 且是 multipart 不是 JSON, 返回 b64 不是 url。
+    #   实测在 /v1/images/generations 上会报 `Unknown parameter: 'image'`。
+    "gpt-image-2": "openai",
+    "gpt-image-1.5": "openai",
+    "gpt-image-1": "openai",
 }
 
 
@@ -99,6 +110,30 @@ def _post(url: str, key: str, payload: dict, timeout: int) -> dict:
         raise RuntimeError(f"HTTP {e.code}: {detail}") from None
 
 
+def _post_multipart(url: str, key: str, fields: dict, img: bytes, timeout: int) -> dict:
+    """OpenAI 的 /v1/images/edits 只吃 multipart/form-data, 不吃 JSON。"""
+    b = "----dmxgen4b1c7e2f"
+    parts = []
+    for k, v in fields.items():
+        parts.append(f"--{b}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode())
+    parts.append((f"--{b}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"a.jpg\"\r\n"
+                  f"Content-Type: image/jpeg\r\n\r\n").encode())
+    parts.append(img)
+    parts.append(f"\r\n--{b}--\r\n".encode())
+    req = urllib.request.Request(url, data=b"".join(parts), method="POST",
+                                 headers={"Content-Type": f"multipart/form-data; boundary={b}",
+                                          "Authorization": "Bearer " + key})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8", "replace")[:400]
+        except Exception:
+            detail = ""
+        raise RuntimeError(f"HTTP {e.code}: {detail}") from None
+
+
 def _dig_url(r) -> str:
     """各家把出图 url 放的位置都不一样, 挨个位置找一遍。
 
@@ -126,11 +161,32 @@ def generate_image(model: str, prompt: str, image_bytes: bytes, key: str,
                    watermark: bool = False) -> bytes:
     """把 image_bytes 交给指定模型按 prompt 重绘, 返回出图的原始字节。"""
     prov = provider_of(model)
-    if prov in ("wan", "qwen"):            # 阿里两家对小图都会 InvalidParameter, 先把短边补到 512
+    if prov in ("wan", "qwen", "qwen_resp"):   # 阿里几家对小图都会 InvalidParameter, 先把短边补到 512
         image_bytes = _ensure_min_side(image_bytes, 512)
     data_uri = "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode("ascii")
 
-    if prov == "qwen":
+    if prov == "openai":
+        # 端点/编码/返回三样都和别家不同: /v1/images/edits + multipart + b64_json(没有 url)
+        r = _post_multipart(base.rstrip("/") + "/v1/images/edits", key,
+                            {"model": model, "prompt": prompt, "size": "1024x1024"},
+                            image_bytes, timeout)
+        b64 = (r.get("data") or [{}])[0].get("b64_json")
+        if not b64:
+            raise RuntimeError("OpenAI 响应里没找到 b64_json: " + json.dumps(r)[:300])
+        return base64.b64decode(b64)           # 直接就是图片字节, 不用再去下载
+
+    if prov == "qwen_resp":
+        # 新版千问: 端点同万相(/v1/responses), 但尺寸只认 "宽*高", 给 "2K" 会被拒
+        sz = size if "*" in size else "1024*1024"
+        payload = {"model": model,
+                   "input": {"messages": [{"role": "user",
+                                           "content": [{"image": data_uri}, {"text": prompt}]}]},
+                   "parameters": {"size": sz, "n": 1}}
+        r = _post(base.rstrip("/") + "/v1/responses", key, payload, timeout)
+        url = _dig_url(r)
+        if not url:
+            raise RuntimeError("新版千问响应里没找到图片 url: " + json.dumps(r)[:300])
+    elif prov == "qwen":
         # 千问: 端点是豆包那个, body 却是 DashScope 的 input.messages 形状
         payload = {"model": model,
                    "input": {"messages": [{"role": "user",
