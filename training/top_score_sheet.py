@@ -50,6 +50,11 @@ def main() -> None:
     ap.add_argument("--col", default="tile_top3")
     ap.add_argument("--top", type=int, default=30)
     ap.add_argument("--exclude", type=Path, default=None, help="已确认假图的名单, 这些不再显示")
+    ap.add_argument("--paths", type=Path, nargs="*", default=None,
+                    help="**从这些 CSV 取图片路径**(按裸文件名对齐), 而不是用 --csv 里的 image 列。"
+                         "看线路A 的榜首时必须给 —— 线路A 当初打的是 link_from_csv 建的临时硬链接目录, "
+                         "那批目录腾空间时清掉了, 它的 image 列现在全是死路径。"
+                         "给线路B 的 summary.csv 即可, 那里指向原始下载目录。")
     ap.add_argument("--require-located", action="store_true",
                     help="只看金额定位成功的(线路B 只在定位成功时出信号, 定不到的本来就不参与定线)")
     ap.add_argument("--cols", type=int, default=6)
@@ -66,6 +71,18 @@ def main() -> None:
                 for ln in args.exclude.read_text(encoding="utf-8-sig").splitlines() if ln.strip()}
         print(f"(已排除名单 {len(drop)} 个)")
 
+    path_of: dict[str, str] = {}
+    if args.paths:
+        for pc in args.paths:
+            k = 0
+            for r in csv.DictReader(open(pc, encoding="utf-8-sig")):
+                nm = (r.get("image_name") or "").strip()
+                p = (r.get("image") or "").strip()
+                if nm and p:
+                    path_of[nm] = p
+                    k += 1
+            print(f"  路径来源 {pc} -> {k} 条")
+
     rows: list[tuple[float, str, str]] = []
     for c in args.csv:
         n = 0
@@ -79,7 +96,7 @@ def main() -> None:
             if not v:
                 continue
             try:
-                rows.append((float(v), r.get("image") or "", nm))
+                rows.append((float(v), path_of.get(nm) or (r.get("image") or ""), nm))
                 n += 1
             except ValueError:
                 pass
