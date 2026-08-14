@@ -97,7 +97,13 @@ def main() -> None:
     except Exception:
         pass
     ap = argparse.ArgumentParser(description="探测聚合平台上哪些图生图模型真的能用")
-    ap.add_argument("--src", type=Path, required=True, help="拿来当输入的一张真截图")
+    ap.add_argument("--list", action="store_true",
+                    help="**先问平台自己有哪些模型**(`/v1/models`), 不出图不花钱。"
+                         "别靠记忆写模型名 —— 各家版本换得很快, 聚合平台上的命名也和官方不一样。"
+                         "拿这份清单去挑候选, 比猜准得多。")
+    ap.add_argument("--grep", nargs="*", default=None,
+                    help="配合 --list: 只显示名字里含这些子串的(如 image edit i2i flux gemini)")
+    ap.add_argument("--src", type=Path, default=None, help="拿来当输入的一张真截图(--list 时不需要)")
     ap.add_argument("--out", type=Path, default=None, help="把成功出图的存这里(可选)")
     ap.add_argument("--models", nargs="*", default=None, help="不给就用内置候选表")
     ap.add_argument("--base", default=BASE)
@@ -111,6 +117,33 @@ def main() -> None:
     if not key:
         raise SystemExit("请先设环境变量 DMX_KEY —— **别把 key 写进仓库, 这个仓库是公开的**")
 
+    if args.list:
+        req = urllib.request.Request(f"{args.base}/v1/models",
+                                     headers={"Authorization": f"Bearer {key}"})
+        try:
+            with urllib.request.urlopen(req, timeout=args.timeout) as r:
+                body = json.loads(r.read().decode("utf-8", "replace"))
+        except Exception as exc:  # noqa: BLE001
+            raise SystemExit(f"取模型清单失败: {exc}\n(有的聚合平台不开 /v1/models, 那就只能拿候选名去试)")
+        ids = sorted({(m.get("id") or "").strip() for m in (body.get("data") or []) if m.get("id")})
+        if not ids:
+            raise SystemExit(f"清单是空的, 原始返回前 300 字:\n{json.dumps(body)[:300]}")
+        if args.grep:
+            pats = [g.lower() for g in args.grep]
+            ids = [i for i in ids if any(p in i.lower() for p in pats)]
+        print(f"平台共 {len(body.get('data') or [])} 个模型"
+              + (f", 匹配 {len(ids)} 个" if args.grep else "") + ":\n")
+        for i in ids:
+            print(f"  {i}")
+        print("\n挑候选时的两条:")
+        print("  1) **要真正没训过的**才有意义。我们训练里已经有阿里(千问/万相)和字节(豆包/即梦),")
+        print("     还有本地开源 VAE: SD / SDXL / FLUX-VAE / TAESD / ostris / Qwen-Image。")
+        print("     **共用同一个 VAE 的模型不算没训过** —— 比如 FLUX 系的编辑模型和我们训过的 FLUX-VAE 同源。")
+        print("  2) 最干净的留一组是**自研闭源解码器**的那些(谷歌 / OpenAI / 腾讯 / 智谱 之类)。")
+        return
+
+    if not args.src:
+        raise SystemExit("除了 --list 之外都要给 --src(一张真截图当输入)")
     raw = args.src.read_bytes()
     try:                                        # 短边补足, 否则阿里那边会拒
         import io
