@@ -307,7 +307,22 @@ def main() -> None:
                 print("  提示: 风控在拒图。若你用的是 --prompt-mode amount, 换成默认的 redraw 会好很多"
                       "(指纹一样, 但不涉及'改支付金额'这种敏感请求)。", flush=True)
             if failed >= 10 and made == 0:
-                print("连续失败太多, 先停下检查(key/额度/模型名/网络)。"); break
+                try:
+                    from api_image import SUPPORTED, provider_of
+                    prov, known = provider_of(args.model), args.model in SUPPORTED
+                except Exception:
+                    prov, known = "?", False
+                print(f"连续失败太多, 先停下检查(key/额度/模型名/网络)。")
+                print(f"  当前模型 {args.model} 被路由成 **{prov}** 格式"
+                      f"({'表里有登记' if known else '**表里没登记, 是按前缀猜的**'})。")
+                if "404" in str(exc):
+                    # 实测踩过: 新版千问搬到了 /v1/responses, 但代码没更新, provider_of 按前缀
+                    # 猜成老千问 -> 打到 /v1/images/generations -> 每张都 404 openai_error。
+                    print("  **全是 404 多半是端点不对** —— 这个模型在平台上走的不是这条路。")
+                    print("  1) 先 `git pull`(端点表可能刚更新过)")
+                    print("  2) 再 `probe_models.py --models <模型名>` 探它到底走哪个端点")
+                    print("  3) 确认 `api_image.SUPPORTED` 里登记了 —— 没登记就会按前缀瞎猜, 而且猜错不报警")
+                break
 
     mf.close()
     print(f"完成: {made} 张 -> {args.out}(跳过 {skipped} 张定位失败, 失败 {failed} 次)")
