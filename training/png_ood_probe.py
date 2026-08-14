@@ -68,10 +68,25 @@ def _make(args) -> None:
                 for ln in args.exclude.read_text(encoding="utf-8-sig").splitlines() if ln.strip()}
         print(f"(排除名单 {len(drop)} 个)")
 
+    # 路径来源: 线路A 的 CSV 里那一列指向的是**当初打分时用的目录**,
+    # 而那批目录很可能是 link_from_csv 建的临时硬链接目录, 早就删掉了。
+    # 所以允许用 --paths 从别的 CSV(比如线路B 的 summary.csv, 指向原始下载目录)取路径, 按裸文件名对齐。
+    path_of: dict[str, str] = {}
+    if args.paths:
+        for pc in args.paths:
+            n = 0
+            for r in _read(pc):
+                nm = (r.get("image_name") or "").strip()
+                p = (r.get("image") or "").strip()
+                if nm and p:
+                    path_of[nm] = p
+                    n += 1
+            print(f"  路径来源 {pc} -> {n} 条")
+
     rows: list[tuple[float, str, str]] = []
     for r in _read(args.a):
         nm = (r.get("image_name") or "").strip()
-        p = (r.get("image") or "").strip()
+        p = path_of.get(nm) or (r.get("image") or "").strip()
         v = (r.get(args.col) or "").strip()
         if not (nm and p and v) or nm in drop:
             continue
@@ -82,6 +97,17 @@ def _make(args) -> None:
     if not rows:
         raise SystemExit(f"{args.a} 里没读到 {args.col} —— 确认这是线路A 的 CSV")
     print(f"真图 {len(rows):,} 张")
+
+    # **先探 30 条路径**再干活 —— 全都打不开的话早点停, 别转码 800 张全失败还照样打印下一步命令
+    probe = rows[:: max(1, len(rows) // 30)][:30]
+    alive = sum(1 for _, _, p in probe if Path(p).exists())
+    print(f"  路径抽查: {alive}/{len(probe)} 条能找到文件")
+    if alive == 0:
+        raise SystemExit(
+            f"\n**一条路径都找不到** —— {args.a} 的 image 列多半指向已经删掉的临时目录\n"
+            f"(线路A 当初是打 link_from_csv 建的硬链接目录, 那批目录腾空间时清掉了)。\n"
+            f"改法: 加 --paths 指向线路B 的 summary.csv, 从那里取原始路径, 按裸文件名对齐 ——\n"
+            f"  --paths D:\\probe\\gen100k_blue\\summary.csv D:\\probe\\gen100k_white\\summary.csv")
 
     by_ext: dict[str, list[tuple[float, str, str]]] = {"png": [], "jpg": []}
     for t in rows:
@@ -106,10 +132,12 @@ def _make(args) -> None:
     mf = open(args.out / "manifest.csv", "w", newline="", encoding="utf-8-sig")
     mw = csv.writer(mf)
     mw.writerow(["group", "new_name", "orig_name", "orig_score"])
+    total_ok = 0
     for g in _GROUPS:
         d = args.out / g
         d.mkdir(exist_ok=True)
-        ok = bad = 0
+        ok = 0
+        why: list[str] = []
         for s, nm, p in picks[g]:
             new = Path(nm).stem + ".jpg"
             try:
@@ -118,10 +146,16 @@ def _make(args) -> None:
                     im.convert("RGB").save(d / new, "JPEG", quality=args.quality)
                 mw.writerow([g, new, nm, f"{s:.6f}"])
                 ok += 1
-            except Exception:  # noqa: BLE001
-                bad += 1
-        print(f"  {g:9s} -> {d}  成功 {ok} | 失败 {bad}")
+            except Exception as exc:  # noqa: BLE001
+                if len(why) < 3:          # **把原因打出来** —— 只报个失败数等于什么都没说
+                    why.append(f"{type(exc).__name__}: {str(exc)[:110]}")
+        total_ok += ok
+        print(f"  {g:9s} -> {d}  成功 {ok} | 失败 {len(picks[g]) - ok}")
+        for w in why:
+            print(f"      {w}")
     mf.close()
+    if total_ok == 0:
+        raise SystemExit("\n**一张都没转成功**, 下一步的命令就不打印了 —— 先看上面的失败原因。")
 
     print(f"\n-> {args.out / 'manifest.csv'}")
     print("\n下一步: 用线路A 给四个目录各打一遍分")
@@ -189,6 +223,10 @@ def main() -> None:
         pass
     ap = argparse.ArgumentParser(description="验证无损 PNG 是否是线路A 的分布外输入(只读源图)")
     ap.add_argument("--a", type=Path, default=None, help="线路A 真图 CSV(第一步用)")
+    ap.add_argument("--paths", type=Path, nargs="*", default=None,
+                    help="**从这些 CSV 取图片路径**(按裸文件名对齐), 而不是用 --a 里的 image 列。"
+                         "线路A 当初打的是 link_from_csv 建的临时硬链接目录, 那批目录早清掉了, "
+                         "所以要用线路B 的 summary.csv 拿原始下载路径。")
     ap.add_argument("--col", default="final_ai_score")
     ap.add_argument("--exclude", type=Path, default=None)
     ap.add_argument("--out", type=Path, required=True)
