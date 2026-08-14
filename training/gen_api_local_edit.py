@@ -208,6 +208,7 @@ def main() -> None:
         mw.writerow(["file", "model", "src"])
 
     made = failed = skipped = 0
+    _t0 = time.time()
     page_n = {"blue": 0, "white": 0}          # 造出来的图各是什么版式, 收工时报一下, 免得再靠目录名猜
     for sp in srcs:
         if made >= args.n:
@@ -296,8 +297,12 @@ def main() -> None:
                         args.save_crops / "nature" / f"crop_{tag}_{made:05d}.jpg", quality=95)
             made += 1
             page_n[page_s] = page_n.get(page_s, 0) + 1
-            if made % 10 == 0:
-                print(f"  已造 {made} 张...", flush=True)
+            # 小批量时**每张都报**: 原来写死每 10 张一报, `--n 10` 就变成全程无输出、
+            # 最后才蹦一行 —— 而 gpt-image 这类每张要 30~60 秒, 看上去就是卡死了。
+            _step = 1 if args.n <= 20 else 10
+            if made % _step == 0:
+                print(f"  已造 {made}/{args.n} 张  (用时 {time.time() - _t0:.0f}s, "
+                      f"平均 {(time.time() - _t0) / made:.1f}s/张)", flush=True)
             time.sleep(args.sleep)
         except Exception as exc:  # noqa: BLE001
             failed += 1
