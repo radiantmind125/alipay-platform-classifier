@@ -38,6 +38,7 @@ import argparse
 import csv
 import glob
 import sys
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -92,20 +93,40 @@ def main() -> None:
         files.extend(hit)
     score: dict[str, float] = {}
     cell_of: dict[str, str] = {}
+    n_rows = 0
+    dup: Counter[tuple[str, str]] = Counter()
     for f in sorted(files):
         stem = Path(f).stem
         for r in _read(Path(f)):
             nm = (r.get("image_name") or "").strip()
             v = (r.get(args.col) or "").strip()
-            if nm and v:
-                try:
-                    score[nm] = float(v)
-                    cell_of[nm] = stem
-                except ValueError:
-                    pass
+            if not (nm and v):
+                continue
+            try:
+                fv = float(v)
+            except ValueError:
+                continue
+            n_rows += 1
+            if nm in score and cell_of[nm] != stem:
+                dup[(cell_of[nm], stem)] += 1     # **跨格同名**: 后读的会盖掉先读的
+            score[nm] = fv
+            cell_of[nm] = stem
     if not score:
         raise SystemExit("假图分数一个都没读到 —— 确认 --scores 和 --col")
-    print(f"\n假图分数 {len(score)} 张, 来自 {len(files)} 个文件")
+    print(f"\n假图分数 {len(score)} 张(共读 {n_rows} 行), 来自 {len(files)} 个文件")
+
+    if dup:
+        # 这里绝不能凑合往下算: 同名会让一部分几何行配到**别的格**的分数, 表照样打得出来, 只是错的。
+        # `link_from_csv.py` 早就写过这个坑 —— gen_local_ai_edit 按 ailocal_<模式>_<标记>_<编号>
+        # 命名, 蓝图批次和白图批次只要标记相同, 文件名就会**逐个撞上**。
+        print(f"\n!!!! **跨格同名 {sum(dup.values())} 个** —— 后读的那一格把先读的盖掉了:")
+        for (a, b), c in dup.most_common():
+            print(f"       {a}  与  {b}  撞名 {c} 个")
+        raise SystemExit(
+            "\n同名会让一部分图配到别的格的分数, **表还是打得出来, 只是错的**, 所以这里直接停。\n"
+            "改法: 按版式分两次跑, 每次只给同一版式的那几个 CSV ——\n"
+            "  蓝: --scores <蓝那几个>_clean.csv   然后只看输出里的 blue 段\n"
+            "  白: --scores <白那几个>_clean.csv   然后只看输出里的 white 段")
 
     # 3) 连接
     fake = _read(args.geom_fake)
