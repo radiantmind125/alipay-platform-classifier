@@ -302,11 +302,18 @@ _AIGC_HARD = {
     "TC260国标": re.compile(rb"tc260\.org\.cn/ns/AIGC", re.I),
     "doubao":    re.compile(rb"doubao", re.I),
     "jimeng":    re.compile(rb"jimeng", re.I),
+    # IPTC 的"数字来源类型"标准词, C2PA 内容凭证里用它表示**这张图是模型生成的**。
+    # OpenAI / 谷歌 / Adobe 都走这套 —— 和 TC260 一样**不挑厂商**, 只是换了个标准体系。
+    # 实测 gpt-image-2 / gpt-image-1.5 的输出在 IHDR 之后紧跟一个 19KB 的 `caBX` 块(C2PA)。
+    "C2PA生成": re.compile(rb"trainedAlgorithmicMedia", re.I),
 }
-# 只说明**过了某个 App**, 不是生成的铁证 -> 单独报, 不进排除名单
+# 只说明**过了某个 App / 带了溯源信息**, 不是生成的铁证 -> 单独报, 不进排除名单
 _AIGC_SOFT = {
     "retouch/醒图": re.compile(rb"retouch|xingtu", re.I),
     "meitu/美图":   re.compile(rb"meitu", re.I),
+    # **光有 C2PA 容器不等于 AI 生成** —— Adobe 和部分相机给普通照片也签 C2PA。
+    # 只有里面写了 trainedAlgorithmicMedia 才算铁证, 所以容器本身只当软标记。
+    "C2PA凭证":     re.compile(rb"jumd(c2pa|c2ma)|caBX", re.I),
 }
 _META_CAP = 400000          # 元数据都在文件前头, 读这么多就够
 
