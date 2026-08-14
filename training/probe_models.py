@@ -108,20 +108,25 @@ def _post(url: str, key: str, payload: dict, timeout: int):
 
 
 def _find_url(r) -> str:
-    """两家的出图位置不一样, 都找一遍。"""
+    """各家出图的位置不一样, 都找一遍。
+
+    **返回完整值, 绝不截断** —— 以前这里 `[:120]` 是为了打印好看,
+    但同一个字符串又被拿去下载, 于是下的是**半截 URL**, 阿里 OSS 回 403 / 火山回 404,
+    看着像"平台不让下", 其实是我们自己把地址截了。截断只该发生在打印那一行。
+    """
     if not isinstance(r, dict):
         return ""
     d = r.get("data")
     if isinstance(d, list) and d and isinstance(d[0], dict):
         u = d[0].get("url") or d[0].get("b64_json")
         if u:
-            return str(u)[:120]
+            return str(u)
     try:
-        return str(r["output"][0]["content"][0]["text"])[:120]
+        return str(r["output"][0]["content"][0]["text"])
     except Exception:
         pass
     try:
-        return str(r["output"]["results"][0]["url"])[:120]
+        return str(r["output"]["results"][0]["url"])
     except Exception:
         return ""
 
@@ -238,17 +243,31 @@ def main() -> None:
                 continue
             print(f"  ✓ {m:34s} [{ep:9s}] 出图 {img[:80]}")
             ok.append((m, ep))
-            if args.out and img.startswith("http"):
+            if args.out:
                 try:
-                    with urllib.request.urlopen(img, timeout=args.timeout) as resp:
-                        (args.out / f"{m.replace('/', '_')}__{ep}.png").write_bytes(resp.read())
-                except Exception as e:
-                    print(f"      (下载失败 {e})")
+                    if img.startswith("http"):
+                        rq = urllib.request.Request(img, headers={"User-Agent": "Mozilla/5.0"})
+                        with urllib.request.urlopen(rq, timeout=args.timeout) as resp:
+                            blob = resp.read()
+                    else:
+                        # OpenAI 走 b64_json 直接返回图片字节, 不给 URL ——
+                        # 以前只处理 http 开头的, 这一路的图**一张都没存下来**
+                        blob = base64.b64decode(img.split(",", 1)[-1])
+                    dst = args.out / f"{m.replace('/', '_')}__{ep}.png"
+                    dst.write_bytes(blob)
+                    print(f"      -> 已存 {dst.name} ({len(blob) / 1024:.0f} KB)")
+                except Exception as e:  # noqa: BLE001
+                    print(f"      (存图失败 {type(e).__name__}: {str(e)[:120]})")
             break                               # 这个模型已经通了, 不用再试另一个端点
 
+    # 端点名 -> 真实路径。以前这里写的是二选一的三元表达式, 加了 edits 之后
+    # **走 edits 通的会被标成 /v1/responses** —— 照着配下游就是错的, 而且错得很像对的。
+    _EP_URL = {"images": "/v1/images/generations",
+               "responses": "/v1/responses",
+               "edits": "/v1/images/edits(multipart)"}
     print(f"\n能用的模型 {len(ok)} 个:")
     for m, ep in ok:
-        print(f"  {m:34s} 走 {'/v1/images/generations' if ep == 'images' else '/v1/responses'}")
+        print(f"  {m:34s} 走 {_EP_URL.get(ep, ep)}")
     print("\n把能用的填进 api_image.py 的 SUPPORTED, 然后就能批量造样本了。")
     print("**先去 --out 目录肉眼看几张**: 金额有没有真的被改、页面有没有崩、右下角有没有 AIGC 水印。")
 
