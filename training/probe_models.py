@@ -49,10 +49,45 @@ _CANDIDATES = [
     "seedream-4-0-250828",
 ]
 
-# 每个模型都把两条端点都试一遍
-_ENDPOINTS = ("images", "responses")
+# 每个模型都把这几条端点试一遍
+#   images    /v1/images/generations  —— 豆包/万相 走这条
+#   responses /v1/responses           —— 阿里 DashScope 那套多模态 messages
+#   edits     /v1/images/edits        —— **OpenAI 系的图像编辑在这条**, 而且是 multipart 不是 JSON。
+#             实测 gpt-image-2 在 generations 上报 `Unknown parameter: 'image'`, 就是因为走错端点了。
+_ENDPOINTS = ("images", "responses", "edits")
+
+# 尺寸写法两家不一样: 豆包吃 "2K", 阿里新版要 "宽*高"。
+# 实测 qwen-image-edit-plus-20260226 只差这一个参数: `Invalid size format: 2K, expected width*height`。
+_ALT_SIZE = "1024*1024"
 
 _PROMPT = "把图中的金额数字改成 8888.00, 其余部分保持完全不变"
+
+
+def _post_multipart(url: str, key: str, fields: dict, img: bytes, timeout: int):
+    """OpenAI 的 /v1/images/edits 只吃 multipart/form-data, 不吃 JSON。"""
+    b = "----dmxprobe7f3a9c1e"
+    parts = []
+    for k, v in fields.items():
+        parts.append(f"--{b}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode())
+    parts.append((f"--{b}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"a.jpg\"\r\n"
+                  f"Content-Type: image/jpeg\r\n\r\n").encode())
+    parts.append(img)
+    parts.append(f"\r\n--{b}--\r\n".encode())
+    body = b"".join(parts)
+    req = urllib.request.Request(url, data=body, method="POST",
+                                 headers={"Content-Type": f"multipart/form-data; boundary={b}",
+                                          "Authorization": "Bearer " + key})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return True, json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            body_s = e.read().decode("utf-8", "replace")
+        except Exception:
+            body_s = ""
+        return False, f"HTTP {e.code}: {body_s[:220]}"
+    except Exception as e:  # noqa: BLE001
+        return False, f"{type(e).__name__}: {str(e)[:180]}"
 
 
 def _post(url: str, key: str, payload: dict, timeout: int):
@@ -165,21 +200,35 @@ def main() -> None:
     if args.out:
         args.out.mkdir(parents=True, exist_ok=True)
 
+    def _build(ep: str, size: str):
+        if ep == "images":
+            return (args.base.rstrip("/") + "/v1/images/generations",
+                    {"model": m, "prompt": _PROMPT, "image": data_uri,
+                     "response_format": "url", "size": size, "watermark": False})
+        return (args.base.rstrip("/") + "/v1/responses",
+                {"model": m,
+                 "input": {"messages": [{"role": "user",
+                                         "content": [{"image": data_uri}, {"text": _PROMPT}]}]},
+                 "parameters": {"size": size, "n": 1}})
+
     ok: list[tuple[str, str]] = []
     for m in models:
         for ep in _ENDPOINTS:
-            if ep == "images":
-                url = args.base.rstrip("/") + "/v1/images/generations"
-                payload = {"model": m, "prompt": _PROMPT, "image": data_uri,
-                           "response_format": "url", "size": args.size, "watermark": False}
+            if ep == "edits":                    # OpenAI 系: multipart, 且尺寸用 宽x高
+                url = args.base.rstrip("/") + "/v1/images/edits"
+                good, r = _post_multipart(url, key,
+                                          {"model": m, "prompt": _PROMPT, "size": "1024x1024"},
+                                          raw, args.timeout)
             else:
-                url = args.base.rstrip("/") + "/v1/responses"
-                payload = {"model": m,
-                           "input": {"messages": [{"role": "user",
-                                                   "content": [{"image": data_uri},
-                                                               {"text": _PROMPT}]}]},
-                           "parameters": {"size": args.size, "n": 1}}
-            good, r = _post(url, key, payload, args.timeout)
+                url, payload = _build(ep, args.size)
+                good, r = _post(url, key, payload, args.timeout)
+                # 尺寸格式两家不一样 —— 报的就是尺寸问题时, 换一种写法再试一次, 别就此判死
+                if not good and isinstance(r, str) and "size" in r.lower():
+                    url, payload = _build(ep, _ALT_SIZE)
+                    good2, r2 = _post(url, key, payload, args.timeout)
+                    if good2 or len(str(r2)) < len(str(r)):
+                        print(f"    (尺寸换成 {_ALT_SIZE} 重试)")
+                        good, r = good2, r2
             if not good:
                 print(f"  ✗ {m:34s} [{ep:9s}] {r}")
                 continue
