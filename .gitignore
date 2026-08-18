@@ -31,3 +31,9 @@ COORDINATION.md
 # 系统
 .DS_Store
 Thumbs.db
+
+# 本地配置（阈值的权威来源是代码里的 DEFAULT_CONFIG 与 DEPLOY_SPEC，这份是首次运行自动落盘的本地副本）
+training/ssp_config.json
+
+# 会话记录，勿提交
+.claude/

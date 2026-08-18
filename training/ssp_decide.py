@@ -127,7 +127,18 @@ def load_config(path: Path) -> dict:
     if not path.exists():
         path.write_text(json.dumps(DEFAULT_CONFIG, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"(没找到配置, 已写一份默认的到 {path})")
-    return json.loads(path.read_text(encoding="utf-8"))
+    cfg = json.loads(path.read_text(encoding="utf-8"))
+    # 配置文件是**第一次运行时自动落盘**的, 之后代码里加了新键它也不会自己更新。
+    # 缺键不会报错, 只会安静地走 .get() 的兜底值 —— 比如少了 never_auto_reject_ext,
+    # .jpeg 免自动拒就**无声失效**了。所以这里明说一声。
+    miss = [k for k in DEFAULT_CONFIG if not k.startswith("_") and k not in cfg]
+    sub = [f"{k}.{s}" for k, v in DEFAULT_CONFIG.items()
+           if isinstance(v, dict) and isinstance(cfg.get(k), dict)
+           for s in v if not s.startswith("_") and s not in cfg[k]]
+    if miss or sub:
+        print(f"  !!!! 配置比代码里的默认值**少了这些键**: {miss + sub}")
+        print(f"       它们会走兜底值, 不会报错。想用新默认值就删掉 {path.name} 让它重新生成。")
+    return cfg
 
 
 def _read_scores(p: Path, col: str, need_located: bool) -> dict[str, tuple[float, bool]]:
