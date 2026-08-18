@@ -38,6 +38,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
+_HERE = Path(__file__).resolve().parent
 _EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 # 只要带上这些痕迹之一, 就值得把里面的字符串挖出来看
@@ -61,7 +62,11 @@ _KEYVAL = [
 
 _GEN_HINT = re.compile(rb"gpt-image|dall|openai|midjourney|stable ?diffusion|firefly|imagen|"
                        rb"gemini|flux|comfy|novelai|doubao|jimeng|hunyuan|wanx|qwen|kolors|"
-                       rb"seedream|trainedAlgorithmicMedia|compositeWithTrainedAlgorithmicMedia", re.I)
+                       rb"seedream|trainedAlgorithmicMedia|compositeWithTrainedAlgorithmicMedia|"
+                       # ★ TC260/AIGC 必须算进来: 边界那批图里 xmlns:TC260 出现了 213 处,
+                       #   而现用铁证正则只认死 tc260.org.cn/ns/AIGC 这一个 URI ——
+                       #   万一有别的写法, 不把它算作"生成器痕迹"就永远发现不了漏网。
+                       rb"tc260|AIGC", re.I)
 
 
 def main() -> None:
@@ -76,7 +81,26 @@ def main() -> None:
                     help="每张只读文件头这么多字节。C2PA/XMP 都在很靠前的位置"
                          "(实测那两张铁证在偏移 2968), 读 64KB 足够, 比读 400KB 快好几倍")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--exclude", type=Path, default=None,
+                    help="已确认是假图的名单。**不给这个就没法判读** —— 高分区本来就挤满已知假图, "
+                         "不分开看会把'早就抓到的'误当成'新发现的污染'")
     args = ap.parse_args()
+
+    # 把线路C 现用的正则原样搬过来, 好回答**最要紧的那个问题**:
+    # 有生成器痕迹、但现用正则**抓不到**的, 有多少? 那些就是白丢的铁证。
+    import ast as _ast
+    _ws = _ast.parse((_HERE / "watermark_scan.py").read_text(encoding="utf-8"))
+    _keep = [n for n in _ws.body if isinstance(n, _ast.Assign)
+             and getattr(n.targets[0], "id", "") in ("_AIGC_HARD", "_AIGC_SOFT")]
+    _ns: dict = {"re": re}
+    exec(compile(_ast.Module(body=_keep, type_ignores=[]), "<ws>", "exec"), _ns)
+    HARD, SOFT = _ns["_AIGC_HARD"], _ns["_AIGC_SOFT"]
+
+    known_fake: set[str] = set()
+    if args.exclude and args.exclude.exists():
+        known_fake = {ln.strip().lstrip("﻿")
+                      for ln in args.exclude.read_text(encoding="utf-8-sig").splitlines() if ln.strip()}
+        print(f"(排除名单 {len(known_fake):,} 条 —— 这些是**早就确认的假图**)")
 
     files = [p for p in sorted(args.input.rglob("*")) if p.suffix.lower() in _EXTS and p.is_file()]
     if args.limit:
@@ -89,7 +113,9 @@ def main() -> None:
     hit_rows = []
     vals: dict[str, Counter] = {k: Counter() for k, _ in _KEYVAL}
     tokens: Counter = Counter()
-    n_interesting = n_genhint = 0
+    n_interesting = n_genhint = n_hard = n_gap = 0
+    gap_known: list[str] = []
+    gap_new: list[str] = []
     t = time.time()
     for i, p in enumerate(files, 1):
         try:
@@ -125,13 +151,24 @@ def main() -> None:
         if g:
             n_genhint += 1
             row["生成器线索"] = g.group(0).decode("utf-8", "replace")
+        # ★ 关键的一格: 现用正则抓不抓得到这张
+        hh = sorted(k for k, pat in HARD.items() if pat.search(d))
+        ss = sorted(k for k, pat in SOFT.items() if pat.search(d))
+        row["现用铁证"] = "+".join(hh)
+        row["现用软标记"] = "+".join(ss)
+        row["已知假图"] = int(p.name in known_fake)
+        if hh:
+            n_hard += 1
+        if g and not hh:
+            n_gap += 1
+            (gap_known if p.name in known_fake else gap_new).append(p.name)
         hit_rows.append(row)
         if i % 20000 == 0:
             print(f"  已扫 {i:,}/{len(files):,}  命中 {n_interesting:,}  (用时 {time.time()-t:.0f}s)",
                   flush=True)
 
     sp = args.out / "meta_hits.csv"
-    cols = ["image_name"] + [k for k, _ in _KEYVAL] + ["生成器线索"]
+    cols = ["image_name", "现用铁证", "现用软标记", "已知假图", "生成器线索"] + [k for k, _ in _KEYVAL]
     with open(sp, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader(); w.writerows(hit_rows)
@@ -162,6 +199,17 @@ def main() -> None:
         print(f"\n其余可读片段(排掉已知关键词后, 前 25 种) —— **没见过的生成器可能就在这里**:")
         for t, n in sorted(other, key=lambda x: -x[1])[:25]:
             print(f"   {n:>6,d}  {t}")
+
+    print(f"\n{'='*60}\n★ 现用正则的漏网情况(**这才是最要紧的一格**)")
+    print(f"  现用铁证抓到 **{n_hard:,}** 张")
+    print(f"  有生成器痕迹但**铁证抓不到**: **{n_gap:,}** 张")
+    print(f"     其中已在排除名单里(早就知道是假的): {len(gap_known):,} 张")
+    print(f"     **不在名单里 = 真·漏网**: **{len(gap_new):,}** 张")
+    for nm in gap_new[:10]:
+        print(f"       {nm}")
+    if not known_fake:
+        print("  (没给 --exclude, 上面两行分不开 —— **加上名单再跑一次**, "
+              "否则会把已知假图当成新污染)")
 
     print(f"\n-> {sp}")
     print("\n判读: 出现我们没见过的生成器名字 -> 加进 watermark_scan._AIGC_HARD, 线路C 覆盖面直接变大;")
