@@ -10,9 +10,14 @@ r"""两次打分**逐张对比**: 定种子到底把分数动了多少, 阈值�
 
 具体验什么
 ----------
-1. **分数往哪边动了。** 定种子之后多个模型看到**同一批小块**(以前各随机各的),
-   而 `final_ai_score` 是多模型取 **max** —— 以前那个 max 里含有"哪个模型运气好抽到怪块"
-   的成分, 现在没有了, 所以**预期分数整体略微偏低**。这里验证这个预期对不对。
+1. **分数往哪边动了**, 以及**变低/变高/持平各多少**(持平必须单独数, 别混进"变高")。
+   ★ 判读这件事**必须先看模型个数**, 脚本会从 `scores_json` 里数出来一并打印:
+   - **1 个模型**(实测就是): `final_ai_score` 的多模型取 max 是**空操作**,
+     定种子只是把同一个分布里的抽样点固定下来, **本来就不该有系统性平移**。
+   - **多个模型**: 定种子让它们看到同一批小块, max 少了"哪个模型运气好"的成分,
+     分数可能整体略偏低。
+   (曾经这里写死一句"预期整体略微偏低"并据此判定"和预期相反, 要查" ——
+    而那个前提只有模型数 >= 2 才成立, 实际是 1 个。**前提没验就下结论, 这条线上犯过不止一次。**)
 2. **判定翻了多少张, 往哪个方向翻。**
 3. **两档阈值上的比例(每万)还站不站得住** —— 总量口径是比例, 不是绝对张数。
 
@@ -27,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import statistics as st
 import sys
 from collections import Counter
@@ -36,7 +42,7 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
 
-def _read(p: Path, col: str) -> dict[str, float]:
+def _read(p: Path, col: str, n_models: Counter | None = None) -> dict[str, float]:
     """读一份 summary.csv。**打分失败的行要剔掉** —— 那种行 final_ai_score 是 0.0 但
     scores_json 是 {}, 混进来会被当成'0 分真图', 把对比结果带偏。"""
     out: dict[str, float] = {}
@@ -54,6 +60,12 @@ def _read(p: Path, col: str) -> dict[str, float]:
                 out[nm] = float(v)
             except ValueError:
                 continue
+            # 顺手数一下这张图是几个模型打的 —— 判读分数有没有平移**必须**知道这个
+            if n_models is not None and "scores_json" in r:
+                try:
+                    n_models[len(json.loads(r["scores_json"] or "{}"))] += 1
+                except (ValueError, TypeError):
+                    pass
     if skipped:
         print(f"  ({p.name}: 跳过 {skipped} 行打分失败的)")
     return out
@@ -79,7 +91,9 @@ def main() -> None:
     col = args.col or la.get("score_col", "final_ai_score")
     thr_s, thr_r = la["strict"], la["review"]
 
-    old, new = _read(args.old, col), _read(args.new, col)
+    n_models: Counter = Counter()
+    old = _read(args.old, col)
+    new = _read(args.new, col, n_models)
     drop: set[str] = set()
     if args.exclude and args.exclude.exists():
         drop = {ln.strip().lstrip("\ufeff")
@@ -98,13 +112,30 @@ def main() -> None:
 
     d = [new[n] - old[n] for n in both]
     down = sum(1 for x in d if x < 0)
+    up = sum(1 for x in d if x > 0)
+    same = len(d) - down - up          # ★ 持平必须单独数: 早先把它算进了"变高的", 那是错的
     print(f"\n分数变化(新 - 老):")
     print(f"  中位数 {st.median(d):+.6f} | 平均 {st.fmean(d):+.6f}")
-    print(f"  变低的 {down:,} 张 ({down / len(d) * 100:.1f}%) | 变高的 {len(d) - down:,} 张")
+    print(f"  变低 {down:,} ({down / len(d) * 100:.1f}%) | 变高 {up:,} ({up / len(d) * 100:.1f}%) | "
+          f"**持平 {same:,}** ({same / len(d) * 100:.1f}%)")
     ad = sorted(abs(x) for x in d)
     print(f"  变动幅度: 中位 {ad[len(ad) // 2]:.6f} | p95 {ad[int(len(ad) * .95)]:.6f} | 最大 {ad[-1]:.6f}")
-    print(f"  -> 预期是'整体略微偏低'(多模型不再各抽各的运气块)。"
-          f"{'**符合预期**' if st.median(d) < 0 else '**和预期相反, 要查**'}")
+
+    # ★ 不要在这里给"预期对不对"下结论。
+    #   曾经这里写死一句"预期整体略微偏低", 依据是"多模型取 max 不再各抽各的运气块" ——
+    #   但那个前提**只有模型数 >= 2 才成立**, 而实际是 1 个模型(scores_json 里就写着),
+    #   max 是空操作, 本来就不该期待任何平移。**前提没验就先下结论, 是这条线上反复犯的错。**
+    #   所以这里只报模型个数和事实, 判读留给人。
+    if n_models:
+        k = sorted(n_models)
+        print(f"\n  参与打分的模型个数(取自 scores_json): {dict(sorted(n_models.items()))}")
+        if k == [1]:
+            print(f"  -> **只有 1 个模型**, `final_ai_score` 的多模型取 max 是空操作 ——")
+            print(f"     定种子只是把同一个分布里的抽样点**固定下来**, 本来就不该有系统性平移。")
+            print(f"     上面接近对称的变低/变高, 正是这种情况该有的样子。")
+        else:
+            print(f"  -> 有多个模型, 定种子会让它们看到**同一批小块**, "
+                  f"取 max 少了'哪个模型运气好'的成分, 分数可能整体略偏低。")
 
     def tier(v: float) -> str:
         return "自动拒" if v >= thr_s else "人工复核" if v >= thr_r else "放行"
