@@ -298,6 +298,10 @@ def main() -> None:
     ap.add_argument("--device", default=None,
                     help="不给就用配置里的 device(默认 **cpu**, 因为线上是 CPU 服务器)。"
                          "只有开发/调试才该显式给 cuda。")
+    ap.add_argument("--no-line-c", action="store_true",
+                    help="不跑线路C。**只在纯核对阈值的时候用** —— 线路C 要逐张读文件头, "
+                         "10 万张就是几十 GB 磁盘读; 而验收用的那个池子里那 38 张铁证本来就在排除名单里, "
+                         "跑不跑都是 26/180。**线上不要加这个**, 那等于白扔一条免费的覆盖。")
     ap.add_argument("--exclude", type=Path, default=None,
                     help="**验收专用**: 跳过名单里的文件名。标定时把已查实的假图和翻拍剔出了真图池, "
                          "要复现 2.7/万 那些数就得用同一个池子。**线上不要传这个** —— "
@@ -367,7 +371,9 @@ def main() -> None:
     c_soft: Counter = Counter()
     c_readable = 0
     lc = cfg.get("line_c", {})
-    if lc.get("enabled", True):
+    if args.no_line_c:
+        print("\n(--no-line-c: 跳过线路C —— 只有纯核对阈值时才该这样)")
+    elif lc.get("enabled", True):
         _EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
         path_of: dict[str, Path] = {}
         if args.input and Path(args.input).is_dir():
@@ -387,7 +393,8 @@ def main() -> None:
             aigc_metadata = None  # type: ignore[assignment]
         if aigc_metadata:
             t = time.time()
-            for nm in names:
+            print(f"\n线路C: 逐张读文件头检查 AIGC 标记({len(names):,} 张)...", flush=True)
+            for i, nm in enumerate(names, 1):
                 p = path_of.get(nm)
                 if not p or not p.exists():
                     continue
@@ -397,6 +404,8 @@ def main() -> None:
                     c_hard[nm] = hard
                 for s in soft:
                     c_soft[s] += 1
+                if i % 20000 == 0:               # 10 万张全程无输出会被当成卡死
+                    print(f"  已查 {i:,}/{len(names):,}  (用时 {time.time() - t:.0f}s)", flush=True)
             print(f"\n线路C: 读到 {c_readable:,}/{len(names):,} 张的原文件, "
                   f"铁证 {len(c_hard)} 张, 软标记 {sum(c_soft.values())} 处, 用时 {time.time() - t:.0f}s")
             if c_readable == 0:

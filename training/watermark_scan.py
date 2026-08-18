@@ -321,7 +321,11 @@ _META_CAP = 400000          # 元数据都在文件前头, 读这么多就够
 def aigc_metadata(path: Path):
     """返回 (铁证标记集合, 软标记集合, 附加细节)。不解码像素, 很快。"""
     try:
-        d = path.read_bytes()[:_META_CAP]
+        # **只读文件头那一段**。原来写的是 read_bytes()[:_META_CAP] —— 那会把整张图读完再切,
+        # 单张看不出来, 但扫 10 万张就是几十 GB 的无谓磁盘读(实测 98,013 张卡了十几分钟)。
+        # 元数据都在文件头, 读到 _META_CAP 就够, 检查的字节完全一样, 结果不变。
+        with open(path, "rb") as fh:
+            d = fh.read(_META_CAP)
     except Exception:
         return set(), set(), ""
     hard = {k for k, r in _AIGC_HARD.items() if r.search(d)}
