@@ -86,6 +86,22 @@ DEFAULT_CONFIG = {
                   "--agg", "top3", "--roi-top", "0.6"],
         "_说明": "局部改金额。**只在金额定位成功时出信号**, 定不到 = 无意见, 不是判真。",
     },
+    "line_c": {
+        "enabled": True,
+        "on_hard": "自动拒",
+        "_说明": "AIGC 元数据(不用模型, 每张约 1 毫秒)。**铁证**标记 = TC260 国标 / doubao / jimeng / "
+                 "C2PA 的 trainedAlgorithmicMedia —— 都是生成器自己写进文件的, 裁掉水印也去不掉。"
+                 "10 万池里命中 38 张, 逐张开图看过**全是假图**; 这 38 张本来就在排除名单里, "
+                 "所以接上它**不改变 2.7/万**。它的价值是**覆盖我们没训过的生成器**, 包括国外的。"
+                 "把 on_hard 改成 人工复核 可以更保守。"
+                 "**注意 .jpeg 免自动拒对线路C 不适用**: 那条豁免是防"
+                 "「改文件名绕开阈值」, 而元数据是生成器写进文件里的, 改名去不掉, "
+                 "没有可绕的余地 —— 豁免它只会白丢覆盖。",
+        "_软标记不参与判定": "retouch/醒图、meitu/美图、只有 C2PA 容器没有生成声明 —— "
+                             "这些只说明**过了某个 App 或带了溯源信息**, 用户合法裁个图也会这样。"
+                             "**只统计不判定**(DEPLOY_SPEC 原话: 单独报, 不进排除名单)。"
+                             "命中率我们从没量过, 贸然送人工可能把复核队列撑爆, 所以先只看数。",
+    },
     "never_auto_reject_ext": [".jpeg"],
     # ★ 线上是 **CPU 服务器**(这条从入职第一天就定了, 见 session §1)。GPU 只用于开发和训练。
     #   所以默认 cpu, 别在配置里改成 cuda 然后拿 GPU 的速度去估线上容量。
@@ -141,8 +157,14 @@ def _read_scores(p: Path, col: str, need_located: bool) -> dict[str, tuple[float
 
 
 def decide(a: tuple[float, bool] | None, b: tuple[float, bool] | None,
-           cfg: dict, ext: str) -> tuple[str, str]:
-    """返回 (判定, 原因)。规则与 combined_threshold 一致。"""
+           cfg: dict, ext: str, c_hard: set[str] | None = None) -> tuple[str, str]:
+    """返回 (判定, 原因)。两条模型线的规则与 combined_threshold 一致; 线路C 是额外的一条"或"。"""
+    # 线路C: 生成器自己写在文件里的铁证。**不看模型分数**, 所以模型漏了它也能抓到。
+    # 放在最前面: 它是最硬的证据, 而且 1 毫秒就能判完。
+    if c_hard:
+        lc = cfg.get("line_c", {})
+        if lc.get("enabled", True):
+            return lc.get("on_hard", "自动拒"), "线路C " + "+".join(sorted(c_hard))
     if a is None and b is None:
         return "人工复核", "两条线都没有分数"          # 无法判定 != 没问题
     la, lb = cfg["line_a"], cfg["line_b"]
@@ -338,12 +360,61 @@ def main() -> None:
     if only_a or only_b:
         print(f"  (只有A 的 {only_a} 张, 只有B 的 {only_b} 张 —— 正常情况下B 会少一些, 因为定位不到就不出信号)")
 
+    # ---- 线路C: 元数据里的 AIGC 铁证(不用模型, 每张约 1 毫秒) ----
+    # 要读原文件, 所以先把文件名映射到真实路径。**线路A 的 CSV 里那一列指向临时硬链接目录, 早删了**,
+    # 所以优先用 --input, 其次用线路B 的 CSV(它指向原始下载目录)。
+    c_hard: dict[str, set[str]] = {}
+    c_soft: Counter = Counter()
+    c_readable = 0
+    lc = cfg.get("line_c", {})
+    if lc.get("enabled", True):
+        _EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+        path_of: dict[str, Path] = {}
+        if args.input and Path(args.input).is_dir():
+            for p in Path(args.input).rglob("*"):
+                if p.suffix.lower() in _EXTS:
+                    path_of.setdefault(p.name, p)
+        with open(b_csv, encoding="utf-8-sig") as fh:      # 线路B 的路径是活的
+            for r in csv.DictReader(fh):
+                nm = (r.get("image_name") or "").strip()
+                p = (r.get("image") or "").strip()
+                if nm and p and nm not in path_of:
+                    path_of[nm] = Path(p)
+        try:
+            from watermark_scan import aigc_metadata
+        except Exception as exc:  # noqa: BLE001
+            print(f"  !!!! 线路C 载入失败({exc}), 这一轮不出信号")
+            aigc_metadata = None  # type: ignore[assignment]
+        if aigc_metadata:
+            t = time.time()
+            for nm in names:
+                p = path_of.get(nm)
+                if not p or not p.exists():
+                    continue
+                c_readable += 1
+                hard, soft, _ = aigc_metadata(p)
+                if hard:
+                    c_hard[nm] = hard
+                for s in soft:
+                    c_soft[s] += 1
+            print(f"\n线路C: 读到 {c_readable:,}/{len(names):,} 张的原文件, "
+                  f"铁证 {len(c_hard)} 张, 软标记 {sum(c_soft.values())} 处, 用时 {time.time() - t:.0f}s")
+            if c_readable == 0:
+                # 读不到文件时命中数必然是 0, 那和"干净"长得一模一样 —— 必须说破
+                print("  !!!! **一个原文件都没读到, 所以线路C 这一轮等于没跑**(不是'没有 AIGC 图')。"
+                      "多半是 CSV 里的路径已失效, 给 --input 指到真实图片目录即可。")
+            elif c_readable < len(names) * 0.9:
+                print(f"  !!!! 有 {len(names) - c_readable:,} 张读不到原文件, 线路C 对这些图没出信号")
+            if c_soft:
+                print(f"  (软标记只统计不判定: {dict(c_soft.most_common())} —— "
+                      f"过修图 App 不等于生成, 用户合法裁图也会这样)")
+
     rows, dec_n, ext_n = [], Counter(), Counter()
     n_loc = 0
     for nm in names:
         a, b = A.get(nm), B.get(nm)
         ext = Path(nm).suffix.lower()
-        d, why = decide(a, b, cfg, ext)
+        d, why = decide(a, b, cfg, ext, c_hard.get(nm))
         dec_n[d] += 1
         ext_n[ext] += 1
         n_loc += int(bool(b and b[1]))
