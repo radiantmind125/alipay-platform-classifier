@@ -299,7 +299,18 @@ def _user_comment(blob: bytes):
 # **生成**的铁证。TC260 是国标: 中国的 AI 服务按规定都要打这个标, 所以它**不挑厂商**,
 # 千问/即梦/可灵 只要合规都会带 -> 比认某一家的串泛化得多。
 _AIGC_HARD = {
-    "TC260国标": re.compile(rb"tc260\.org\.cn/ns/AIGC", re.I),
+    # ★ 国标标签**有三种载体**, 早先只认了 XMP 那一种, 另外两种全漏了(见 session §293):
+    #   1. XMP 命名空间   xmlns:TC260="http://www.tc260.org.cn/ns/AIGC/1.0/"
+    #   2. PNG tEXt 块    tEXtAIGC{"ContentPropagator":"0011914401...","Label":"1","ProduceID":...}
+    #   3. JPEG EXIF 注释 {"AIGC": {"Label":"1","ContentProducer":"0011914403...",
+    #                       "ReservedCode1":"{\"Type\":\" TC260PG\",\"AlgID\":\"sm3\"...}"}}
+    #   `Label:"1"` = 生成内容, 是**服务方自己按规定打的**, 不是我们推断的。
+    #   ContentProducer/ContentPropagator 里那串是统一社会信用代码(生产者/传播者)。
+    #   这几个字段名只在国标的 AIGC 标签块里出现, 正常手机截图的 EXIF/XMP 不会有 -> 当铁证安全。
+    "TC260国标": re.compile(rb"tc260\.org\.cn/ns/AIGC"
+                            rb"|tEXtAIGC"
+                            rb"|TC260PG"
+                            rb"|ContentPropagator|ContentProducer", re.I),
     "doubao":    re.compile(rb"doubao", re.I),
     "jimeng":    re.compile(rb"jimeng", re.I),
     # IPTC 的"数字来源类型"标准词, C2PA 内容凭证里用它表示**这张图是模型生成的**。

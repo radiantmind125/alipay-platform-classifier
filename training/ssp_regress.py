@@ -144,6 +144,49 @@ def run_csv(cfg: dict) -> int:
     return bad
 
 
+def run_meta() -> int:
+    """第 1.6 层: 线路C 的元数据正则(不读图, 直接喂字节)。
+
+    ★ 也是**吃了亏才补的**: 国标 AIGC 标签有三种载体, 早先只认了 XMP 命名空间那一种,
+      PNG 的 `tEXtAIGC` 块和 JPEG EXIF 注释里的 `{"AIGC": ...}` **全漏了**。
+      下面前三条就是从真实漏网文件里原样抄来的字节。
+      后两条是**不能误报**的对照 —— 正则放宽最怕的就是把真截图也拖下水。
+    """
+    import ast as _a
+    ws = _a.parse((_HERE / "watermark_scan.py").read_text(encoding="utf-8"))
+    keep = [n for n in ws.body if isinstance(n, _a.Assign)
+            and getattr(n.targets[0], "id", "") in ("_AIGC_HARD", "_AIGC_SOFT")]
+    ns: dict = {"re": __import__("re")}
+    exec(compile(_a.Module(body=keep, type_ignores=[]), "<ws>", "exec"), ns)
+    HARD = ns["_AIGC_HARD"]
+
+    cases = [
+        (True, "PNG tEXt 块(实测漏网原文)",
+         b'\x89PNG\x00\x00IHDR\x00\x00tEXtAIGC\x00{"ContentPropagator":"001191440101MA9Y9T4H7A00000"'
+         b',"Label":"1","ProduceID":"u:100834564696/task:e5118399e50d44ca9b92b3205a6fe4b8"}'),
+        (True, "JPEG EXIF 注释(实测漏网原文)",
+         b'\xff\xd8Exif\x00\x00MM\x00*ASCII\x00{"AIGC": {"Label":"1","ContentProducer":'
+         b'"001191440300708461136T1WFUO","ReservedCode1":"{\\"Type\\":\\" TC260PG\\",\\"AlgID\\":\\"sm3\\"'),
+        (True, "XMP 命名空间(原有写法, 不能改坏)",
+         b'<rdf:RDF xmlns:TC260="http://www.tc260.org.cn/ns/AIGC/1.0/"><TC260:AIGC>1</TC260:AIGC>'),
+        (False, "★真截图的 XMP/EXIF(不能误报)",
+         b'<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description'
+         b' xmlns:exif="http://ns.adobe.com/exif/1.0/" xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/"'
+         b'><exif:UserComment><rdf:Alt><rdf:li>Screenshot</rdf:li></rdf:Alt></exif:UserComment>mntrRGB'),
+        (False, "★相机照片的 EXIF(不能误报)",
+         b'\xff\xd8Exif\x00\x00MM\x00*Make\x00HUAWEI\x00Model\x00P60\x00Software\x00HarmonyOS'),
+    ]
+    bad = 0
+    print(f"[线路C 元数据] {len(cases)} 条")
+    for want, note, data in cases:
+        hit = sorted(k for k, p in HARD.items() if p.search(data))
+        if bool(hit) != want:
+            bad += 1
+            print(f"  红 期望{'命中' if want else '**不**命中'}, 实得 {hit or '无'}   —— {note}")
+    print(f"  {len(cases) - bad}/{len(cases)} 通过" + ("" if not bad else "  ★有红的"))
+    return bad
+
+
 def score_dir(args, out: Path) -> dict[str, dict]:
     """跑一遍真正的入口(不是重写), 拿回每张图的分数和判定。"""
     cmd = [sys.executable, str(_HERE / "ssp_decide.py"), "--input", str(args.input), "--score",
@@ -184,7 +227,7 @@ def main() -> None:
     if args.device is None:                      # 和 ssp_decide 同一套解析规则, 免得两边不一致
         args.device = cfg.get("device", "cpu")
 
-    bad = run_logic(cfg) + run_csv(cfg)
+    bad = run_logic(cfg) + run_csv(cfg) + run_meta()
     if args.logic_only:
         raise SystemExit(1 if bad else 0)
     if not (args.input and args.baseline):
