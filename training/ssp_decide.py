@@ -64,13 +64,20 @@ DEFAULT_CONFIG = {
     "_说明": "SSP 上线第一版配置。四个阈值都在 **97,610 张真图**上标定(排除名单 exclude_v4.txt, "
              "剔了 4,738 张已查实假图/翻拍/非收据/.jpeg), 标定日期 2026-08-15。",
     "line_a": {
-        "model": r"D:\SSP-AI-Generated-Image-Detection-main\snapshot\aigen_v7\Net_epoch_best.pth",
+        # ★ 这里是**目录**不是 .pth —— `predict_all_models.py --model_root` 要的是"模型根目录",
+        #   它自己在目录里按 --model_pattern 找权重(所以脚本叫 all_models: 根目录下有几个就跑几个)。
+        #   给成 .pth 全路径会让它去**文件里面**找文件, 报"未找到模型文件"而路径看着完全正确。
+        #   线路B 的 `predict_tiled --model` 反过来要的是 .pth 全路径, 两边不一样, 别改混。
+        "model_root": r"D:\SSP-AI-Generated-Image-Detection-main\snapshot\aigen_v7",
+        "model_pattern": "Net_epoch_best.pth",
         "score_col": "final_ai_score",
         "strict": 0.8031,
         "review": 0.6497,
-        "_说明": "整图 AI 生成。阈值 = 1/5000 与 1/1000 预算下的第 k+1 高真图分数。",
+        "_说明": "整图 AI 生成。阈值 = 1/5000 与 1/1000 预算下的第 k+1 高真图分数。"
+                 "**根目录下只能有这一个权重**, 多了就会多打几遍分, 列名也会变。",
     },
     "line_b": {
+        # 这里是 **.pth 全路径**(和线路A 的 model_root 不同, 见上)
         "model": r"D:\SSP-AI-Generated-Image-Detection-main\snapshot\localdet9\Net_epoch_best.pth",
         "score_col": "tile_top3",
         "strict": 0.9811,
@@ -155,6 +162,18 @@ def decide(a: tuple[float, bool] | None, b: tuple[float, bool] | None,
     return "放行", reason
 
 
+def line_a_root(cfg: dict) -> str:
+    """线路A 的模型**根目录**。
+
+    容错: 配置里若不小心写成了 `.pth` 全路径, 自动取它所在目录 ——
+    这正是把整个上线卡住的那个坑(`--model_root` 要目录, 给文件会报"未找到模型文件",
+    而报错里回显的路径看着完全正确, 极难看出问题)。
+    """
+    v = cfg["line_a"].get("model_root") or cfg["line_a"].get("model") or ""
+    p = Path(v)
+    return str(p.parent if p.suffix.lower() == ".pth" else p)
+
+
 def preflight(args, cfg: dict) -> None:
     """动手之前先把要用的东西全查一遍, **一次性把缺的都列出来**。
 
@@ -170,15 +189,26 @@ def preflight(args, cfg: dict) -> None:
         bad.append(f"{repo} 里没有 predict_all_models.py(--ssp-repo 指对了吗)")
     if not (_HERE / "predict_tiled.py").exists():
         bad.append(f"同目录下没有 predict_tiled.py: {_HERE}")
-    for name, key in (("线路A", "line_a"), ("线路B", "line_b")):
-        m = Path(cfg[key]["model"])
-        if not m.exists():
-            bad.append(f"{name} 模型不存在: {m}")
-            par = m.parent.parent
+    # 线路A 要的是**目录**, 线路B 要的是 **.pth 文件** —— 两边分别查, 别拿一套规则套两边
+    root = Path(line_a_root(cfg))
+    pat = cfg["line_a"].get("model_pattern", "Net_epoch_best.pth")
+    if not root.is_dir():
+        bad.append(f"线路A 的 model_root 不是目录: {root}")
+    else:
+        hits = sorted(root.glob(pat))
+        if not hits:
+            bad.append(f"线路A 目录里没有 {pat}: {root}")
+        elif len(hits) > 1:
+            bad.append(f"线路A 目录里有 {len(hits)} 个 {pat} —— 会打多遍分, 列名也会变: {root}")
+        if not root.is_dir() or not hits:
+            par = root.parent
             if par.is_dir():                     # 顺手把同级有哪些快照列出来, 省得再去翻
-                subs = sorted(p.name for p in par.iterdir() if p.is_dir())[:12]
+                subs = sorted(p.name for p in par.iterdir() if p.is_dir())[:20]
                 if subs:
                     bad.append(f"    {par} 下现有: {', '.join(subs)}")
+    mb = Path(cfg["line_b"]["model"])
+    if not mb.is_file():
+        bad.append(f"线路B 的 model 不是文件(这一条要 .pth 全路径): {mb}")
     if bad:
         raise SystemExit("跑不了, 先解决这些:\n  " + "\n  ".join(bad)
                          + f"\n\n改 {args.config} 里的 model 字段, 不要改代码。")
@@ -191,8 +221,10 @@ def _run_scoring(args, cfg: dict) -> tuple[Path, Path]:
     la, lb = cfg["line_a"], cfg["line_b"]
 
     t = time.time()
-    print(f"\n[线路A] {la['model']}", flush=True)
-    r = subprocess.run([sys.executable, "predict_all_models.py", "--model_root", la["model"],
+    a_root = line_a_root(cfg)
+    print(f"\n[线路A] model_root={a_root}  pattern={la.get('model_pattern', 'Net_epoch_best.pth')}", flush=True)
+    r = subprocess.run([sys.executable, "predict_all_models.py", "--model_root", a_root,
+                        "--model_pattern", la.get("model_pattern", "Net_epoch_best.pth"),
                         "--input", str(args.input), "--output_dir", str(a_dir),
                         "--device", args.device], cwd=str(args.ssp_repo))
     if r.returncode != 0:
