@@ -7,11 +7,16 @@ r"""回归测试: 把当前行为冻住, 以后任何改动**秒级**验证有�
 `_find_url` 把 URL 截断……**每一个都不会报错**, 只会安静地给出一个像模像样的错数。
 而唯一能在几秒内发现它们的办法, 就是**跟一份冻住的期望值逐项比**。
 
-两层
+三层
 ----
 1. **判定逻辑层**(不用图不用模型, 毫秒级): 给定分数组合, 判定必须是这个。
    `.jpeg` 免自动拒、定位失败不出信号、两条线都没分送人工、线路C 铁证优先 —— 全在这里钉死。
-2. **端到端层**(要图要模型): 固定一批图重打一遍, 分数和判定都必须和基线一致。
+2. **读表层**(直接喂 CSV, 毫秒级): 验从 summary.csv 到分数这一段。
+   ★ 这一层是**吃了亏才补的**: 第 1 层用 `a=None` 断言过"两条线都没分 -> 人工复核",
+   测试一直是绿的, 但线上 `a` **永远不可能是 None** —— 线路A 打分失败时 CSV 里写的是 0.0,
+   打不开的图于是被当成"0 分真图"放行, 那道保险从来没触发过。
+   **用生产产生不了的输入去断言安全性质, 等于没测。**
+3. **端到端层**(要图要模型): 固定一批图重打一遍, 分数和判定都必须和基线一致。
 
 ★ 真图不能进仓库(仓库是公开的), 所以基线里**只存文件名和分数**, 不存图。
 
@@ -93,6 +98,52 @@ def run_logic(cfg: dict) -> int:
     return bad
 
 
+def run_csv(cfg: dict) -> int:
+    """第 1.5 层: 直接喂 CSV, 验**读表**这一段。
+
+    ★ 这一层是补上来的, 因为第 1 层漏掉了一个 critical 级的洞:
+      第 1 层用 `a=None` 断言"两条线都没分 -> 人工复核", **测试是绿的**,
+      但线上 `a` 永远不可能是 None —— 线路A 打分失败时 summary.csv 里写的是 **0.0**,
+      于是打不开的图被当成"0 分真图"**放行**, 那道保险从来没触发过。
+      **用生产根本产生不了的输入去断言一条安全性质, 等于没测。**
+    """
+    import tempfile
+    from ssp_decide import _read_scores, decide
+    bad = 0
+    cases = [
+        # (CSV 内容, 期望这张图在不在结果里, 说明)
+        ("image_name,final_ai_score,scores_json\nx.png,0.0,{}\n", False,
+         "★ 打分失败(scores_json 为 {}) -> 必须当作没有分数"),
+        ('image_name,final_ai_score,scores_json\nx.png,0.0,"{""Net_epoch_best"": 0.0}"\n', True,
+         "真的是 0 分(scores_json 有内容) -> 正常保留"),
+        ("image_name,final_ai_score\nx.png,0.0\n", True,
+         "没有 scores_json 这一列(线路B 就是这样) -> 防护不能误伤"),
+        ("image_name,final_ai_score,scores_json\nx.png,0.85,{}\n", False,
+         "★ 高分但打分失败 -> 照样不算数, 不能拿它去自动拒"),
+    ]
+    print(f"[读表] {len(cases)} 条")
+    with tempfile.TemporaryDirectory() as td:
+        for i, (body, want_in, note) in enumerate(cases):
+            p = Path(td) / f"c{i}.csv"
+            p.write_text(body, encoding="utf-8")
+            got = _read_scores(p, "final_ai_score", False)
+            if ("x.png" in got) != want_in:
+                bad += 1
+                print(f"  红 期望{'保留' if want_in else '剔除'}, 实得{'保留' if 'x.png' in got else '剔除'}"
+                      f"   —— {note}")
+    # 端到端串一遍: 打分失败的图**必须**落到人工复核, 绝不能放行
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "a.csv"
+        p.write_text("image_name,final_ai_score,scores_json\nx.png,0.0,{}\n", encoding="utf-8")
+        a = _read_scores(p, "final_ai_score", False).get("x.png")
+        d, why = decide(a, None, cfg, ".png", None)
+        if d != "人工复核":
+            bad += 1
+            print(f"  红 打分失败的图判成了 {d}({why}), 应该是 人工复核")
+    print(f"  {len(cases) + 1 - bad}/{len(cases) + 1} 通过" + ("" if not bad else "  ★有红的"))
+    return bad
+
+
 def score_dir(args, out: Path) -> dict[str, dict]:
     """跑一遍真正的入口(不是重写), 拿回每张图的分数和判定。"""
     cmd = [sys.executable, str(_HERE / "ssp_decide.py"), "--input", str(args.input), "--score",
@@ -133,7 +184,7 @@ def main() -> None:
     if args.device is None:                      # 和 ssp_decide 同一套解析规则, 免得两边不一致
         args.device = cfg.get("device", "cpu")
 
-    bad = run_logic(cfg)
+    bad = run_logic(cfg) + run_csv(cfg)
     if args.logic_only:
         raise SystemExit(1 if bad else 0)
     if not (args.input and args.baseline):

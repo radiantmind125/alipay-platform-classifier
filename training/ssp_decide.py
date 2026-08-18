@@ -151,6 +151,15 @@ def _read_scores(p: Path, col: str, need_located: bool) -> dict[str, tuple[float
             v = (r.get(col) or "").strip()
             if not nm or not v:
                 continue
+            # ★ 线路A 打分失败时**不是空格子**: predict_all_models 先给每张图预置 final_ai_score=0.0,
+            #   异常分支只往 detail.csv 写一行, summary.csv 里那张图照样是 0.0。
+            #   不挡掉的话, 一张打不开的图会以"0 分"混进来, 被当成**证据确凿的真图放行** ——
+            #   而"两条线都没分 -> 人工复核"那道保险**永远不会触发**。
+            #   失败的判别特征: scores_json 是 {}(正常打分即使真是 0 分也会有 {"模型名": 0.0})。
+            #   eval_summary.py 和 autoreject_threshold.py 早就这么挡了, 标定没受影响,
+            #   漏的只有这条**真正上线的路径**。
+            if "scores_json" in r and (r.get("scores_json") or "").strip() in ("", "{}"):
+                continue
             try:
                 s = float(v)
             except ValueError:
@@ -351,9 +360,11 @@ def main() -> None:
     # ★ 一张都不能丢: 两条线**都**没处理成功的图(比如文件损坏), 不会出现在任何一个 CSV 里,
     #   于是就从结果里**凭空消失**了。批量分析时无所谓, 线上"提交了一张但没有任何判定"
     #   比"被判去人工"糟得多。所以现打分时按输入目录点名, 缺的补进来走"两条线都没分"->人工复核。
-    if args.score and args.input:
+    # 给了 --input 就以目录为准点名, 不限于 --score: 用现成 CSV 时同样可能有图两条线都没分。
+    if args.input and Path(args.input).is_dir():
         _EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-        seen = {p.name for p in Path(args.input).rglob("*") if p.suffix.lower() in _EXTS}
+        seen = {p.name for p in Path(args.input).rglob("*")
+                if p.suffix.lower() in _EXTS and p.is_file()}
         missing = seen - names_set
         if missing:
             print(f"  !!!! 输入里有 {len(missing)} 张**两条线都没打出分**(多半是文件损坏), "
@@ -388,9 +399,18 @@ def main() -> None:
         _EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
         path_of: dict[str, Path] = {}
         if args.input and Path(args.input).is_dir():
-            for p in Path(args.input).rglob("*"):
-                if p.suffix.lower() in _EXTS:
-                    path_of.setdefault(p.name, p)
+            # ★ 必须 sorted: rglob 的顺序由文件系统决定, 不排序的话**同名文件挑中哪一个都不一定**,
+            #   而线路C 一旦命中铁证就直接自动拒(不看分数) —— 判定会随目录枚举顺序变。
+            dup_c = 0
+            for p in sorted(Path(args.input).rglob("*")):
+                if p.suffix.lower() in _EXTS and p.is_file():
+                    if p.name in path_of:
+                        dup_c += 1
+                        continue
+                    path_of[p.name] = p
+            if dup_c:
+                print(f"  !!!! 输入目录里有 {dup_c} 个重复文件名 —— 线路C 只能读其中一个, "
+                      f"**可能不是当初打分的那一张**。两条线的分数本来也会对错行, 先查清楚。")
         with open(b_csv, encoding="utf-8-sig") as fh:      # 线路B 的路径是活的
             for r in csv.DictReader(fh):
                 nm = (r.get("image_name") or "").strip()
