@@ -87,6 +87,12 @@ DEFAULT_CONFIG = {
         "_说明": "局部改金额。**只在金额定位成功时出信号**, 定不到 = 无意见, 不是判真。",
     },
     "never_auto_reject_ext": [".jpeg"],
+    # ★ 线上是 **CPU 服务器**(这条从入职第一天就定了, 见 session §1)。GPU 只用于开发和训练。
+    #   所以默认 cpu, 别在配置里改成 cuda 然后拿 GPU 的速度去估线上容量。
+    "device": "cpu",
+    "_算力提醒": "每张图约 20 次 ResNet-50 前向(线路A 16 个 patch + 线路B 4 个块, "
+                 "SSPNet 会把每个 32x32 块放大到 256x256 再过骨干网)。**这在 CPU 上不便宜。** "
+                 "注意: 线路A 的 --repeat 不能调小 —— 它会改变 final_ai_score, 0.8031 就不再等于 1/5000。",
     "_预期指标": {
         "自动拒_每万": 2.7, "人工复核_每万": 18.4,
         "改金额覆盖_自动拒": 76.9, "改金额覆盖_复核": 95.8,
@@ -240,7 +246,17 @@ def _run_scoring(args, cfg: dict) -> tuple[Path, Path]:
     if r.returncode != 0:
         raise SystemExit(f"线路B 打分失败(退出码 {r.returncode})")
     tb = time.time() - t
-    print(f"\n打分耗时: 线路A {ta:.0f}s | 线路B {tb:.0f}s | 合计 {ta + tb:.0f}s")
+    n_in = sum(1 for p in Path(args.input).rglob("*")
+               if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".webp"})
+    tot = ta + tb
+    print(f"\n打分耗时({args.device}): 线路A {ta:.0f}s | 线路B {tb:.0f}s | 合计 {tot:.0f}s")
+    if n_in:
+        per = tot / n_in
+        print(f"  每张 {per:.2f}s  ({n_in / max(tot, 1e-9):.1f} 张/秒)  "
+              f"线路A 占 {ta / max(tot, 1e-9) * 100:.0f}%")
+        print(f"  单进程一天(24h)约 {int(86400 / per):,} 张 —— "
+              f"**拿这个数去对进件量**, 不够就上多进程或换 ONNX Runtime, "
+              f"**不要动 --repeat 或切块数(那会改分数, 阈值就作废)**。")
     return a_dir / "summary.csv", b_dir / "summary.csv"
 
 
@@ -257,7 +273,9 @@ def main() -> None:
     ap.add_argument("--input", type=Path, default=None, help="图片目录(配 --score 现打分)")
     ap.add_argument("--score", action="store_true", help="从 --input 现打分, 而不是用现成 CSV")
     ap.add_argument("--ssp-repo", type=Path, default=Path(r"D:\SSP"))
-    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--device", default=None,
+                    help="不给就用配置里的 device(默认 **cpu**, 因为线上是 CPU 服务器)。"
+                         "只有开发/调试才该显式给 cuda。")
     ap.add_argument("--exclude", type=Path, default=None,
                     help="**验收专用**: 跳过名单里的文件名。标定时把已查实的假图和翻拍剔出了真图池, "
                          "要复现 2.7/万 那些数就得用同一个池子。**线上不要传这个** —— "
@@ -266,6 +284,11 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    if args.device is None:
+        args.device = cfg.get("device", "cpu")
+    if args.device != "cpu" and args.score:
+        print(f"  !!!! 正在用 {args.device} 打分 —— **线上是 CPU 服务器**, "
+              f"这个速度不能拿去估线上容量。")
     if args.print_config:
         print(json.dumps(cfg, ensure_ascii=False, indent=2)); return
     if not args.out:
