@@ -71,6 +71,14 @@ DEFAULT_CONFIG = {
         "model_root": r"D:\SSP-AI-Generated-Image-Detection-main\snapshot\aigen_v7",
         "model_pattern": "Net_epoch_best.pth",
         "score_col": "final_ai_score",
+        # ★ 官方 SSP 取块是**随机**的, 整条预测路径从没设过种子 -> 同一张图两次跑分数不一样。
+        #   实测(352 张阈值附近的图 x5 次): 标准差中位 0.0305, 单张最大极差 0.3019,
+        #   **判定不一致 46.9%**, 有一张图跑出了全部三种判定。
+        #   这不只是不公平, 它**可以被利用**: 同一张图重复提交 = 重新抽样,
+        #   均分 0.84 的假图试 6 次就有五成机会躲过自动拒。
+        #   seeded=true 时走 predict_seeded.py, 按**文件内容**定种子 -> 同一个文件永远同一个分数,
+        #   改文件名也没用。**只有做对比实验时才该关掉。**
+        "seeded": True,
         "strict": 0.8031,
         "review": 0.6497,
         "_说明": "整图 AI 生成。阈值 = 1/5000 与 1/1000 预算下的第 k+1 高真图分数。"
@@ -271,7 +279,15 @@ def _run_scoring(args, cfg: dict) -> tuple[Path, Path]:
     t = time.time()
     a_root = line_a_root(cfg)
     print(f"\n[线路A] model_root={a_root}  pattern={la.get('model_pattern', 'Net_epoch_best.pth')}", flush=True)
-    r = subprocess.run([sys.executable, "predict_all_models.py", "--model_root", a_root,
+    # 默认走确定性外壳: 每张图按文件内容定种子。不这样的话同一张图重复提交会拿到不同分数,
+    # 骗子多试几次就能碰运气过关(实测阈值附近判定不一致率 46.9%)。
+    seeded = la.get("seeded", True) and not args.unseeded
+    if seeded:
+        head = [sys.executable, str(_HERE / "predict_seeded.py"), "--ssp-repo", str(args.ssp_repo)]
+    else:
+        head = [sys.executable, "predict_all_models.py"]
+        print("  !!!! --unseeded: 用**随机取块**打分 —— 只该在做对比实验时这样, 同图两次分数会不同")
+    r = subprocess.run(head + ["--model_root", a_root,
                         "--model_pattern", la.get("model_pattern", "Net_epoch_best.pth"),
                         "--input", str(args.input), "--output_dir", str(a_dir),
                         "--device", args.device], cwd=str(args.ssp_repo))
@@ -322,6 +338,9 @@ def main() -> None:
                     help="不跑线路C。**只在纯核对阈值的时候用** —— 线路C 要逐张读文件头, "
                          "10 万张就是几十 GB 磁盘读; 而验收用的那个池子里那 38 张铁证本来就在排除名单里, "
                          "跑不跑都是 26/180。**线上不要加这个**, 那等于白扔一条免费的覆盖。")
+    ap.add_argument("--unseeded", action="store_true",
+                    help="线路A 回到**随机取块**(同图两次分数不同)。**只该在做对比实验时用** —— "
+                         "线上这样等于留了个洞: 同一张假图多交几次就能换个结果。")
     ap.add_argument("--exclude", type=Path, default=None,
                     help="**验收专用**: 跳过名单里的文件名。标定时把已查实的假图和翻拍剔出了真图池, "
                          "要复现 2.7/万 那些数就得用同一个池子。**线上不要传这个** —— "
