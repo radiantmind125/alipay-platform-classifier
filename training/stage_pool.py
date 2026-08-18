@@ -52,15 +52,32 @@ def main() -> None:
     ap.add_argument("--allow-copy", action="store_true",
                     help="硬链接不可用时改为**复制**。10 万张约 40GB, 所以默认不允许, 要用得显式打开")
     ap.add_argument("--limit", type=int, default=0, help="只搭前 N 张(调试用)")
+    ap.add_argument("--min-score", type=float, default=None,
+                    help="只搭这个分以上的图。**做边界检查时很有用** —— 阈值附近那一小撮才决定判定, "
+                         "低分图搭了也白搭")
+    ap.add_argument("--score-col", default="final_ai_score")
     args = ap.parse_args()
 
     # ---- 1. CSV 里要哪些名字 ----
     want: list[str] = []
+    skipped_lo = 0
     with open(args.from_csv, encoding="utf-8-sig") as fh:
         for r in csv.DictReader(fh):
             nm = (r.get("image_name") or "").strip() or Path(r.get("image") or "").name
-            if nm:
-                want.append(nm)
+            if not nm:
+                continue
+            if args.min_score is not None:
+                v = (r.get(args.score_col) or "").strip()
+                try:
+                    if float(v) < args.min_score:
+                        skipped_lo += 1
+                        continue
+                except ValueError:
+                    skipped_lo += 1
+                    continue
+            want.append(nm)
+    if skipped_lo:
+        print(f"(--min-score {args.min_score}: 跳过 {skipped_lo:,} 张低分图)")
     if not want:
         raise SystemExit(f"{args.from_csv} 里没读到 image_name")
     uniq = sorted(set(want))
