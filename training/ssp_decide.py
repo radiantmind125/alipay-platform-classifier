@@ -195,6 +195,10 @@ def main() -> None:
     ap.add_argument("--score", action="store_true", help="从 --input 现打分, 而不是用现成 CSV")
     ap.add_argument("--ssp-repo", type=Path, default=Path(r"D:\SSP"))
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--exclude", type=Path, default=None,
+                    help="**验收专用**: 跳过名单里的文件名。标定时把已查实的假图和翻拍剔出了真图池, "
+                         "要复现 2.7/万 那些数就得用同一个池子。**线上不要传这个** —— "
+                         "线上没有'已知是假图'的名单, 每张都得判。")
     ap.add_argument("--out", type=Path, required=False, help="输出目录")
     args = ap.parse_args()
 
@@ -217,6 +221,12 @@ def main() -> None:
     A = _read_scores(Path(a_csv), cfg["line_a"]["score_col"], False)
     B = _read_scores(Path(b_csv), cfg["line_b"]["score_col"], True)
     names = sorted(set(A) | set(B))
+    if args.exclude and args.exclude.exists():
+        drop = {ln.strip().lstrip("﻿")
+                for ln in args.exclude.read_text(encoding="utf-8-sig").splitlines() if ln.strip()}
+        before = len(names)
+        names = [n for n in names if n not in drop]
+        print(f"(验收模式: 按名单跳过 {before - len(names)} 张; **线上不该用这个开关**)")
     if not names:
         raise SystemExit("两个 CSV 都没读到分数")
     print(f"\n线路A {len(A):,} 张 | 线路B {len(B):,} 张 | 合计 {len(names):,} 张")
