@@ -286,7 +286,22 @@ def main() -> None:
 
     A = _read_scores(Path(a_csv), cfg["line_a"]["score_col"], False)
     B = _read_scores(Path(b_csv), cfg["line_b"]["score_col"], True)
-    names = sorted(set(A) | set(B))
+    names_set = set(A) | set(B)
+
+    # ★ 一张都不能丢: 两条线**都**没处理成功的图(比如文件损坏), 不会出现在任何一个 CSV 里,
+    #   于是就从结果里**凭空消失**了。批量分析时无所谓, 线上"提交了一张但没有任何判定"
+    #   比"被判去人工"糟得多。所以现打分时按输入目录点名, 缺的补进来走"两条线都没分"->人工复核。
+    if args.score and args.input:
+        _EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+        seen = {p.name for p in Path(args.input).rglob("*") if p.suffix.lower() in _EXTS}
+        missing = seen - names_set
+        if missing:
+            print(f"  !!!! 输入里有 {len(missing)} 张**两条线都没打出分**(多半是文件损坏), "
+                  f"已按'无法判定'送人工, 不会丢:")
+            for nm in sorted(missing)[:5]:
+                print(f"         {nm}")
+        names_set |= seen
+    names = sorted(names_set)
     if args.exclude and args.exclude.exists():
         drop = {ln.strip().lstrip("﻿")
                 for ln in args.exclude.read_text(encoding="utf-8-sig").splitlines() if ln.strip()}
