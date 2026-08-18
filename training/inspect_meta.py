@@ -114,8 +114,9 @@ def main() -> None:
     vals: dict[str, Counter] = {k: Counter() for k, _ in _KEYVAL}
     tokens: Counter = Counter()
     n_interesting = n_genhint = n_hard = n_gap = 0
-    gap_known: list[str] = []
-    gap_new: list[str] = []
+    gap_known: list = []
+    gap_new: list = []
+    new_fake: list[str] = []
     t = time.time()
     for i, p in enumerate(files, 1):
         try:
@@ -159,6 +160,8 @@ def main() -> None:
         row["已知假图"] = int(p.name in known_fake)
         if hh:
             n_hard += 1
+            if p.name not in known_fake:
+                new_fake.append(p.name)      # 铁证命中但**不在名单里** = 新确认的假图
         if g and not hh:
             n_gap += 1
             # 把命中处附近的原文留下来 —— **不看清楚漏的是什么写法, 就补不了正则**
@@ -220,6 +223,18 @@ def main() -> None:
     if not known_fake:
         print("  (没给 --exclude, 上面两行分不开 —— **加上名单再跑一次**, "
               "否则会把已知假图当成新污染)")
+
+    # ★ 铁证命中但不在名单里的 = **新确认的假图**, 单独出一份, 好直接并进排除名单去重标
+    if new_fake:
+        np_ = args.out / "new_fakes.txt"
+        np_.write_text("\n".join(sorted(new_fake)), encoding="utf-8")
+        print(f"\n★ **铁证命中且不在排除名单里的: {len(new_fake):,} 张** -> {np_}")
+        print(f"  这些是**标定时被当成真图**的假图。阈值取的是真图里第 k+1 高分,")
+        print(f"  所以它们一直在**顶着阈值** —— 并进名单重标之后, 同样的误杀预算下阈值会降, 召回会涨。")
+        for nm in sorted(new_fake)[:8]:
+            print(f"    {nm}")
+        if len(new_fake) > 8:
+            print(f"    ...另外 {len(new_fake) - 8:,} 张")
 
     print(f"\n-> {sp}")
     print("\n判读: 出现我们没见过的生成器名字 -> 加进 watermark_scan._AIGC_HARD, 线路C 覆盖面直接变大;")
