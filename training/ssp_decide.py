@@ -266,7 +266,11 @@ def main() -> None:
     print(f"\n分布自检(和标定池比, 差得多就说明阈值不适用):")
     print(f"{'指标':14s}{'这一批':>10s}{'标定池':>10s}")
     print("-" * 36)
-    loc_rate = n_loc / max(1, len(B)) * 100 if B else 0.0
+    # 分母必须是**这一批实际参与判定的张数**, 不是 B 的 CSV 总行数。
+    # 原来写成 len(B) —— 验收时 names 被排除名单筛到 98,013 而 len(B) 还是 99,990,
+    # 于是定位率印成 96.0% 而真值是 98.0%。判定一点没错, 但这个数是**线上用来发现漂移的标尺**,
+    # 系统性偏低 2 个点就会在上线第一天报一个自信的假警报。
+    loc_rate = n_loc / max(1, len(names)) * 100
     print(f"{'定位率':14s}{loc_rate:>9.1f}%{exp.get('定位率', 0):>9.1f}%")
     for e, key in ((".png", "png占比"), (".jpg", "jpg占比"), (".jpeg", "jpeg占比")):
         print(f"{e:14s}{ext_n.get(e, 0) / n * 100:>9.2f}%{exp.get(key, 0):>9.2f}%")
