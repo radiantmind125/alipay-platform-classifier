@@ -155,6 +155,35 @@ def decide(a: tuple[float, bool] | None, b: tuple[float, bool] | None,
     return "放行", reason
 
 
+def preflight(args, cfg: dict) -> None:
+    """动手之前先把要用的东西全查一遍, **一次性把缺的都列出来**。
+
+    起因: 配置里线路A 的模型路径写错了, 结果跑到 subprocess 深处才报
+    "未找到模型文件" —— 而那时候已经建了输出目录、打印了一堆东西。
+    路径这种事应该在第一秒就拦住, 而且要**一次说全**, 不要修一个再暴露下一个。
+    """
+    bad: list[str] = []
+    repo = Path(args.ssp_repo)
+    if not repo.is_dir():
+        bad.append(f"SSP 仓库目录不存在: {repo}")
+    elif not (repo / "predict_all_models.py").exists():
+        bad.append(f"{repo} 里没有 predict_all_models.py(--ssp-repo 指对了吗)")
+    if not (_HERE / "predict_tiled.py").exists():
+        bad.append(f"同目录下没有 predict_tiled.py: {_HERE}")
+    for name, key in (("线路A", "line_a"), ("线路B", "line_b")):
+        m = Path(cfg[key]["model"])
+        if not m.exists():
+            bad.append(f"{name} 模型不存在: {m}")
+            par = m.parent.parent
+            if par.is_dir():                     # 顺手把同级有哪些快照列出来, 省得再去翻
+                subs = sorted(p.name for p in par.iterdir() if p.is_dir())[:12]
+                if subs:
+                    bad.append(f"    {par} 下现有: {', '.join(subs)}")
+    if bad:
+        raise SystemExit("跑不了, 先解决这些:\n  " + "\n  ".join(bad)
+                         + f"\n\n改 {args.config} 里的 model 字段, 不要改代码。")
+
+
 def _run_scoring(args, cfg: dict) -> tuple[Path, Path]:
     """现打分: 依次调两条线的脚本。**一行打分逻辑都不在这里。**"""
     out = Path(args.out)
@@ -214,6 +243,9 @@ def main() -> None:
     if args.score:
         if not args.input:
             raise SystemExit("--score 要配 --input")
+        if not Path(args.input).is_dir():
+            raise SystemExit(f"--input 不是目录: {args.input}")
+        preflight(args, cfg)                     # 路径问题在第一秒拦住, 别跑到一半才报
         a_csv, b_csv = _run_scoring(args, cfg)
     else:
         a_csv, b_csv = args.a_csv, args.b_csv
