@@ -205,17 +205,23 @@ def main() -> None:
         if not both:
             print("  !!!! 历史 CSV 和这次的结果没有共同文件名, 没法验证")
         else:
-            same = [n for n in both if abs(hist[n][0] - now[n][0]) <= 1e-6]
-            print(f"  可比 {len(both)} 张: **{len(same)} 张分数完全一致** "
-                  f"({len(same) / len(both) * 100:.1f}%)")
-            if len(same) < len(both):
-                bad = [n for n in both if n not in set(same)][:5]
-                print(f"  !!!! **{len(both) - len(same)} 张对不上** —— 按名字找回的不是当初那一张图。")
-                for n in bad:
-                    print(f"       {n[:44]:46s} 历史 {hist[n][0]:.6f}  这次 {now[n][0]:.6f}")
-                print("  这批图的抖动结果**不能代表当初标定用的池子**, 要么另找原图, 要么重建池子重标。")
+            # ★ 判据必须看**差多大**, 不能只看"是不是完全相等"。
+            #   历史 CSV 多半是 cuda 上算的, 这里默认 cpu —— 同一张图跨设备本来就差 1e-4 量级。
+            #   拿 1e-6 当门槛会把"同一张图"误判成"换了图"(第一版就是这么错的)。
+            #   真换了图, 分数是满盘散落的, 差值该是 0.1~0.9 量级。
+            diffs = sorted(abs(hist[n][0] - now[n][0]) for n in both)
+            big = [n for n in both if abs(hist[n][0] - now[n][0]) > 0.01]
+            exact = sum(1 for d in diffs if d <= 1e-9)
+            print(f"  可比 {len(both)} 张 | 差值 中位 {diffs[len(diffs) // 2]:.6f} | "
+                  f"p95 {diffs[int(len(diffs) * 0.95)]:.6f} | 最大 {diffs[-1]:.6f} | 完全相等 {exact} 张")
+            if not big:
+                print(f"  -> **是同一批图**。全部 {len(both)} 张差值都在 0.01 以内, "
+                      f"这是跨设备浮点差异(标定多半在 cuda, 这次在 {dev}), 不是换了图。")
             else:
-                print("  -> 像素一致, 找回来的确实是当初那批图, 下面的数字可以直接用。")
+                print(f"  !!!! **{len(big)} 张差得离谱(>0.01)** —— 这些多半真不是当初那一张:")
+                for n in sorted(big, key=lambda n: -abs(hist[n][0] - now[n][0]))[:5]:
+                    print(f"       {n[:44]:46s} 历史 {hist[n][0]:.6f}  这次 {now[n][0]:.6f}")
+                print(f"  另外 {len(both) - len(big)} 张是对得上的。只有上面这些要单独查。")
 
     # ---- 重打 K 次 ----
     a_root = line_a_root(cfg)
