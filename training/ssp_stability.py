@@ -126,6 +126,9 @@ def main() -> None:
     ap.add_argument("--max-n", type=int, default=400, help="最多测多少张")
     ap.add_argument("--search-root", type=Path, default=None,
                     help="CSV 里的路径失效时, 到这个目录底下**按文件名**把原图找回来")
+    ap.add_argument("--verify-b-csv", type=Path, default=None,
+                    help="按名字找回来的图**未必是当初打分的那一张**。给一份历史的线路B summary.csv, "
+                         "用线路B(确定性)重打一遍比对 —— 对得上才说明找回来的是同一批图")
     ap.add_argument("--input", type=Path, default=None, help="或者直接给图片目录")
     ap.add_argument("--k", type=int, default=5, help="同一批图重打几次")
     ap.add_argument("--ssp-repo", type=Path, default=Path(r"D:\SSP"))
@@ -180,6 +183,39 @@ def main() -> None:
         print(f"直接用目录 {stage}")
     else:
         raise SystemExit("要么给 --from-csv, 要么给 --input")
+
+    # ---- 先验明正身: 找回来的到底是不是当初那批图 ----
+    # 线路B 是确定性的(同图同分), 所以它能当**指纹**用: 重打一遍对得上历史 CSV,
+    # 就说明像素一模一样; 对不上说明按名字找回的是另一张图, 后面的抖动数字全都不能信。
+    if args.verify_b_csv:
+        lb = cfg["line_b"]
+        bcol = lb.get("score_col", "tile_top3")
+        vd = args.out / "_verifyB"
+        print(f"\n验明正身: 用线路B 重打一遍, 和 {args.verify_b_csv.name} 比对...", flush=True)
+        r = subprocess.run([sys.executable, str(_HERE / "predict_tiled.py"),
+                            "--ssp-repo", str(args.ssp_repo), "--model", lb["model"],
+                            "--input", str(stage), "--output_dir", str(vd),
+                            *lb.get("flags", []), "--device", dev],
+                           stdout=subprocess.DEVNULL, stderr=None)
+        if r.returncode != 0:
+            raise SystemExit(f"线路B 验证失败(退出码 {r.returncode})")
+        hist = _read_scores(args.verify_b_csv, bcol)
+        now = _read_scores(vd / "summary.csv", bcol)
+        both = sorted(set(hist) & set(now))
+        if not both:
+            print("  !!!! 历史 CSV 和这次的结果没有共同文件名, 没法验证")
+        else:
+            same = [n for n in both if abs(hist[n][0] - now[n][0]) <= 1e-6]
+            print(f"  可比 {len(both)} 张: **{len(same)} 张分数完全一致** "
+                  f"({len(same) / len(both) * 100:.1f}%)")
+            if len(same) < len(both):
+                bad = [n for n in both if n not in set(same)][:5]
+                print(f"  !!!! **{len(both) - len(same)} 张对不上** —— 按名字找回的不是当初那一张图。")
+                for n in bad:
+                    print(f"       {n[:44]:46s} 历史 {hist[n][0]:.6f}  这次 {now[n][0]:.6f}")
+                print("  这批图的抖动结果**不能代表当初标定用的池子**, 要么另找原图, 要么重建池子重标。")
+            else:
+                print("  -> 像素一致, 找回来的确实是当初那批图, 下面的数字可以直接用。")
 
     # ---- 重打 K 次 ----
     a_root = line_a_root(cfg)
