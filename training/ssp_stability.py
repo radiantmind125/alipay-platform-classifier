@@ -70,6 +70,37 @@ def _stage(paths: list[Path], dst: Path) -> int:
     return n
 
 
+_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+
+def _index_by_name(root: Path) -> dict[str, Path]:
+    """把 --search-root 底下的图按**文件名**建索引 —— CSV 里的路径失效时靠它找回原图。"""
+    idx: dict[str, Path] = {}
+    dup = 0
+    print(f"扫描 {root} 建文件名索引...", flush=True)
+    for p in root.rglob("*"):
+        if p.suffix.lower() in _EXTS and p.is_file():
+            if p.name in idx:
+                dup += 1
+                continue                       # 重名只认第一个, 但下面会报出来
+            idx[p.name] = p
+    print(f"  索引到 {len(idx):,} 个文件名" + (f"  (**{dup:,} 个重名已跳过**)" if dup else ""))
+    if dup:
+        print("  重名意味着按名字找回的图**可能不是当初打分的那一张**, 这批结果要打个问号。")
+    return idx
+
+
+def _survey(paths: list[str]) -> None:
+    """CSV 里的路径按父目录归类, 逐个报还在不在 —— 一眼看出是哪个目录没了。"""
+    by_par: Counter = Counter()
+    for p in paths:
+        if p:
+            by_par[str(Path(p).parent)] += 1
+    print("\nCSV 里这些图当初放在哪儿, 现在还在不在:")
+    for par, c in by_par.most_common(12):
+        print(f"  {'在' if Path(par).is_dir() else '**没了**'}  {c:>7,d} 张  {par}")
+
+
 def _read_scores(csv_path: Path, col: str) -> dict[str, tuple[float, str]]:
     """读一份 summary.csv -> {文件名: (分数, 原图全路径)}"""
     out: dict[str, tuple[float, str]] = {}
@@ -93,6 +124,8 @@ def main() -> None:
     ap.add_argument("--min-score", type=float, default=0.3,
                     help="只测这个分以上的图 —— **低分区抖不抖都不影响判定**, 测了浪费时间")
     ap.add_argument("--max-n", type=int, default=400, help="最多测多少张")
+    ap.add_argument("--search-root", type=Path, default=None,
+                    help="CSV 里的路径失效时, 到这个目录底下**按文件名**把原图找回来")
     ap.add_argument("--input", type=Path, default=None, help="或者直接给图片目录")
     ap.add_argument("--k", type=int, default=5, help="同一批图重打几次")
     ap.add_argument("--ssp-repo", type=Path, default=Path(r"D:\SSP"))
@@ -114,16 +147,32 @@ def main() -> None:
         sc = _read_scores(args.from_csv, col)
         picked = sorted((v for v in sc.values() if v[0] >= args.min_score),
                         key=lambda t: -t[0])[:args.max_n]
-        missing = [p for _, p in picked if not p or not Path(p).is_file()]
+        if not picked:
+            raise SystemExit(f"{args.from_csv} 里没有 >= {args.min_score} 分的图, 调低 --min-score。")
+        idx = _index_by_name(args.search_root) if args.search_root else {}
+        paths, missing = [], []
+        for _, p in picked:
+            q = Path(p) if p else None
+            if q and q.is_file():
+                paths.append(q)
+            elif q and idx.get(q.name):
+                paths.append(idx[q.name])      # 路径变了但图还在, 按名字找回来
+            else:
+                missing.append(p)
         if missing:
-            print(f"  !!!! {len(missing)} 张原图找不到了(CSV 里的路径已失效), 这些跳过")
-            print(f"       例如: {missing[0]}")
-        paths = [Path(p) for _, p in picked if p and Path(p).is_file()]
+            print(f"\n  !!!! {len(missing)}/{len(picked)} 张原图按 CSV 里的路径找不到了")
+            _survey([p for _, p in sc.values()])   # 报**整个池子**, 不只是挑中的这几百张
         if not paths:
-            raise SystemExit(f"{args.from_csv} 里没有 >= {args.min_score} 分且原图还在的图。"
-                             f"\n  调低 --min-score, 或改用 --input 直接给目录。")
-        print(f"从 {args.from_csv.name} 里挑出 {len(paths)} 张 (>= {args.min_score} 分, "
-              f"分数范围 {picked[-1][0]:.4f} ~ {picked[0][0]:.4f})")
+            raise SystemExit(
+                f"\n一张都没找到 —— **当初打分用的图目录已经不在了**。\n"
+                f"  这不只是这个脚本跑不了: 池子没了就**再也无法重新标定阈值**,\n"
+                f"  DEPLOY_SPEC 里每个数字都成了没法复现的历史值。\n\n"
+                f"  先确认图还在不在别处, 在的话加 --search-root 按文件名找回:\n"
+                f"    python training/ssp_stability.py --from-csv {args.from_csv} "
+                f"--search-root D:\\download2 --min-score {args.min_score} --k {args.k} --out {args.out}\n"
+                f"  真没了就改用 --input 指一个现有目录(但低分图量不出阈值附近的抖动)。")
+        print(f"\n从 {args.from_csv.name} 里挑出 {len(paths)} 张 (>= {args.min_score} 分, "
+              f"分数范围 {picked[len(paths) - 1][0]:.4f} ~ {picked[0][0]:.4f})")
         stage = args.out / "_imgs"
         _stage(paths, stage)
     elif args.input:
