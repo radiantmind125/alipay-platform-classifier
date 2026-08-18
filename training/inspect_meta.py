@@ -161,7 +161,11 @@ def main() -> None:
             n_hard += 1
         if g and not hh:
             n_gap += 1
-            (gap_known if p.name in known_fake else gap_new).append(p.name)
+            # 把命中处附近的原文留下来 —— **不看清楚漏的是什么写法, 就补不了正则**
+            w = d[max(0, g.start() - 220): g.end() + 320]
+            ctx = re.sub(rb"[^\x20-\x7e]", b".", w).decode("ascii", "replace")
+            ctx = re.sub(r"\.{3,}", "...", ctx)
+            (gap_known if p.name in known_fake else gap_new).append((p.name, ctx))
         hit_rows.append(row)
         if i % 20000 == 0:
             print(f"  已扫 {i:,}/{len(files):,}  命中 {n_interesting:,}  (用时 {time.time()-t:.0f}s)",
@@ -205,8 +209,14 @@ def main() -> None:
     print(f"  有生成器痕迹但**铁证抓不到**: **{n_gap:,}** 张")
     print(f"     其中已在排除名单里(早就知道是假的): {len(gap_known):,} 张")
     print(f"     **不在名单里 = 真·漏网**: **{len(gap_new):,}** 张")
-    for nm in gap_new[:10]:
-        print(f"       {nm}")
+    for nm, ctx in gap_new[:6]:
+        print(f"\n    ---- {nm}")
+        print(f"         {ctx[:520]}")
+    if gap_known:
+        print(f"\n  已知假图里漏掉的(有确定答案, 拿来验补丁最合适):")
+        for nm, ctx in gap_known[:3]:
+            print(f"\n    ---- {nm}")
+            print(f"         {ctx[:520]}")
     if not known_fake:
         print("  (没给 --exclude, 上面两行分不开 —— **加上名单再跑一次**, "
               "否则会把已知假图当成新污染)")
