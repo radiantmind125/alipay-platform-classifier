@@ -325,6 +325,15 @@ _AIGC_SOFT = {
     # **光有 C2PA 容器不等于 AI 生成** —— Adobe 和部分相机给普通照片也签 C2PA。
     # 只有里面写了 trainedAlgorithmicMedia 才算铁证, 所以容器本身只当软标记。
     "C2PA凭证":     re.compile(rb"jumd(c2pa|c2ma)|caBX", re.I),
+    # 抖音(product":"aweme")导出的图里带的 AIGC 块, 形如
+    #   "aigc_info":"{\"aigc_type\":1,\"extra\":...,\"is_sticker_aigc\":0}"
+    # 全池 90,377 张里只有约 2~4 张带这个, 其中**1 张在排除名单里(确认是假图)**。
+    # ★ **先当软标记, 不当铁证。** 铁证 = 直接自动拒, 而我们还缺一个关键数据:
+    #   抖音是**只给 AI 内容**写这个块, 还是**给所有导出**都写(只是 aigc_type 取值不同)?
+    #   没查清之前就升级成铁证, 等于拿真实用户去赌一个 n=2 的猜想。
+    #   要查: 统计带 `product":"aweme"` 的图里, 有多少**没有** aigc_type>=1 ——
+    #   差得多就说明这个字段有区分力, 才谈得上升级。
+    "抖音AIGC块": re.compile(rb"aigc_info|aigc_type|is_sticker_aigc", re.I),
 }
 _META_CAP = 400000          # 元数据都在文件前头, 读这么多就够
 

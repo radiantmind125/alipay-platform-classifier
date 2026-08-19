@@ -175,6 +175,9 @@ def run_meta() -> int:
          b'><exif:UserComment><rdf:Alt><rdf:li>Screenshot</rdf:li></rdf:Alt></exif:UserComment>mntrRGB'),
         (False, "★相机照片的 EXIF(不能误报)",
          b'\xff\xd8Exif\x00\x00MM\x00*Make\x00HUAWEI\x00Model\x00P60\x00Software\x00HarmonyOS'),
+        # ★ 抖音那个块**故意不当铁证**(证据只有 n=2), 这条钉住"它不能变成自动拒"
+        (False, "★抖音 aigc 块只算软标记, **不能**升级成铁证",
+         b'{"data":{"product":"aweme","aigc_info":"{\\"aigc_type\\":1,\\"is_sticker_aigc\\":0}"}}'),
     ]
     bad = 0
     print(f"[线路C 元数据] {len(cases)} 条")
@@ -183,6 +186,12 @@ def run_meta() -> int:
         if bool(hit) != want:
             bad += 1
             print(f"  红 期望{'命中' if want else '**不**命中'}, 实得 {hit or '无'}   —— {note}")
+    # 抖音块必须被**软标记**认出来(只统计不判定), 否则加了等于没加
+    SOFT = ns["_AIGC_SOFT"]
+    dy = b'{"product":"aweme","aigc_info":"{\\"aigc_type\\":1}"}'
+    if not any(p.search(dy) for p in SOFT.values()):
+        bad += 1
+        print("  红 抖音 aigc 块**连软标记都没认出来** —— 那这条规则等于没加")
     print(f"  {len(cases) - bad}/{len(cases)} 通过" + ("" if not bad else "  ★有红的"))
     return bad
 
