@@ -69,6 +69,22 @@ _GEN_HINT = re.compile(rb"gpt-image|dall|openai|midjourney|stable ?diffusion|fir
                        rb"tc260|AIGC", re.I)
 
 
+def _in_text(d: bytes, pos: int, end: int, win: int = 40, need: float = 0.70) -> bool:
+    """命中处**周围是不是可读文本**。
+
+    ★ 没有这道闸, 短模式会在**压缩像素数据**里大量偶然命中:
+      `qwen` `wanx` `aigc` 这类 4 字母串, 按均匀随机估算, 5 个模式 x 9 万张图
+      期望误报约 **110 张** —— 实测确实报了 181 张, **数量级完全吻合随机噪声**。
+      实例: `=iYaIgcMm` / `Oo.wanx.s` / `QQwEN.EO2`, 周围全是二进制乱码。
+    真元数据(JSON/XMP/EXIF 注释)是**成片可读字符**; 压缩数据里可打印字节只占约 37%。
+    """
+    w = d[max(0, pos - win): end + win]
+    if not w:
+        return False
+    ok = sum(1 for b in w if 0x20 <= b <= 0x7e)
+    return ok / len(w) >= need
+
+
 def main() -> None:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
@@ -141,6 +157,8 @@ def main() -> None:
         #   "gpt-image")。想精确解析反而容易漏, 不如**把标记附近所有可读片段都捞出来**统计,
         #   没见过的生成器名字自然会浮出来。
         for m in _INTERESTING.finditer(d):
+            if not _in_text(d, m.start(), m.end()):
+                continue                       # 同上: 二进制里的偶然命中不进统计
             w = d[max(0, m.start() - 160): m.end() + 240]
             for tok in re.findall(rb"[\x20-\x7e]{5,60}", w):
                 s = tok.decode("ascii", "replace").strip()
@@ -148,7 +166,8 @@ def main() -> None:
                     piece = piece.strip(".:-_=")
                     if len(piece) >= 5 and not piece.isdigit():
                         tokens[piece] += 1
-        g = _GEN_HINT.search(d)
+        # 只认**落在可读文本里**的生成器线索, 否则压缩数据里的偶然命中会把结果淹掉
+        g = next((m for m in _GEN_HINT.finditer(d) if _in_text(d, m.start(), m.end())), None)
         if g:
             n_genhint += 1
             row["生成器线索"] = g.group(0).decode("utf-8", "replace")
