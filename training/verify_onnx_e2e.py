@@ -56,6 +56,10 @@ def main() -> None:
     ap.add_argument("--patch-size", type=int, default=32)
     ap.add_argument("--trainsize", type=int, default=256)
     ap.add_argument("--seed-sample", type=int, default=0)
+    ap.add_argument("--same-device", action="store_true",
+                    help="CSV 里的分数**和这次一样是 CPU 算的**。加上它就用严格判据(全体都比), "
+                         "因为跨设备那层干扰不存在了 —— 高分图反而是最灵敏的样本。"
+                         "不加则只敢看低分图(跨设备的差在低分区会自动消失)。")
     args = ap.parse_args()
 
     import importlib.util
@@ -146,9 +150,18 @@ def main() -> None:
     print(f"  其中低分图(CSV<0.05) {len(low)} 张: 中位差 "
           f"{med_low:.2e}" if low else "  (样本里没有低分图, 判据受限)")
     med = diffs_sorted[len(diffs) // 2]
-    if med_low is None:
-        print("\n  !!!! 这批样本全是高分图, **判不了** —— 高分区跨设备本来就有 1e-3 量级差异。")
-        print("       换一批含低分图的样本再跑(低分区跨设备差会自动消失, 才能分辨预处理对不对)。")
+    if args.same_device:
+        # 同设备就没有跨设备那层干扰, **全体都能拿来判**, 而且高分图最灵敏。
+        # 门槛放在 1e-4: ONNX 自身的浮点差约 1e-6, 留两个数量级余量。
+        print(f"\n  (--same-device: CSV 与本次同为 CPU, 用严格判据, 全体 {len(diffs)} 张都算)")
+        if worst < 1e-4:
+            print(f"  -> **对得上**。最大差 {worst:.2e}, 其中高分图也在内 —— "
+                  f"ONNX 可以原样替掉 torch 那一半。")
+        else:
+            print(f"  !!!! **最大差 {worst:.2e} 偏大。** 同设备下不该有这么多, 查预处理。")
+    elif med_low is None:
+        print("\n  !!!! 这批样本全是高分图, 而 CSV 可能是别的设备算的, **判不了**。")
+        print("       两条路: 加 --same-device(确认 CSV 也是 CPU 算的), 或换一批含低分图的样本。")
     elif med_low < 1e-5:
         print(f"\n  -> **预处理是对的**。低分区中位差 {med_low:.2e}(全体中位 {med:.2e}),")
         print(f"     与 ONNX 对 torch 的浮点差同量级 —— 说明输入喂对了。")
