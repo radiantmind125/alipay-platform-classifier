@@ -118,7 +118,7 @@ def main() -> None:
     # ★ 先把依赖和路径查一遍再动手 —— 这是 ssp_decide 的 preflight 一开始就在做的事,
     #   写这个脚本时却忘了照做, 结果是**加载完 94MB 权重、导出跑到一半才报"没装 onnx"**。
     #   缺什么要在第一秒一次性说全, 不要修一个再暴露下一个。
-    import importlib
+    import importlib.util          # 只 import importlib 拿不到 .util 这个子模块
     missing = [m for m in ("onnx", "onnxruntime") if not importlib.util.find_spec(m)]
     bad = []
     if missing:
