@@ -132,27 +132,57 @@ DEFAULT_CONFIG = {
 
 
 def find_across_drives(p) -> str | None:
-    """同一个路径换个盘符再找一遍。
+    """原路径不在时, 到别的盘、以及别的盘的**一级子目录**下找同一段尾巴。
 
-    ★ 换硬盘时最常见的故障就是这个: 模型和数据搬到新盘了, 配置里还写着老盘,
-      跑起来只报"找不到文件", 得人一个个去改。这里自动兜一下 ——
-      **只在原路径确实不存在时才生效**, 不会偷偷改掉一个能用的路径。
+    ★ 搬盘是这条线上真实发生过的事, 而且**不是简单换个盘符**:
+      `D:\\SSP` 搬去的是 `E:\\SSP_Work\\SSP` —— 只换盘符是找不到的。
+      所以这里除了换盘符, 还会试每个盘的一级子目录。
+
+    三条自我约束, 免得"自动"变成"乱猜":
+      1. **只在原路径确实不存在时才动**, 绝不改写一个能用的路径;
+      2. 只接受**完整尾巴**匹配(`SSP-AI-...\\snapshot\\aigen_v7` 要一字不差);
+      3. 找到了会**打印出来**, 让人一眼看见用的是哪个 —— 不做无声的替换。
     """
     s = str(p)
-    if len(s) < 3 or s[1] != ":":
+    if len(s) < 4 or s[1] != ":":
+        return None
+    tail = s[3:].lstrip("\\/")
+    if not tail:
         return None
     for d in "EDFGHIJ":
-        if d == s[0].upper():
-            continue
-        alt = d + s[1:]
-        if Path(alt).exists():
-            return alt
+        root = Path(d + ":\\")
+        try:
+            if not root.exists():
+                continue
+            if (root / tail).exists() and str(root / tail).lower() != s.lower():
+                return str(root / tail)
+            for sub in sorted(root.iterdir()):       # 再试一级子目录, 比如 E:\SSP_Work\
+                if sub.is_dir() and (sub / tail).exists():
+                    return str(sub / tail)
+        except OSError:
+            continue                                  # 光驱/没权限的盘直接跳过
     return None
 
 
+_RELOCATED: list[str] = []
+
+
 def _drive_fallback(p: str) -> str:
-    """给默认值用: 路径不在就换个盘找, 找不到就原样返回(让 preflight 去报错)。"""
-    return p if Path(p).exists() else (find_across_drives(p) or p)
+    """给默认值用: 路径不在就换个地方找, 找不到原样返回(让 preflight 去报错)。"""
+    if Path(p).exists():
+        return p
+    alt = find_across_drives(p)
+    if alt:
+        _RELOCATED.append(f"{p}  ->  {alt}")
+    return alt or p
+
+
+def report_relocations() -> None:
+    """把自动改过的路径报出来 —— **自动解析必须是看得见的**, 否则下次出问题没人知道从哪查。"""
+    if _RELOCATED:
+        print("(原路径不存在, 已自动改用下面这些 —— 想固定下来就删掉 ssp_config.json 让它重新生成)")
+        for line in _RELOCATED:
+            print(f"    {line}")
 
 
 # 默认配置里的模型路径同样兜一下 —— 换盘之后**新生成的**配置就直接是对的了。
@@ -268,6 +298,7 @@ def preflight(args, cfg: dict) -> None:
     路径这种事应该在第一秒就拦住, 而且要**一次说全**, 不要修一个再暴露下一个。
     """
     bad: list[str] = []
+    report_relocations()
 
     def _miss(what: str, p) -> str:
         """报缺失时**顺手到别的盘找一遍** —— 换硬盘之后最省时间的一句提示。"""
