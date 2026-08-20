@@ -131,6 +131,36 @@ DEFAULT_CONFIG = {
 }
 
 
+def find_across_drives(p) -> str | None:
+    """同一个路径换个盘符再找一遍。
+
+    ★ 换硬盘时最常见的故障就是这个: 模型和数据搬到新盘了, 配置里还写着老盘,
+      跑起来只报"找不到文件", 得人一个个去改。这里自动兜一下 ——
+      **只在原路径确实不存在时才生效**, 不会偷偷改掉一个能用的路径。
+    """
+    s = str(p)
+    if len(s) < 3 or s[1] != ":":
+        return None
+    for d in "EDFGHIJ":
+        if d == s[0].upper():
+            continue
+        alt = d + s[1:]
+        if Path(alt).exists():
+            return alt
+    return None
+
+
+def _drive_fallback(p: str) -> str:
+    """给默认值用: 路径不在就换个盘找, 找不到就原样返回(让 preflight 去报错)。"""
+    return p if Path(p).exists() else (find_across_drives(p) or p)
+
+
+# 默认配置里的模型路径同样兜一下 —— 换盘之后**新生成的**配置就直接是对的了。
+# (已经存在的 ssp_config.json 不会被改; 换盘后应当删掉它让它重新生成。)
+for _sec, _key in (("line_a", "model_root"), ("line_b", "model")):
+    DEFAULT_CONFIG[_sec][_key] = _drive_fallback(DEFAULT_CONFIG[_sec][_key])
+
+
 def load_config(path: Path) -> dict:
     if not path.exists():
         path.write_text(json.dumps(DEFAULT_CONFIG, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -238,9 +268,17 @@ def preflight(args, cfg: dict) -> None:
     路径这种事应该在第一秒就拦住, 而且要**一次说全**, 不要修一个再暴露下一个。
     """
     bad: list[str] = []
+
+    def _miss(what: str, p) -> str:
+        """报缺失时**顺手到别的盘找一遍** —— 换硬盘之后最省时间的一句提示。"""
+        alt = find_across_drives(p)
+        tail = f"\n      但 **{alt}** 是在的 —— 是不是换盘了? 删掉 ssp_config.json 让它重新生成," \
+               f"\n      或者直接把配置里这一项改成新路径。" if alt else ""
+        return f"{what}: {p}{tail}"
+
     repo = Path(args.ssp_repo)
     if not repo.is_dir():
-        bad.append(f"SSP 仓库目录不存在: {repo}")
+        bad.append(_miss("SSP 仓库目录不存在", repo))
     elif not (repo / "predict_all_models.py").exists():
         bad.append(f"{repo} 里没有 predict_all_models.py(--ssp-repo 指对了吗)")
     if not (_HERE / "predict_tiled.py").exists():
@@ -249,7 +287,7 @@ def preflight(args, cfg: dict) -> None:
     root = Path(line_a_root(cfg))
     pat = cfg["line_a"].get("model_pattern", "Net_epoch_best.pth")
     if not root.is_dir():
-        bad.append(f"线路A 的 model_root 不是目录: {root}")
+        bad.append(_miss("线路A 的 model_root 不是目录", root))
     else:
         hits = sorted(root.glob(pat))
         if not hits:
@@ -264,7 +302,7 @@ def preflight(args, cfg: dict) -> None:
                     bad.append(f"    {par} 下现有: {', '.join(subs)}")
     mb = Path(cfg["line_b"]["model"])
     if not mb.is_file():
-        bad.append(f"线路B 的 model 不是文件(这一条要 .pth 全路径): {mb}")
+        bad.append(_miss("线路B 的 model 不是文件(这一条要 .pth 全路径)", mb))
     if bad:
         raise SystemExit("跑不了, 先解决这些:\n  " + "\n  ".join(bad)
                          + f"\n\n改 {args.config} 里的 model 字段, 不要改代码。")
@@ -330,7 +368,7 @@ def main() -> None:
     ap.add_argument("--b-csv", type=Path, default=None, help="线路B 已算好的 summary.csv")
     ap.add_argument("--input", type=Path, default=None, help="图片目录(配 --score 现打分)")
     ap.add_argument("--score", action="store_true", help="从 --input 现打分, 而不是用现成 CSV")
-    ap.add_argument("--ssp-repo", type=Path, default=Path(r"D:\SSP"))
+    ap.add_argument("--ssp-repo", type=Path, default=Path(_drive_fallback(r"D:\SSP")))
     ap.add_argument("--device", default=None,
                     help="不给就用配置里的 device(默认 **cpu**, 因为线上是 CPU 服务器)。"
                          "只有开发/调试才该显式给 cuda。")

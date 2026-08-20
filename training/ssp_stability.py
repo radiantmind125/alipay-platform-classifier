@@ -131,7 +131,8 @@ def main() -> None:
                          "用线路B(确定性)重打一遍比对 —— 对得上才说明找回来的是同一批图")
     ap.add_argument("--input", type=Path, default=None, help="或者直接给图片目录")
     ap.add_argument("--k", type=int, default=5, help="同一批图重打几次")
-    ap.add_argument("--ssp-repo", type=Path, default=Path(r"D:\SSP"))
+    ap.add_argument("--ssp-repo", type=Path,
+                    default=Path(__import__("ssp_decide")._drive_fallback(r"D:\SSP")))
     ap.add_argument("--device", default=None)
     ap.add_argument("--config", type=Path, default=None)
     ap.add_argument("--out", type=Path, required=True)

@@ -224,7 +224,8 @@ def main() -> None:
     ap.add_argument("--logic-only", action="store_true", help="只跑判定逻辑那一层, 不用图")
     ap.add_argument("--input", type=Path, default=None, help="固定的那批图(挑个不会被删的目录)")
     ap.add_argument("--baseline", type=Path, default=None)
-    ap.add_argument("--ssp-repo", type=Path, default=Path(r"D:\SSP"))
+    ap.add_argument("--ssp-repo", type=Path,
+                    default=Path(__import__("ssp_decide")._drive_fallback(r"D:\SSP")))
     ap.add_argument("--config", type=Path, default=None)
     ap.add_argument("--device", default=None,
                     help="不给就用配置里的 device(和 ssp_decide 同一套规则)。"
