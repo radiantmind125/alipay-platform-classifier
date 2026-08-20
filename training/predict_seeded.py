@@ -80,6 +80,7 @@ def main() -> None:
 
     argv = sys.argv[1:]
     repo = None
+    patch_mode = "torch"
     rest = []
     i = 0
     while i < len(argv):                       # 只截 --ssp-repo, 其余原样转交
@@ -87,7 +88,13 @@ def main() -> None:
             repo = argv[i + 1]; i += 2; continue
         if argv[i].startswith("--ssp-repo="):
             repo = argv[i].split("=", 1)[1]; i += 1; continue
+        if argv[i] == "--patch-mode":
+            patch_mode = argv[i + 1]; i += 2; continue
+        if argv[i].startswith("--patch-mode="):
+            patch_mode = argv[i].split("=", 1)[1]; i += 1; continue
         rest.append(argv[i]); i += 1
+    if patch_mode not in ("torch", "lcg"):
+        raise SystemExit(f"--patch-mode 只能是 torch 或 lcg, 收到 {patch_mode!r}")
     if not repo:
         raise SystemExit("要给 --ssp-repo(SSP 仓库路径, 里面得有 predict_all_models.py)")
     repo_p = Path(repo)
@@ -100,19 +107,63 @@ def main() -> None:
 
     _orig = pam.predict_image_with_model
 
+    # ---- --patch-mode lcg: 连取块也换成跨语言可复现的算法 ----
+    if patch_mode == "lcg":
+        import numpy as np
+        from PIL import Image
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from patch_select import select_patches            # noqa: E402
+
+        _queue: list = []
+        _orig_patch_img = pam.patch_img
+
+        def _patch_img_det(img, patch_size, height):
+            # predict_image_with_model 会**恰好调 repeat 次**, 我们预先算好按序发给它。
+            # ★ 队列空了必须**直接报错**, 绝不能悄悄退回随机取块 ——
+            #   那样分数会变而没人知道, 正是这条线上最怕的一类错。
+            if not _queue:
+                raise RuntimeError("确定性取块的队列空了 —— --repeat 与预先算好的轮数对不上")
+            return _queue.pop(0)
+
+        pam.patch_img = _patch_img_det
+
+        def _prep(image_path, kw: dict) -> None:
+            # ★ patch_size / trainsize / repeat **全部从调用方原样取**, 不能写死。
+            #   `patch_img` 里 num_patch = (trainsize // patch_size)^2, 三者是联动的;
+            #   这里若写死 32/64, 一旦有人改 --patch_size 或 --trainsize,
+            #   预先算好的块**大小或数量就对不上**, 而且不会报错, 只会安静地给出错的分。
+            ps = int(kw.get("patch_size", 32))
+            ts = int(kw.get("trainsize", 256))
+            npatch = (ts // ps) * (ts // ps)
+            img = Image.open(image_path).convert("RGB")     # 与原版同一句, 不做 exif 旋转
+            patches, _ = select_patches(np.asarray(img), _seed_of(image_path),
+                                        patch_size=ps, num_patch=npatch,
+                                        repeat=int(kw.get("repeat", 16)))
+            _queue[:] = [Image.fromarray(p) for p in patches]
+    else:
+        _prep = None
+
     def _seeded(*a, **kw):
         # ★ 种子必须**每张图设一次**, 而且要在那 16 次 repeat **之前**。
         #   设在 repeat 里面的话 16 次会取到一模一样的小块, 等于把 repeat 作废。
         ip = kw.get("image_path") if "image_path" in kw else (a[1] if len(a) > 1 else None)
         if ip is not None:
             torch.manual_seed(_seed_of(ip))
-        return _orig(*a, **kw)
+            if _prep is not None:
+                _prep(ip, kw)
+        r = _orig(*a, **kw)
+        if _prep is not None and _queue:
+            # 没取完说明 repeat 对不上, 那这张图的分数就不是按预期算的 —— 必须叫停
+            raise RuntimeError(f"确定性取块还剩 {len(_queue)} 块没用 —— repeat 与预算的轮数不一致")
+        return r
 
     # 同一个进程里 main() 被调第二次时**不能再包一层** —— 包多层虽然结果一样(种子值相同),
     # 但以后谁往种子里加点别的东西, 叠加就会变成真 bug。
     if not getattr(pam, "_seeded_wrapped", False):
         pam.predict_image_with_model = _seeded
         pam._seeded_wrapped = True
+    print(f"(取块方式: {patch_mode}" + ("  <- 跨语言可复现" if patch_mode == "lcg" else
+          "  <- 原版随机取块, 只有种子是定的") + ")", flush=True)
     print("(确定性外壳: 每张图按文件内容定种子 —— 同一个文件永远同一个分数, 重试拿不到新结果)",
           flush=True)
 

@@ -79,6 +79,12 @@ DEFAULT_CONFIG = {
         #   seeded=true 时走 predict_seeded.py, 按**文件内容**定种子 -> 同一个文件永远同一个分数,
         #   改文件名也没用。**只有做对比实验时才该关掉。**
         "seeded": True,
+        # torch = 原版随机取块(种子定死); lcg = xorshift32, **跨语言可逐位复现**。
+        # ONNX 给 .NET 调用那条路必须用 lcg —— torch 的随机数别的语言复现不了。
+        # ★ 换成 lcg 会**改变每张图的分数**(换了一次抽样), 所以要在整池上重跑核对;
+        #   采样分布本身不变(都是"64 次均匀取样里挑能量最小的"), 所以预期每万数不动 ——
+        #   但预期不能代替实测。
+        "patch_mode": "torch",
         "strict": 0.8031,
         "review": 0.6497,
         "_说明": "整图 AI 生成。阈值 = 1/5000 与 1/1000 预算下的第 k+1 高真图分数。"
@@ -351,7 +357,12 @@ def _run_scoring(args, cfg: dict) -> tuple[Path, Path]:
     # 骗子多试几次就能碰运气过关(实测阈值附近判定不一致率 46.9%)。
     seeded = la.get("seeded", True) and not args.unseeded
     if seeded:
-        head = [sys.executable, str(_HERE / "predict_seeded.py"), "--ssp-repo", str(args.ssp_repo)]
+        pm = args.patch_mode or la.get("patch_mode", "torch")
+        head = [sys.executable, str(_HERE / "predict_seeded.py"),
+                "--ssp-repo", str(args.ssp_repo), "--patch-mode", pm]
+        if pm == "lcg":
+            print("  (取块用 lcg —— 跨语言可复现的那套。**分数会和 torch 模式不同**, "
+                  "阈值要在这套上重新核对过才算数)")
     else:
         head = [sys.executable, "predict_all_models.py"]
         print("  !!!! --unseeded: 用**随机取块**打分 —— 只该在做对比实验时这样, 同图两次分数会不同")
@@ -406,6 +417,11 @@ def main() -> None:
                     help="不跑线路C。**只在纯核对阈值的时候用** —— 线路C 要逐张读文件头, "
                          "10 万张就是几十 GB 磁盘读; 而验收用的那个池子里那 38 张铁证本来就在排除名单里, "
                          "跑不跑都是 26/180。**线上不要加这个**, 那等于白扔一条免费的覆盖。")
+    ap.add_argument("--patch-mode", default=None, choices=["torch", "lcg"],
+                    help="线路A 的取块方式。torch=原版随机取块(只有种子是定的); "
+                         "lcg=xorshift32, **跨语言可逐位复现**, ONNX/.NET 那条路要用这个。"
+                         "不给就用配置里的 line_a.patch_mode。"
+                         "★ 两种模式**分数不同**, 换了必须重跑整池核对阈值。")
     ap.add_argument("--unseeded", action="store_true",
                     help="线路A 回到**随机取块**(同图两次分数不同)。**只该在做对比实验时用** —— "
                          "线上这样等于留了个洞: 同一张假图多交几次就能换个结果。")
