@@ -51,6 +51,10 @@ def main() -> None:
     if miss:
         raise SystemExit(f"缺 {miss} —— 真正的 patch_img 要靠 torchvision")
 
+    # ★ 每一步都要吱声。这个脚本 import torch + 载入 94MB ONNX + 每张图跑 1024 次
+    #   原版取块, 静默期能有半分钟 —— 而"静默"和"卡死"从外面是分不出来的。
+    #   这条已经踩过四次了(--n 10 的进度、线路C、模型路径、还有这次)。
+    print("加载 torch 和 SSP 的取块模块...", flush=True)
     import torch                                            # noqa: E402
     from PIL import Image                                   # noqa: E402
     sys.path.insert(0, str(args.ssp_repo))
@@ -60,6 +64,7 @@ def main() -> None:
 
     sess = None
     if args.onnx:
+        print(f"加载 ONNX {args.onnx.name} (94MB, 要几秒)...", flush=True)
         import onnxruntime as ort                           # noqa: E402
         sess = ort.InferenceSession(str(args.onnx), providers=["CPUExecutionProvider"])
 
@@ -80,9 +85,12 @@ def main() -> None:
         return (f"能量 中位{sorted(es)[len(es)//2]:>8,d} 最小{min(es):>7,d} | "
                 f"纯色块 {uni:>2d}/{len(arrs)} | 不同均色 {len(cols):>2d}")
 
+    n_draw = args.repeat * (args.trainsize // args.patch_size) ** 2
+    print(f"\n共 {len(imgs)} 张, 每张要跑 {n_draw:,} 次原版取块, 慢是正常的\n", flush=True)
     print(f"{'图':40s}  来源")
-    print("-" * 104)
-    for p in imgs:
+    print("-" * 104, flush=True)
+    for i, p in enumerate(imgs, 1):
+        print("  第 %d/%d 张 处理中..." % (i, len(imgs)), flush=True)
         img = Image.open(p).convert("RGB")
         seed = zlib.crc32(p.read_bytes()) & 0x7FFFFFFF
 
@@ -100,7 +108,7 @@ def main() -> None:
 
         sr, sm = score(real), score(mine)
         tail = lambda v: "" if v != v else f" | **分数 {v:.4f}**"
-        print(f"{p.name[:38]:40s}  真正的 patch_img : {describe(real)}{tail(sr)}")
+        print(f"{p.name[:38]:40s}  真正的 patch_img : {describe(real)}{tail(sr)}", flush=True)
         print(f"{'':40s}  我的 select_patch : {describe(mine)}{tail(sm)}")
         # 逐块比能量: 若我的**总是更小**, 说明我选得"更简单", 那分歧就在取块本身
         lower = sum(1 for a, b in zip(mine, real) if energy(a) < energy(b))
