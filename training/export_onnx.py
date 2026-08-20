@@ -115,6 +115,22 @@ def main() -> None:
     ap.add_argument("--n-vectors", type=int, default=8, help="导出多少组测试向量供 .NET 逐位核对")
     args = ap.parse_args()
 
+    # ★ 先把依赖和路径查一遍再动手 —— 这是 ssp_decide 的 preflight 一开始就在做的事,
+    #   写这个脚本时却忘了照做, 结果是**加载完 94MB 权重、导出跑到一半才报"没装 onnx"**。
+    #   缺什么要在第一秒一次性说全, 不要修一个再暴露下一个。
+    import importlib
+    missing = [m for m in ("onnx", "onnxruntime") if not importlib.util.find_spec(m)]
+    bad = []
+    if missing:
+        bad.append(f"缺 Python 包 {missing} —— 装一下: pip install {' '.join(missing)}\n"
+                   f"      (torch 的导出器要 onnx 才能写文件, 核对那一步要 onnxruntime)")
+    if not args.weights.is_file():
+        bad.append(f"权重文件不存在: {args.weights}")
+    if not (args.ssp_repo / "predict_all_models.py").is_file():
+        bad.append(f"{args.ssp_repo} 里没有 predict_all_models.py(--ssp-repo 指对了吗)")
+    if bad:
+        raise SystemExit("跑不了, 先解决这些:\n  " + "\n  ".join(bad))
+
     import torch                                            # noqa: E402
     import onnxruntime as ort                               # noqa: E402
 
