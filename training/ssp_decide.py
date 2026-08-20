@@ -298,7 +298,6 @@ def preflight(args, cfg: dict) -> None:
     路径这种事应该在第一秒就拦住, 而且要**一次说全**, 不要修一个再暴露下一个。
     """
     bad: list[str] = []
-    report_relocations()
 
     def _miss(what: str, p) -> str:
         """报缺失时**顺手到别的盘找一遍** —— 换硬盘之后最省时间的一句提示。"""
@@ -418,6 +417,8 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    # 放在这里而不是 preflight 里: --print-config 会提前 return, 那条路径也必须看得见
+    report_relocations()
     if args.device is None:
         args.device = cfg.get("device", "cpu")
     if args.device != "cpu" and args.score:
