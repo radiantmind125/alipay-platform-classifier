@@ -6,15 +6,27 @@ r"""生成**分阶段**一致性测试向量, 给 .NET 那边逐级核对(只写
 不知道是**随机数不对**、**坐标算错**、**选块规则反了**, 还是**喂给模型的数据不对** ——
 只能从头猜。这条线上已经为这种猜法付过一次代价了。
 
-所以这里按**五级台阶**给, 每一级都能单独对:
+所以这里按 **11 级台阶**给, 每一级都能单独对:
 
+  线路A(整图)
     1. 发生器      给定种子, xorshift32 的前 8 个输出
     2. 坐标        第 0 轮的全部 64 个 (y, x)
     3. 选块        16 轮各自选中的 (y, x) 和它的纹理能量
     4. 模型        16 个块各自的 ai_score
     5. 汇总        16 个分数的平均 = final_ai_score
 
+  线路B(局部改金额) —— ★ 只有传了 `--b-onnx` 才生成
+    6. 版式        white 还是 blue
+    7. 定位        金额框坐标; 定不到是 null
+    8. 裁剪        外扩后的裁剪框 + 切块网格 (2x2 还是 3x6)
+    9. 切块        每一块在裁剪图里的坐标
+   10. 模型        每块的 ai_score
+   11. 汇总        最高 3 个分数的平均 = tile_top3
+
 **哪一级先对不上, 问题就在那一级。**
+
+★ 台阶 8 最要紧: `crop_box` 验得出 **pad 是不是 8**, `tile_grid` 验得出
+  **定位成功时是不是 2x2** —— 这两处正是我们自己写错过的, 光对最后的分数看不出来。
 
 ★ 测试图是**程序生成的合成图**, 不是真实收据 ——
   真实收据不能给外部, 而合成图两边都能拿到一模一样的字节, 反而更适合做一致性核对。
@@ -215,20 +227,40 @@ def main() -> None:
             print(f"  {p.name:24s} {w}x{h}  seed={seed}  A={scores.mean():.6f}  "
                   f"(没给 --b-onnx, 线路B 台阶未生成)", flush=True)
 
+    algo = {
+        "prng": "xorshift32: s^=s<<13; s^=s>>17; s^=s<<5  (全程 uint32)",
+        "seed": "crc32(整个文件字节) & 0x7FFFFFFF; 若为 0 则取 1",
+        "order": "每块先取 y = next() % (H-P+1), 再取 x = next() % (W-P+1)",
+        "select": "每轮 64 块取纹理能量**最大**的; **并列取最后出现的那个**",
+        "energy": "水平+垂直+两条对角线的相邻像素绝对差之和, int64",
+        "onnx_input": "uint8 (N,32,32,3) NHWC RGB; 归一化/放大已包在图里",
+        "aggregate": "16 个 ai_score 求平均 = final_ai_score",
+        "patch_size": args.patch_size, "num_patch": npatch, "repeat": args.repeat,
+    }
+    tol = {"stage1_2_3": "必须完全相等(整数)", "stage4_5": 1e-4}
+
+    # ★ 线路B 的规则也写进 json —— 对方要是只对着这个文件做, 不该还得回头翻文档。
+    #   之前 tolerance 只有 stage1_2_3 / stage4_5 两条, 台阶 6~11 一条容差都没有,
+    #   只对 json 的人根本不知道 stage10/11 该按 1e-4 收。
+    if sb is not None:
+        algo["line_b_locate"] = "先判版式(white/blue), 再找金额行: 同一行需 >=2 个连通域, 取中位高度最大的那行"
+        algo["line_b_pad"] = (f"裁剪框外扩 pad = max(8, 金额框高 * amount_pad); "
+                              f"当前 amount_pad={b_pad}, 所以 pad 恒为 8")
+        algo["line_b_grid"] = "定位成功 -> 裁剪框切 2x2 共 4 块; 定位失败 -> 上 roi_top 部分切 3x6 共 18 块"
+        algo["line_b_roi_top"] = b_roi_top
+        algo["line_b_tile_overlap"] = 0.15
+        algo["line_b_patch"] = "每一块内部再取纹理能量最大的一个 patch 送模型(规则同线路A)"
+        algo["line_b_aggregate"] = "所有块的分数取最高 3 个求平均 = tile_top3"
+        tol["stage6_7_8_9"] = "必须完全相等(版式字符串 + 整数坐标 + 网格)"
+        tol["stage10_11"] = 1e-4
+
     doc = {
-        "_说明": "线路A 分阶段一致性向量。逐级核对: 哪一级先对不上, 问题就在那一级。"
-                 "图是程序生成的合成图, 不是真实收据。",
-        "algorithm": {
-            "prng": "xorshift32: s^=s<<13; s^=s>>17; s^=s<<5  (全程 uint32)",
-            "seed": "crc32(整个文件字节) & 0x7FFFFFFF; 若为 0 则取 1",
-            "order": "每块先取 y = next() % (H-P+1), 再取 x = next() % (W-P+1)",
-            "select": "每轮 64 块取纹理能量**最大**的; **并列取最后出现的那个**",
-            "energy": "水平+垂直+两条对角线的相邻像素绝对差之和, int64",
-            "onnx_input": "uint8 (N,32,32,3) NHWC RGB; 归一化/放大已包在图里",
-            "aggregate": "16 个 ai_score 求平均 = final_ai_score",
-            "patch_size": args.patch_size, "num_patch": npatch, "repeat": args.repeat,
-        },
-        "tolerance": {"stage1_2_3": "必须完全相等(整数)", "stage4_5": 1e-4},
+        "_说明": ("线路A + 线路B 分阶段一致性向量。逐级核对: 哪一级先对不上, 问题就在那一级。"
+                  "图是程序生成的合成图, 不是真实收据。"
+                  + ("" if sb is not None else
+                     " ★本次没传 --b-onnx, 所以只有台阶 1~5, 线路B 那 6 级没有生成。")),
+        "algorithm": algo,
+        "tolerance": tol,
         "cases": cases,
     }
     vp = args.out / "vectors.json"
@@ -237,6 +269,11 @@ def main() -> None:
     print(f"-> 图 {len(imgs)} 张在 {args.out / 'images'}")
     print("\n给对方的用法: 先对台阶 1(纯整数, 不用图), 再 2, 再 3 —— 前三级都是整数, 必须**完全相等**;")
     print("台阶 4/5 是浮点, 容差 1e-4(跨设备本身就有 1e-4 量级差异)。")
+    if sb is not None:
+        print("线路B 接着对台阶 6~9(版式/定位框/裁剪框/切块坐标), 也全是**完全相等**;")
+        print("台阶 10/11 是浮点, 同样 1e-4。★ 台阶 8 最要紧: 验 pad 是不是 8, 网格是不是 2x2。")
+    else:
+        print("★ 这次没传 --b-onnx, 只出了台阶 1~5。要覆盖线路B 必须带上 --b-onnx 重跑。")
 
 
 if __name__ == "__main__":
