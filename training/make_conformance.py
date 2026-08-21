@@ -56,6 +56,10 @@ def make_images(out: Path) -> list[Path]:
         ("case3_mostly_flat", 360, 760, "flat"),
         ("case4_dense", 480, 1040, "dense"),
         ("case5_narrow", 200, 1200, "white"),
+        # ★ 真实进件是 1080x2400 这个量级, 上面几张都太小。
+        #   坐标是 next() % (H-31), 图越大用到的随机数位数越多 ——
+        #   拿一张**真实尺寸**的进来, 免得实现方在小图上全对、一上真图就偏。
+        ("case6_fullsize", 1080, 2400, "white"),
     ]
     paths = []
     for name, w, h, kind in specs:
