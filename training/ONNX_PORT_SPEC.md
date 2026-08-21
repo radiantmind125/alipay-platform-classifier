@@ -128,10 +128,14 @@ connectedComponentsWithStats(掩码, 8 连通)
 ### 2.4 裁剪与切块
 
 ```
-定位成功 -> 裁到金额框(--amount-pad 0, 即不外扩)
-定位失败 -> **不出信号**(是"无意见", 不是"判真"), 但仍按 --roi-top 0.6 保留上部继续算
-切块 3 列 x 6 行, 相邻块按 0.15 重叠:
-    tw = w/3, th = h/6, ox = tw*0.15, oy = th*0.15
+定位成功 -> 裁到金额框, **四边各外扩 pad 像素**, 然后切 **2 列 x 2 行**
+             pad = int(max(8, 框高 * amount_pad))
+             ★ amount_pad = 0, 但那个 max(8, ...) 是**下限** -> **pad 实际是 8, 不是 0**
+             ★ 定位成功时是 **2x2**, 不是 3x6("区域已经很小, 切少量块就够")
+定位失败 -> **不出信号**(是"无意见", 不是"判真"), 但仍按 roi-top 0.6 保留上部继续算,
+             并切 **3 列 x 6 行**
+相邻块按 0.15 重叠(cols/rows 用上面那两种情形对应的值):
+    tw = w/cols, th = h/rows, ox = tw*0.15, oy = th*0.15
     x0 = max(0, floor(c*tw - ox)),  x1 = min(w, floor((c+1)*tw + ox))
     y0 = max(0, floor(r*th - oy)),  y1 = min(h, floor((r+1)*th + oy))
     丢掉 宽<8 或 高<8 的块
@@ -220,7 +224,8 @@ retouch|xingtu | meitu | jumd(c2pa|c2ma)|caBX | aigc_info|aigc_type|is_sticker_a
 
 - `repeat = 16`、每轮 `64` 块、块大小 `32`
 - 取块方向(**最大**)与并列规则(线路A 最后一个 / 线路B 第一个)
-- 切块 `3x6`、重叠 `0.15`、`roi-top 0.6`、`amount-pad 0`、聚合 `top3`
+- 切块(**定位成功 `2x2` / 失败 `3x6`**)、重叠 `0.15`、`roi-top 0.6`、
+  `amount-pad 0`(-> 实际外扩 **8 像素**)、聚合 `top3`
 
   > ★ `roi-top 0.6` 和 `agg top3` 是 `ssp_config.json` 的 `line_b.flags` **显式传进去的**,
   > 而 `predict_tiled.py` 自己的默认值是 `roi-top 1.0` / `agg max`。

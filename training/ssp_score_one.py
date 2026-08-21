@@ -107,6 +107,18 @@ def main() -> None:
 
     cfg = load_config(args.config or (_HERE / "ssp_config.json"))
     la, lb = cfg["line_a"], cfg["line_b"]
+
+    # ★ 线路B 的参数**从配置的 flags 里读**, 不写死 —— 写死就会和 ssp_decide 各走各的。
+    #   (`roi-top` / `agg` 在 predict_tiled 里的默认值是 1.0 / max, 和这里用的 0.6 / top3 不同,
+    #    所以更不能靠默认值。)
+    _f = list(lb.get("flags", []))
+    def _flag(name: str, default: str) -> str:
+        return _f[_f.index(name) + 1] if name in _f and _f.index(name) + 1 < len(_f) else default
+    b_pad = float(_flag("--amount-pad", "0"))
+    b_roi_top = float(_flag("--roi-top", "0.6"))
+    b_agg = _flag("--agg", "top3")
+    if b_agg != "top3":
+        raise SystemExit(f"这个参照实现只实现了 agg=top3, 配置里是 {b_agg}")
     sa = ort.InferenceSession(str(args.a_onnx), providers=["CPUExecutionProvider"])
     sb = ort.InferenceSession(str(args.b_onnx), providers=["CPUExecutionProvider"])
 
@@ -138,17 +150,25 @@ def main() -> None:
             out["line_a"] = {"score": round(a, 6), "seed": int(seed), "patches": int(len(patches))}
 
             # ---- 线路B ----
+            # ★★ 下面这一段必须和 predict_tiled 逐行一致。第一版写岔了两处, 结果人工复核
+            #    从 1 张变成 5 张 —— 而且**两处错误也写进了给 .NET 的规格**:
+            #      1. `pad = int(max(8, (by1-by0) * amount_pad))` —— amount_pad=0 时
+            #         pad 是 **8 不是 0**(那个 max 是下限, 不是"不外扩");
+            #      2. **定位成功时切 2x2**, 不是 3x6("区域已经很小, 切少量块就够")。
             loc, page = locate_amount_auto(rgb)
             b_val, located = None, bool(loc)
-            arr = rgb
+            arr, cols, rows = rgb, 3, 6
             if loc:
-                x0, y0, x1, y1 = loc[0], loc[1], loc[2], loc[3]
-                arr = rgb[y0:y1, x0:x1]                      # amount-pad 0 -> 不外扩
-            elif 0 < 0.6 < 1.0:
-                arr = rgb[:max(32, int(h * 0.6))]            # roi-top 0.6
+                bx0, by0, bx1, by1 = loc[0], loc[1], loc[2], loc[3]
+                pad = int(max(8, (by1 - by0) * b_pad))
+                arr = rgb[max(0, by0 - pad):min(h, by1 + pad),
+                          max(0, bx0 - pad):min(w, bx1 + pad)]
+                cols, rows = 2, 2
+            elif 0 < b_roi_top < 1.0:
+                arr = rgb[:max(32, int(h * b_roi_top))]
             th, tw = arr.shape[:2]
             tiles = [_richest_patch(arr[ty0:ty1, tx0:tx1], 32)
-                     for (tx0, ty0, tx1, ty1) in _tiles(tw, th, 3, 6, 0.15)]
+                     for (tx0, ty0, tx1, ty1) in _tiles(tw, th, cols, rows, 0.15)]
             if tiles:
                 t = np.stack([np.asarray(x, np.uint8) for x in tiles])
                 ts = sb.run(["ai_score"], {"patches": t})[0]
