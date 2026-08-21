@@ -249,7 +249,16 @@ def main() -> None:
         algo["line_b_grid"] = "定位成功 -> 裁剪框切 2x2 共 4 块; 定位失败 -> 上 roi_top 部分切 3x6 共 18 块"
         algo["line_b_roi_top"] = b_roi_top
         algo["line_b_tile_overlap"] = 0.15
-        algo["line_b_patch"] = "每一块内部再取纹理能量最大的一个 patch 送模型(规则同线路A)"
+        # ★★ 并列规则和线路A **相反**, 别写成"规则同线路A"(2026-08-21 修正: 原文就是这么写错的)
+        algo["line_b_patch"] = ("每一块内部再取纹理能量最大的一个 patch 送模型。"
+                                "用积分图一次算完所有窗口, 取 argmax。"
+                                "★ 并列时取**第一个**(行优先扫描的第一个), "
+                                "这与线路A 的'并列取最后一个'**正好相反**, 不要照搬")
+        algo["line_b_patch_integral"] = ("积分图必须用 float64 或 int64 累加, **不能用 float32** —— "
+                                         "真实尺寸的块积分和会超过 2^24, float32 精确表示整数到此为止")
+        algo["line_b_upscale"] = ("块任一边 < 32 时先放大: s = max(32/h, 32/w), "
+                                  "目标尺寸 = (max(32, int(w*s+0.5)), max(32, int(h*s+0.5))), "
+                                  "双线性、半像素中心对齐(OpenCV INTER_LINEAR), 结果可以不是正方形")
         algo["line_b_aggregate"] = "所有块的分数取最高 3 个求平均 = tile_top3"
         tol["stage6_7_8_9"] = "必须完全相等(版式字符串 + 整数坐标 + 网格)"
         tol["stage10_11"] = 1e-4
