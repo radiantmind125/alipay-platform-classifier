@@ -93,8 +93,10 @@ def main() -> None:
     ap.add_argument("--threads", type=int, default=1,
                     help="onnxruntime 的 intra_op 线程数。**多进程部署应当用 1**; "
                          "传 0 = 不设置, 也就是现在代码里的默认行为(按核数开)")
+    # ★ 这两个必须和 patch_select.py 的 PATCH_SIZE / TRAINSIZE 一致(32 / 256)。
+    #   写成 128 的话每轮候选块从 64 掉到 16, **不会报错**, 只会让耗时看着比真实值好四倍。
     ap.add_argument("--patch-size", type=int, default=32)
-    ap.add_argument("--trainsize", type=int, default=128)
+    ap.add_argument("--trainsize", type=int, default=256)
     args = ap.parse_args()
 
     print(f"\n=== 阶段内存 (threads={args.threads}) ===", flush=True)
