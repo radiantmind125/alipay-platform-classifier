@@ -24,7 +24,7 @@ r"""生成**分阶段**一致性测试向量, 给 .NET 那边逐级核对(只写
   python training/make_conformance.py --onnx E:\SSP_Work\onnx\aigen_v7.onnx ^
       --out E:\SSP_Work\onnx\conformance
 
-生成 `images/*.png` 和 `lineA_vectors.json`, 两样一起给对方。
+生成 `images/*.png` 和 `vectors.json`, 两样一起给对方。
 """
 
 from __future__ import annotations
@@ -38,7 +38,8 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE))
 
 
 def make_images(out: Path) -> list[Path]:
@@ -60,6 +61,10 @@ def make_images(out: Path) -> list[Path]:
         #   坐标是 next() % (H-31), 图越大用到的随机数位数越多 ——
         #   拿一张**真实尺寸**的进来, 免得实现方在小图上全对、一上真图就偏。
         ("case6_fullsize", 1080, 2400, "white"),
+        # ★ 上面六张**都能定位到金额**, 于是全走 2x2 那条分支。
+        #   这一张故意**定位不到**(只有小字, 没有更高的金额行), 用来覆盖另一条分支:
+        #   退回 roi-top 0.6 只保留上部, 并切 3x6。**两条分支都要有用例。**
+        ("case7_noamount", 380, 820, "noloc"),
     ]
     paths = []
     for name, w, h, kind in specs:
@@ -69,14 +74,33 @@ def make_images(out: Path) -> list[Path]:
                 a[y] = (30 + y * 40 // h, 90 + y * 60 // h, 200 + y * 40 // h)
         else:
             a = np.full((h, w, 3), 248 if kind != "flat" else 255, np.uint8)
+        # ★ 每一行都画成**若干个分开的小块**, 不是一整条。
+        #   金额定位器要求"同一行里至少 2 个连通域", 画成一整条的话整行只有 1 个连通域,
+        #   定位必然失败 —— 第一版就是这样, 六张图定位率 0%, 于是**线路B 那段代码根本没被走到**,
+        #   两个 bug(pad 下限 8 / 定位成功切 2x2)在合成图上完全看不出来。
+        def row(y0: int, hgt: int, x0: int, x1: int, n: int, lo: int, hi: int) -> None:
+            gap = max(2, (x1 - x0) // (n * 4))
+            bw = max(3, ((x1 - x0) - gap * (n - 1)) // n)
+            for k in range(n):
+                bx = x0 + k * (bw + gap)
+                if bx + bw <= x1:
+                    a[y0:y0 + hgt, bx:bx + bw] = rng.integers(lo, hi, (1, 1, 3), dtype=np.uint8)
+
+        # ★ 蓝图要画**近白**的字(蓝底白字), 因为蓝图定位器找的是
+        #   `min(R,G,B) > 175 且 max-min < 45` 的连通域。画成深色字它一个都找不到 ——
+        #   而真实的蓝底转账页本来就是白字。
+        lo, hi = (232, 256) if kind == "blue" else (0, 70)
+        alo, ahi = (238, 256) if kind == "blue" else (0, 40)
         if kind != "flat":
             nrow = 22 if kind == "dense" else 9
-            for i in range(nrow):                   # 文字条: 高能量区
+            for i in range(nrow):                   # 正文小字: 每行 6~8 个小块
                 y0 = int(h * (0.08 + 0.82 * i / nrow))
-                x0, x1 = int(w * 0.10), int(w * (0.55 + 0.35 * ((i * 7) % 5) / 5))
-                a[y0:y0 + max(6, h // 90), x0:x1] = rng.integers(0, 70, (1, 1, 3), dtype=np.uint8)
-        a[int(h * 0.30):int(h * 0.36), int(w * 0.25):int(w * 0.75)] = \
-            rng.integers(0, 40, (1, 1, 3), dtype=np.uint8)      # 金额那一行
+                row(y0, max(6, h // 90), int(w * 0.10), int(w * (0.55 + 0.35 * ((i * 7) % 5) / 5)),
+                    6 + (i % 3), lo, hi)
+        # 金额那一行: **明显更高**的 6 个块, 让"取中位高度最大的一行"能选中它。
+        # noloc 那张**故意不画**这一行 -> 所有行高度一样, 没有"更高的一行" -> 定位失败。
+        if kind != "noloc":
+            row(int(h * 0.30), int(h * 0.055), int(w * 0.28), int(w * 0.72), 6, alo, ahi)
         p = out / f"{name}.png"
         Image.fromarray(a).save(p)
         paths.append(p)
@@ -89,7 +113,10 @@ def main() -> None:
     except Exception:
         pass
     ap = argparse.ArgumentParser(description="生成分阶段一致性测试向量")
-    ap.add_argument("--onnx", type=Path, required=True)
+    ap.add_argument("--onnx", type=Path, required=True, help="线路A 的 ONNX")
+    ap.add_argument("--b-onnx", type=Path, default=None,
+                    help="线路B 的 ONNX。给了才会出线路B 的台阶。**强烈建议给** —— "
+                         "线路B 正是刚查出两个 bug 的地方(pad 下限 8 / 定位成功切 2x2)")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--patch-size", type=int, default=32)
     ap.add_argument("--trainsize", type=int, default=256)
@@ -105,6 +132,16 @@ def main() -> None:
     import onnxruntime as ort                                   # noqa: E402
     from patch_select import (energy, select_patches,           # noqa: E402
                               select_positions, xorshift32)
+    from predict_tiled import _richest_patch, _tiles            # noqa: E402
+    from locate_blue import locate_amount_auto                  # noqa: E402
+    from ssp_decide import load_config                          # noqa: E402
+    _cfg = load_config(_HERE / "ssp_config.json")
+    _f = list(_cfg["line_b"].get("flags", []))
+    def _flag(n, d):
+        return _f[_f.index(n) + 1] if n in _f and _f.index(n) + 1 < len(_f) else d
+    b_pad, b_roi_top = float(_flag("--amount-pad", "0")), float(_flag("--roi-top", "0.6"))
+    sb = (ort.InferenceSession(str(args.b_onnx), providers=["CPUExecutionProvider"])
+          if args.b_onnx else None)
 
     npatch = (args.trainsize // args.patch_size) ** 2
     print(f"生成合成测试图 -> {args.out / 'images'}", flush=True)
@@ -143,7 +180,40 @@ def main() -> None:
             "stage4_patch_scores": [float(v) for v in scores],
             "stage5_ai_score": float(scores.mean()),
         })
-        print(f"  {p.name:24s} {w}x{h}  seed={seed}  ai_score={scores.mean():.6f}", flush=True)
+
+        # ---- 线路B 的台阶(6~11)。这一段必须和 predict_tiled 逐行一致 ----
+        if sb is not None:
+            loc, page = locate_amount_auto(rgb)
+            arr, cols, rows = rgb, 3, 6
+            crop = [0, 0, int(w), int(h)]
+            if loc:
+                bx0, by0, bx1, by1 = loc[0], loc[1], loc[2], loc[3]
+                pad = int(max(8, (by1 - by0) * b_pad))      # ★ amount_pad=0 -> pad=8
+                cx0, cy0 = max(0, bx0 - pad), max(0, by0 - pad)
+                cx1, cy1 = min(w, bx1 + pad), min(h, by1 + pad)
+                arr, crop, (cols, rows) = rgb[cy0:cy1, cx0:cx1], [cx0, cy0, cx1, cy1], (2, 2)
+            elif 0 < b_roi_top < 1.0:
+                cy1 = max(32, int(h * b_roi_top))
+                arr, crop = rgb[:cy1], [0, 0, int(w), cy1]
+            tiles_xy = _tiles(arr.shape[1], arr.shape[0], cols, rows, 0.15)
+            tp = [np.asarray(_richest_patch(arr[ty0:ty1, tx0:tx1], args.patch_size), np.uint8)
+                  for (tx0, ty0, tx1, ty1) in tiles_xy]
+            ts = sb.run(["ai_score"], {"patches": np.stack(tp)})[0]
+            cases[-1].update({
+                "stage6_page": page,
+                "stage7_locate_box": None if not loc else [int(v) for v in loc[:4]],
+                "stage8_crop_box_after_pad": [int(v) for v in crop],
+                "stage8_tile_grid": [cols, rows],
+                "stage9_tiles": [[int(v) for v in t] for t in tiles_xy],
+                "stage10_tile_scores": [float(v) for v in ts],
+                "stage11_tile_top3": float(np.sort(ts)[-3:].mean()),
+            })
+            print(f"  {p.name:24s} {w}x{h}  seed={seed}  A={scores.mean():.6f}  "
+                  f"B={np.sort(ts)[-3:].mean():.6f} ({page}, "
+                  f"{'定位' if loc else '未定位'}, {cols}x{rows}, {len(tiles_xy)} 块)", flush=True)
+        else:
+            print(f"  {p.name:24s} {w}x{h}  seed={seed}  A={scores.mean():.6f}  "
+                  f"(没给 --b-onnx, 线路B 台阶未生成)", flush=True)
 
     doc = {
         "_说明": "线路A 分阶段一致性向量。逐级核对: 哪一级先对不上, 问题就在那一级。"
@@ -161,7 +231,7 @@ def main() -> None:
         "tolerance": {"stage1_2_3": "必须完全相等(整数)", "stage4_5": 1e-4},
         "cases": cases,
     }
-    vp = args.out / "lineA_vectors.json"
+    vp = args.out / "vectors.json"
     vp.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"\n-> {vp}")
     print(f"-> 图 {len(imgs)} 张在 {args.out / 'images'}")

@@ -2,7 +2,7 @@
 
 > 这份文档只讲**怎么把一张图变成分数**。阈值怎么定、拒不拒, 见 `DEPLOY_SPEC.md`。
 >
-> **一致性向量**: `onnx/conformance/lineA_vectors.json` + `images/`。
+> **一致性向量**: `onnx/conformance/vectors.json` + `images/`。
 > 分五级台阶, **哪一级先对不上, 问题就在那一级** —— 先对台阶 1(纯整数, 不用图), 再往下。
 
 ## 0. ONNX 带走了什么, 你要实现什么
@@ -196,7 +196,9 @@ retouch|xingtu | meitu | jumd(c2pa|c2ma)|caBX | aigc_info|aigc_type|is_sticker_a
 
 ## 5. 一致性向量怎么用
 
-`lineA_vectors.json` 每个用例给五级:
+`vectors.json` 每个用例给**两条线各自的台阶**:
+
+**线路A**
 
 | 台阶 | 字段 | 容差 |
 |---|---|---|
@@ -205,6 +207,23 @@ retouch|xingtu | meitu | jumd(c2pa|c2ma)|caBX | aigc_info|aigc_type|is_sticker_a
 | 3 | `stage3_chosen_positions` / `_energies` | 完全相等 |
 | 4 | `stage4_patch_scores` | 1e-4 |
 | 5 | `stage5_ai_score` | 1e-4 |
+
+**线路B**(给了 `--b-onnx` 才有)
+
+| 台阶 | 字段 | 容差 |
+|---|---|---|
+| 6 | `stage6_page` (`white`/`blue`) | 完全相等 |
+| 7 | `stage7_locate_box` (定位框, 定不到为 `null`) | 完全相等 |
+| 8 | `stage8_crop_box_after_pad` / `stage8_tile_grid` | 完全相等 |
+| 9 | `stage9_tiles` (每块在裁剪图里的坐标) | 完全相等 |
+| 10 | `stage10_tile_scores` | 1e-4 |
+| 11 | `stage11_tile_top3` | 1e-4 |
+
+> ★ 台阶 8 尤其要对: `crop_box` 能验出 **pad 是不是 8**, `tile_grid` 能验出
+> **定位成功时是不是 2x2**。这两处正是我们自己写错过的地方 —— 光对最后的分数看不出来。
+>
+> 用例里 **case1~6 是"定位成功"分支(2x2, 4 块), case7 是"定位失败"分支(3x6, 18 块)** ——
+> **两条分支都要跑通**, 只对上一条不算数。
 
 前三级是**整数**, 差一个就是错。台阶 4/5 是浮点, 1e-4 的容差是因为**跨设备本身就有这个量级差异**
 (实测 CPU vs GPU 中位 2.8e-4, 858 张边界图只翻了 2 张)。
