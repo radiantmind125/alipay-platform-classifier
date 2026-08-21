@@ -161,7 +161,7 @@
 >
 > | 路径 | 是否碰 SSP 仓库 | 结论 |
 > |---|---|---|
-> | `ssp_score_one.py` (参照实现) | 否 —— 只有 stdlib + numpy + onnxruntime + `patch_select` | **不受影响** |
+> | `ssp_score_one.py` (参照实现) | 否 —— 但**依赖清单见下**, 原先这一格写错了 | **不受影响** |
 > | `patch_select.py` | 否 —— 只有 numpy(第 25~26 行的 `patch_list` 是**注释**, 不是调用) | **不受影响** |
 > | 导出的两个 ONNX | 否 —— 归一化和网络都固化在图里 | **不受影响** |
 > | .NET 侧 | 否 —— 按 `ONNX_PORT_SPEC.md` 自己实现选块 | **不受影响** |
@@ -178,6 +178,30 @@
 > 两个池子不是一回事: 88,645 = 重搭的 90,377 张排除后, 98,013 = 定阈值那次的池子。
 >
 > 剩余暴露面: **以后重新标定阈值时**如果走 torch 路, 那条改动还得在。
+>
+> ### ★ 2026-08-21 再修正: 参照实现的依赖清单, 原先写错了
+>
+> 原先这一格写的是"只有 stdlib + numpy + onnxruntime + `patch_select`"。**错。**
+> 那次只 grep 了 `ssp_score_one.py` **自己**的顶格 import, **没跟传递依赖**。
+>
+> 用 AST 跑传递闭包, 真实清单是 **7 个本地文件**:
+>
+> ```
+> ssp_score_one -> patch_select / locate_blue / ssp_decide / predict_tiled
+> predict_tiled -> engine_b_tamper / locate_blue
+> locate_blue   -> engine_b_tamper
+> ssp_decide    -> watermark_scan
+> ```
+>
+> 外部依赖: **numpy / opencv(cv2) / Pillow / onnxruntime**。少了 `cv2` 跑不起来。
+>
+> **但结论不变, 而且现在证据更硬**: `torch` 和 `networks`(SSP 仓库的模块)
+> **只出现在 `predict_tiled.main()` 里**(第 146~151 行), 那是它的命令行入口,
+> 参照实现从不调用。实测 `import ssp_score_one` 之后
+> `sys.modules` 里 **`torch` / `networks` / `torchvision` 全是 False** ——
+> 重活儿都写在函数里(`ssp_score_one.py:96-102`), import 时只加载 numpy。
+>
+> -> **交付参照实现要给 7 个 .py, 不是 1 个。只给 `ssp_score_one.py` 对方跑不起来。**
 
 真图最高分 **0.9996**。
 
