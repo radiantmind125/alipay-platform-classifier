@@ -23,7 +23,20 @@ r"""生成**分阶段**一致性测试向量, 给 .NET 那边逐级核对(只写
    10. 模型        每块的 ai_score
    11. 汇总        最高 3 个分数的平均 = tile_top3
 
+  判定层(`decision_cases`) —— ★ **不需要图**, 是一张真值表
+   12. 判定       (A分, B分, B定没定位到, 扩展名, 线路C铁证) -> 自动拒 / 人工复核 / 放行
+
 **哪一级先对不上, 问题就在那一级。**
+
+★ 为什么判定层要单独做一份**不用图**的:
+  那 7 张合成图**走不到**判定层的大多数分支 —— 它们没有 AIGC 元数据(线路C 永远空),
+  而且**全是 .png**(`.jpeg` 免自动拒永远不触发)。
+  所以只对到 stage11 的话, **判定规则本身一条都没被验过**。
+  真值表覆盖了几处最容易写错的:
+    - `>=` 是闭区间: 分数**等于**严格线就该拒
+    - 线路B **没定位到时不出信号**, 哪怕分数 0.9999 也一样
+    - **线路C 命中会短路**, `.jpeg` 免自动拒**管不到它**
+    - `.jpg` 不等于 `.jpeg`
 
 ★ 台阶 8 最要紧: `crop_box` 验得出 **pad 是不是 8**, `tile_grid` 验得出
   **定位成功时是不是 2x2** —— 这两处正是我们自己写错过的, 光对最后的分数看不出来。
@@ -146,7 +159,7 @@ def main() -> None:
                               select_positions, xorshift32)
     from predict_tiled import _richest_patch, _tiles            # noqa: E402
     from locate_blue import locate_amount_auto                  # noqa: E402
-    from ssp_decide import load_config                          # noqa: E402
+    from ssp_decide import load_config, decide                  # noqa: E402
     _cfg = load_config(_HERE / "ssp_config.json")
     _f = list(_cfg["line_b"].get("flags", []))
     def _flag(n, d):
@@ -263,14 +276,65 @@ def main() -> None:
         tol["stage6_7_8_9"] = "必须完全相等(版式字符串 + 整数坐标 + 网格)"
         tol["stage10_11"] = 1e-4
 
+    # ---- 台阶 12: 判定层的真值表(**不需要图**) ----
+    # 为什么必须单独做: 那 7 张合成图**走不到**判定层的大多数分支 ——
+    # 它们没有 AIGC 元数据(线路C 永远是空的), 而且**全是 .png**(免自动拒永远不触发)。
+    # 也就是说向量到 stage11 为止, **判定规则本身一条都没被验过**。
+    # 期望值一律**当场调用 decide() 算出来**, 不手写 —— 手写等于再引入一个错误来源。
+    la_, lb_ = _cfg["line_a"], _cfg["line_b"]
+    A_S, A_R, B_S, B_R = la_["strict"], la_["review"], lb_["strict"], lb_["review"]
+    _specs = [
+        ("两条线都很低",                        0.10, 0.10, True,  ".png",  []),
+        ("A 刚好压在严格线上",                  A_S,  0.10, True,  ".png",  []),
+        ("A 差一点点到严格线",                  A_S - 1e-4, 0.10, True, ".png", []),
+        ("A 刚好压在复核线上",                  A_R,  0.10, True,  ".png",  []),
+        ("A 差一点点到复核线",                  A_R - 1e-4, 0.10, True, ".png", []),
+        ("A 远高于严格线",                      0.95, 0.10, True,  ".png",  []),
+        ("B 定位到且高过严格线",                0.10, 0.99, True,  ".png",  []),
+        ("★ B 分极高但**没定位到**(应当无意见)", 0.10, 0.9999, False, ".png", []),
+        ("B 定位到, 落在复核与严格之间",         0.10, 0.90, True,  ".png",  []),
+        ("★ B 没定位到, 分落在复核区",          0.10, 0.90, False, ".png",  []),
+        ("A 和 B 都高过严格线",                 0.95, 0.99, True,  ".png",  []),
+        ("★ A 高过严格线, 但扩展名是 .jpeg",     0.95, 0.10, True,  ".jpeg", []),
+        ("★ B 高过严格线, 但扩展名是 .jpeg",     0.10, 0.99, True,  ".jpeg", []),
+        ("★ .jpg 不等于 .jpeg, 照常自动拒",      0.95, 0.10, True,  ".jpg",  []),
+        ("★ 线路C 铁证 + 两条线分数都很低",       0.10, 0.10, True,  ".png",  ["C2PA生成"]),
+        ("★★ 线路C 铁证 + .jpeg(免拒管不到线路C)", 0.10, 0.10, True, ".jpeg", ["C2PA生成"]),
+        ("线路C 多个铁证同时命中",               0.10, 0.10, True,  ".png",  ["C2PA生成", "TC260标记"]),
+        ("两条线都没有分数(打分失败)",           None, None, False, ".png",  []),
+        ("只有 A 有分, B 没分",                 0.95, None, False, ".png",  []),
+        ("只有 B 有分且定位到, A 没分",          None, 0.99, True,  ".png",  []),
+    ]
+    dcases = []
+    for _nm, _a, _b, _loc, _ext, _ch in _specs:
+        d_, why_ = decide((float(_a), True) if _a is not None else None,
+                          (float(_b), bool(_loc)) if _b is not None else None,
+                          _cfg, _ext, set(_ch) if _ch else None)
+        dcases.append({
+            "_名称": _nm,
+            "line_a_score": None if _a is None else round(float(_a), 6),
+            "line_b_score": None if _b is None else round(float(_b), 6),
+            "line_b_located": bool(_loc),
+            "ext": _ext,
+            "line_c_hard": sorted(_ch),
+            "expected_decision": d_,
+            "expected_reason": why_,
+        })
+    tol["stage12_decision"] = "字符串, 必须完全相等"
+
     doc = {
         "_说明": ("线路A + 线路B 分阶段一致性向量。逐级核对: 哪一级先对不上, 问题就在那一级。"
                   "图是程序生成的合成图, 不是真实收据。"
+                  "★ decision_cases 是判定层的真值表, 不需要图, 单独对。"
                   + ("" if sb is not None else
                      " ★本次没传 --b-onnx, 所以只有台阶 1~5, 线路B 那 6 级没有生成。")),
         "algorithm": algo,
+        "thresholds": {"line_a_strict": A_S, "line_a_review": A_R,
+                       "line_b_strict": B_S, "line_b_review": B_R,
+                       "never_auto_reject_ext": _cfg.get("never_auto_reject_ext", [])},
         "tolerance": tol,
         "cases": cases,
+        "decision_cases": dcases,
     }
     vp = args.out / "vectors.json"
     vp.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
