@@ -74,6 +74,9 @@ def main() -> None:
     ap.add_argument("--config", type=Path, default=None)
     ap.add_argument("--meta-cap", type=int, default=400_000, help="线路C 只读文件头这么多字节")
     ap.add_argument("--pretty", action="store_true", help="多行缩进(默认每张一行, 方便管道)")
+    ap.add_argument("--quiet", action="store_true",
+                    help="**只出汇总, 不打每张的 JSON**。核对一批图时用这个 —— "
+                         "省得为了看一行汇总去跟 shell 的重定向较劲")
     ap.add_argument("--no-summary", action="store_true",
                     help="不要末尾那份汇总。默认**会**打一份到 stderr —— "
                          "stdout 保持干净的 NDJSON, 重定向到文件时汇总照样看得见")
@@ -204,7 +207,10 @@ def main() -> None:
         stat["located"] += int(bool(out.get("line_b", {}).get("located")))
         if out.get("generator"):
             stat["gen"][out["generator"]] += 1
-        print(json.dumps(out, ensure_ascii=False, indent=2 if args.pretty else None), flush=True)
+        if not args.quiet:
+            print(json.dumps(out, ensure_ascii=False, indent=2 if args.pretty else None), flush=True)
+        elif stat["n"] % 100 == 0:
+            print(f"  已算 {stat['n']}/{len(imgs)}...", file=sys.stderr, flush=True)
 
     if not args.no_summary and stat["n"]:
         n = stat["n"]
