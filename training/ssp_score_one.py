@@ -74,6 +74,9 @@ def main() -> None:
     ap.add_argument("--config", type=Path, default=None)
     ap.add_argument("--meta-cap", type=int, default=400_000, help="线路C 只读文件头这么多字节")
     ap.add_argument("--pretty", action="store_true", help="多行缩进(默认每张一行, 方便管道)")
+    ap.add_argument("--no-summary", action="store_true",
+                    help="不要末尾那份汇总。默认**会**打一份到 stderr —— "
+                         "stdout 保持干净的 NDJSON, 重定向到文件时汇总照样看得见")
     args = ap.parse_args()
 
     import importlib.util
@@ -111,6 +114,12 @@ def main() -> None:
             else [p for p in sorted(args.input.rglob("*")) if p.suffix.lower() in _EXTS])
     if not imgs:
         raise SystemExit(f"{args.input} 底下没找到图")
+
+    # ★ 汇总自己算, 不指望调用方去解析输出文件。
+    #   起因: 用 PowerShell 的 `>` 存下来再解析, 结果 5.1 的 `>` 默认写 **UTF-16 LE**,
+    #   Python 按 UTF-8 读第一个字节 0xff 就炸。绕开这类坑最省事的办法是**不产生中间文件**。
+    from collections import Counter
+    stat = {"n": 0, "located": 0, "err": 0, "dec": Counter(), "gen": Counter()}
 
     for p in imgs:
         out: dict = {"image": p.name}
@@ -169,7 +178,28 @@ def main() -> None:
             # ★ 打不开/打分失败 -> **人工复核**, 绝不放行。这是踩过的坑: 失败被当成 0 分放行了。
             out["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
             out["decision"], out["reason"] = "人工复核", "打分失败, 无法判定"
+            stat["err"] += 1
+        stat["n"] += 1
+        stat["dec"][out["decision"]] += 1
+        stat["located"] += int(bool(out.get("line_b", {}).get("located")))
+        if out.get("generator"):
+            stat["gen"][out["generator"]] += 1
         print(json.dumps(out, ensure_ascii=False, indent=2 if args.pretty else None), flush=True)
+
+    if not args.no_summary and stat["n"]:
+        n = stat["n"]
+        w = sys.stderr                                  # ★ 走 stderr, stdout 留给 NDJSON
+        print(f"\n{'=' * 46}", file=w)
+        print(f"共 {n} 张 | 金额定位成功 {stat['located']} = **{stat['located'] / n * 100:.1f}%**"
+              f"  (标定池是 98.0%, 差很多就要查定位器)", file=w)
+        for k in ("自动拒", "人工复核", "放行"):
+            c = stat["dec"].get(k, 0)
+            print(f"  {k:6s}{c:>7,d}{c / n * 100:>8.2f}%{c / n * 1e4:>9.1f}/万", file=w)
+        if stat["err"]:
+            print(f"  !!!! 打分失败 {stat['err']} 张 —— 已按'无法判定'进人工复核, 没有放行", file=w)
+        if stat["gen"]:
+            print(f"  元数据认出厂商: {dict(stat['gen'])}", file=w)
+        print("★ 这份汇总走 stderr, 所以 stdout 重定向成文件时它照样显示在屏幕上。", file=w)
 
 
 if __name__ == "__main__":
