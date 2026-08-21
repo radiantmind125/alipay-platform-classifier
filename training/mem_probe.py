@@ -55,6 +55,19 @@ class _MEMCOUNTERS(ctypes.Structure):
     ]
 
 
+# ★ 必须显式声明 argtypes/restype。不声明的话 64 位下 HANDLE 会被当成 32 位整数传,
+#   调用直接失败, 而 GetProcessMemoryInfo 失败时**不会抛异常**, 只是返回 0 并把结构体留成全 0 ——
+#   于是每一项内存都打印成 0.0 MB。第一版就是这么错的, 而且错得很安静。
+_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_psapi = ctypes.WinDLL("psapi", use_last_error=True)
+_k32.GetCurrentProcess.restype = wintypes.HANDLE
+_k32.GetCurrentProcess.argtypes = []
+_psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+_psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE,
+                                        ctypes.POINTER(_MEMCOUNTERS),
+                                        wintypes.DWORD]
+
+
 def _mem() -> tuple[float, float, float]:
     """返回 (工作集 MB, 私有字节 MB, 峰值工作集 MB)。
 
@@ -63,8 +76,11 @@ def _mem() -> tuple[float, float, float]:
     """
     c = _MEMCOUNTERS()
     c.cb = ctypes.sizeof(c)
-    ctypes.windll.psapi.GetProcessMemoryInfo(
-        ctypes.windll.kernel32.GetCurrentProcess(), ctypes.byref(c), c.cb)
+    ok = _psapi.GetProcessMemoryInfo(_k32.GetCurrentProcess(), ctypes.byref(c), c.cb)
+    if not ok:                       # ★ 宁可当场炸, 也不要安静地报一堆 0.0
+        raise OSError(f"GetProcessMemoryInfo 失败, GetLastError={ctypes.get_last_error()}")
+    if c.WorkingSetSize == 0:
+        raise OSError("GetProcessMemoryInfo 回来全是 0 —— 读数不可信, 不要拿这个结果去估容量")
     return (c.WorkingSetSize / 1048576.0,
             c.PrivateUsage / 1048576.0,
             c.PeakWorkingSetSize / 1048576.0)
@@ -156,19 +172,43 @@ def main() -> None:
               for (x0, y0, x1, y1) in tiles]
         sb.run(["ai_score"], {"patches": np.stack(tp)})
 
-    t0 = time.perf_counter()
-    score_one(imgs[0])
-    first = time.perf_counter() - t0
+    first = None
+    for k, p0 in enumerate(imgs[:5]):     # 头几张万一有坏图, 别让整轮直接死掉
+        t0 = time.perf_counter()
+        try:
+            score_one(p0)
+            first = time.perf_counter() - t0
+            imgs = imgs[k:]
+            break
+        except Exception as e:
+            print(f"  !! 第 {k + 1} 张 {p0.name} 失败: {type(e).__name__}: {e}", flush=True)
+    if first is None:
+        raise SystemExit("!! 头 5 张全失败 —— 先检查 --input 目录和两个 onnx 路径对不对")
     mark("3 跑完第 1 张")
 
-    times = []
-    for p in imgs[1:]:
+    # ★ 一定要有进度输出。第一版跑 200 张中间一声不吭, 好几分钟没动静,
+    #   看着就像卡死了 —— 实际只是在干活。
+    times: list[float] = []
+    bad = 0
+    rest = imgs[1:]
+    t_loop = time.perf_counter()
+    for i, p in enumerate(rest, 1):
         t = time.perf_counter()
         try:
             score_one(p)
-        except Exception:
-            continue                      # 坏图不算进耗时, 内存照样看得到
-        times.append(time.perf_counter() - t)
+            times.append(time.perf_counter() - t)
+        except Exception as e:
+            bad += 1
+            if bad <= 3:              # 前三张坏图**要说清楚**, 不要一路静默 continue
+                print(f"    !! 第 {i} 张 {p.name} 出错: {type(e).__name__}: {e}", flush=True)
+        if i % 20 == 0 or i == len(rest):
+            el = time.perf_counter() - t_loop
+            eta = el / i * (len(rest) - i)
+            cur = _mem()[1]
+            print(f"    进度 {i}/{len(rest)}   已用 {el:5.1f} 秒   预计还要 {eta:5.1f} 秒"
+                  f"   私有 {cur:7.1f} MB", flush=True)
+    if bad:
+        print(f"    (共 {bad} 张读不出来或打分失败, 已跳过, 不计入耗时)", flush=True)
     mark(f"4 跑完 {len(times) + 1} 张(稳态)")
 
     ws, pv, pk = _mem()
