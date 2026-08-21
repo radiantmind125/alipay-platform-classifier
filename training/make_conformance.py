@@ -347,6 +347,10 @@ def main() -> None:
         print("台阶 10/11 是浮点, 同样 1e-4。★ 台阶 8 最要紧: 验 pad 是不是 8, 网格是不是 2x2。")
     else:
         print("★ 这次没传 --b-onnx, 只出了台阶 1~5。要覆盖线路B 必须带上 --b-onnx 重跑。")
+    # ★ 判定层是**不用图**的, 所以无论传没传 --b-onnx 都会生成 —— 但之前不打印,
+    #   操作的人得再跑一条 python -c 才知道有没有出来。这里直接报出来。
+    print(f"台阶 12 判定层真值表 {len(dcases)} 条(不用图), 字段 decision_cases, 判定字符串必须完全相等。")
+    print(f"tolerance 一共 {len(tol)} 项: {' '.join(sorted(tol))}")
 
 
 if __name__ == "__main__":
