@@ -120,6 +120,17 @@ def main() -> None:
     ap.add_argument("--trainsize", type=int, default=256)
     args = ap.parse_args()
 
+    # ★★ 这两个开关**不能同时用来量内存**: --verify-batch 每张图会额外**整批**跑一次,
+    #   于是 onnxruntime 的激活内存池按**整批**的峰值开出来, 分批省不省内存就量不出来了。
+    #   (2026-08-24 就这么白跑了一轮: --a-batch 4 --verify-batch 量到 802 MB,
+    #    和不分批的 800 MB 一模一样 —— 不是"分批没用", 是这一轮**根本没在量分批**。)
+    if args.verify_batch:
+        print("\n" + "!" * 72)
+        print("!! --verify-batch 开着: 每张图会**额外整批跑一次**来核对分数。")
+        print("!! 因此**本轮的内存数字不能用来判断分批省不省内存** —— 内存池按整批开的。")
+        print("!! 正确用法: 先用小 --n 开着它**只验分数**, 验过之后**关掉**再量内存。")
+        print("!" * 72)
+
     print(f"\n=== 阶段内存 (threads={args.threads}) ===", flush=True)
     mark("0 起步(只有标准库)")
 
