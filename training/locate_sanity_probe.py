@@ -172,6 +172,21 @@ def main() -> None:
     if not A or not B:
         raise SystemExit("!! 有一组是空的, 没法比")
 
+    # ★ 版式构成: 高分组里蓝图是不是超配? 若是, 说明问题在"蓝图真图本身分就高",
+    #   而不是定位框有毛病 —— 那是另一条完全不同的路。
+    def page_mix(v, label):
+        b = sum(1 for x in v if x["_page"] == "blue")
+        w = len(v) - b
+        print(f"  {label:<8} 蓝 {b:>3} ({100.0*b/len(v):>5.1f}%)   白 {w:>3} ({100.0*w/len(v):>5.1f}%)")
+    print("\n版式构成:")
+    page_mix(A, "高分组")
+    page_mix(B, "对照组")
+    _ab = sum(1 for x in A if x["_page"] == "blue") / max(1, len(A))
+    _bb = sum(1 for x in B if x["_page"] == "blue") / max(1, len(B))
+    if _bb > 0:
+        print(f"  -> 高分组里蓝图占比是对照组的 **{_ab/_bb:.2f} 倍**"
+              + ("  ★ 明显超配, 值得单独查蓝图" if _ab / _bb > 1.5 else ""))
+
     KEYS = ["n_glyph", "aspect_med", "h_cv", "fill", "rel_h", "rel_w", "rel_y"]
     print("\n" + "=" * 92)
     print(f"{'特征':<12}{'高分组 p10':>11}{'中位':>9}{'p90':>9}   |{'对照 p10':>10}{'中位':>9}{'p90':>9}")
