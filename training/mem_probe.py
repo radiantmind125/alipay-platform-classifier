@@ -111,6 +111,11 @@ def main() -> None:
                          "传 0 = 不设置, 也就是现在代码里的默认行为(按核数开)")
     # ★ 这两个必须和 patch_select.py 的 PATCH_SIZE / TRAINSIZE 一致(32 / 256)。
     #   写成 128 的话每轮候选块从 64 掉到 16, **不会报错**, 只会让耗时看着比真实值好四倍。
+    ap.add_argument("--a-batch", type=int, default=0,
+                    help="线路A 一次喂几个块(0 = 16 个一次喂完, 也就是现在的做法)。"
+                         "**内存紧的时候把它调小** —— 激活内存池大致按批大小等比例降")
+    ap.add_argument("--verify-batch", action="store_true",
+                    help="每张图额外整批跑一次, 核对分批不改分数(慢一倍, 但只需验一次)")
     ap.add_argument("--patch-size", type=int, default=32)
     ap.add_argument("--trainsize", type=int, default=256)
     args = ap.parse_args()
@@ -156,7 +161,22 @@ def main() -> None:
         # 线路A
         pa, _ = select_patches(rgb, seed, patch_size=args.patch_size,
                                num_patch=npatch, repeat=16)
-        sa.run(["ai_score"], {"patches": np.stack([np.asarray(x, np.uint8) for x in pa])})
+        # ★ 分批喂。整块内存里约 800 MB 是 onnxruntime 的**激活内存池**,
+        #   而激活量 ≈ 批大小 x 每块激活(16 个块各自放大到 256x256)。
+        #   批小一点内存应当等比例降, 代价是多几次 session.run 的调用开销。
+        #   ★ 分数不受影响: 每个块是**独立**打分再平均, 分批只是实现细节 ——
+        #     `--verify-batch` 会当场核对这一点, 因为它一旦不成立, 一致性向量就作废了。
+        arr = np.stack([np.asarray(x, np.uint8) for x in pa])
+        bs = args.a_batch if args.a_batch > 0 else len(arr)
+        outs = [sa.run(["ai_score"], {"patches": arr[i:i + bs]})[0]
+                for i in range(0, len(arr), bs)]
+        _sc = np.concatenate(outs)
+        if args.verify_batch:
+            ref = sa.run(["ai_score"], {"patches": arr})[0]
+            mx = float(np.abs(_sc - ref).max())
+            if mx > 1e-6:
+                raise SystemExit(f"!! 分批({bs})与整批的分数不一致, 最大差 {mx:.3e} —— "
+                                 f"**分批会改分数, 一致性向量会作废, 这条路不能走**")
         # 线路B
         loc, _page = locate_amount_auto(rgb)
         arr, cols, rows = rgb, 3, 6
