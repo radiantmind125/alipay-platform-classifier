@@ -221,14 +221,44 @@ def main() -> None:
     print(f"  相机EXIF(翻拍)  n={len(exif):>6}   {per_wan(exif, A_S):>7.1f}/万   <- 这些拒掉是**对的**")
     print(f"  平板/异形       n={len(fmt):>6}   {per_wan(fmt, A_S):>7.1f}/万   <- 这些**可能是真误杀**")
 
-    if clean and fmt:
-        print("\n★ 若经理确认平板/异形也算正常进件, 按它在进件里的占比折算, 自动拒率会变成:")
-        base = per_wan(clean, A_S)
-        for p in (0.005, 0.01, 0.02, 0.03, 0.05):
-            blended = (1 - p) * base + p * per_wan(fmt, A_S)
-            print(f"     占 {p*100:>4.1f}%  ->  {blended:>6.2f}/万   (现在对外报的是 {base:.2f}/万)")
-        print("\n  注: 相机EXIF 那批**不进这个折算** —— 拒掉翻拍是功能正确, 不该计进误杀分母。")
-        print("      但经理那边量真实误杀率时, **必须把翻拍单独标出来**, 否则会把正确拒掉的也算成误杀。")
+    # ★★ 这里**只能报比值, 不能报绝对值**。
+    #   本脚本吃的是单个 summary.csv, 与对外那个 2.7/万 **不是一回事**, 至少差三处:
+    #     (1) 只有线路A, 没有并集规则(线路A 或 线路B)
+    #     (2) 可能只是白图那半个池子, 不是验收池全量
+    #     (3) **没有套排除名单** —— 确认过的假图、水印命中、造样本用过的源图都还在里面
+    #   所以下面刻意不拿绝对值和对外口径比, 只给**倍数**和**占比**, 那两个对上述偏差不敏感。
+    base = per_wan(clean, A_S)
+    if clean and base > 0:
+        print("\n★ 相对倍数(这才是能带走的数, 绝对值不能和对外的 2.7/万 比 —— 见下方注):")
+        if exif:
+            print(f"     翻拍     是干净截图的 {per_wan(exif, A_S)/base:>6.1f} 倍")
+        if fmt:
+            print(f"     平板/异形 是干净截图的 {per_wan(fmt, A_S)/base:>6.1f} 倍")
+
+    hard_clean = sum(1 for s in clean if s >= A_S)
+    hard_exif = sum(1 for s in exif if s >= A_S)
+    hard_fmt = sum(1 for s in fmt if s >= A_S)
+    hard_all = hard_clean + hard_exif + hard_fmt
+    if hard_all:
+        n_all = len(clean) + len(exif) + len(fmt)
+        print(f"\n★★ 自动拒总共 {hard_all} 张, 来源构成:")
+        print(f"     干净截图   {hard_clean:>5} 张 = {100.0*hard_clean/hard_all:>5.1f}%"
+              f"   (占图量 {100.0*len(clean)/n_all:.2f}%)")
+        print(f"     翻拍       {hard_exif:>5} 张 = {100.0*hard_exif/hard_all:>5.1f}%"
+              f"   (占图量 {100.0*len(exif)/n_all:.2f}%)  <- **拒掉是对的, 不该算误杀**")
+        print(f"     平板/异形  {hard_fmt:>5} 张 = {100.0*hard_fmt/hard_all:>5.1f}%"
+              f"   (占图量 {100.0*len(fmt)/n_all:.2f}%)  <- **要经理定**")
+        print(f"\n  -> **占图量 {100.0*(len(exif)+len(fmt))/n_all:.1f}% 的图, 贡献了 "
+              f"{100.0*(hard_exif+hard_fmt)/hard_all:.0f}% 的自动拒。**")
+        print("     经理那边量真实误杀率时**必须把翻拍单独标出来**, 否则会把正确拒掉的算成误杀。")
+
+    print("\n" + "!" * 60)
+    print("注意: 上面的**绝对值不能拿去和对外报的 2.7/万 比**, 至少差三处:")
+    print("  1. 这里只算线路A, 线上是**线路A 或 线路B 的并集**")
+    print("  2. 这份 CSV 可能只是**半个池子**(白图), 不是验收池全量")
+    print("  3. **没套排除名单** —— 确认过的假图 / 水印命中 / 造样本源图都还在里面")
+    print("要出可对外的绝对值, 得在**验收池 + 排除名单 + 并集规则**下重跑。")
+    print("!" * 60)
 
 
 if __name__ == "__main__":
