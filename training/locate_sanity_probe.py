@@ -91,9 +91,15 @@ def main() -> None:
         pass
 
     ap = argparse.ArgumentParser(description="定位框合理性特征分布(只测不改)")
-    ap.add_argument("--csv", type=Path, required=True, help="线路A summary.csv(取分数分组)")
+    # ★★ 分组要用**线路B 的分数**, 不是线路A。
+    #   短板 3 说的是"定位到垃圾之后**线路B** 给它打 0.99", 而线路A 压根不用定位器
+    #   (它从整图随机取 16 块)。第一版拿 final_ai_score 分组, 等于没测到要测的东西。
+    #   所以默认列改成 tile_top3, 并且请传**线路B 的 summary.csv**。
+    ap.add_argument("--csv", type=Path, required=True,
+                    help="**线路B** summary.csv(_lineB 那份) —— 按 tile_top3 分组")
     ap.add_argument("--roots", type=Path, nargs="+", required=True)
-    ap.add_argument("--a-col", default="final_ai_score")
+    ap.add_argument("--a-col", default="tile_top3",
+                    help="分组用的分数列。线路B 用 tile_top3; 要看线路A 才用 final_ai_score")
     ap.add_argument("--top", type=int, default=60, help="看分数最高的前 N 张(疑似误触发)")
     ap.add_argument("--sample", type=int, default=400, help="随机抽多少张当对照")
     ap.add_argument("--seed", type=int, default=20260824)
@@ -177,9 +183,9 @@ def main() -> None:
               f"{_q(b,0.1):>10.3f}{_q(b,0.5):>9.3f}{_q(b,0.9):>9.3f}")
     print("=" * 92)
 
-    # 分得开吗: 对每个特征, 看用"对照组的 p2/p98"当界能筛掉多少高分图
-    print("\n若拿**对照组的 p2~p98** 当合理区间, 各特征能筛掉多少高分图(越高越有分辨力):")
-    print("  (对照组本身会被误伤约 4%, 那是这个界的定义决定的)")
+    # ---- (a) 分位数带 ----
+    print("\n[a] 拿**对照组 p2~p98** 当区间, 各特征能筛掉多少高分图:")
+    print("    (对照组按定义就会被误伤约 4% —— 所以这一档天花板很低)")
     for k in KEYS:
         b = [x[k] for x in B]
         lo, hi = _q(b, 0.02), _q(b, 0.98)
@@ -187,6 +193,38 @@ def main() -> None:
         killB = sum(1 for x in B if not (lo <= x[k] <= hi))
         print(f"  {k:<12} 区间 [{lo:>7.3f}, {hi:>7.3f}]   筛掉高分 {killA:>3}/{len(A)}"
               f" = {100.0*killA/len(A):>5.1f}%   误伤对照 {100.0*killB/len(B):>4.1f}%")
+
+    # ---- (b) 物理硬约束: 不是"罕见", 是"不可能" ----
+    # 分位数带的问题在于, 它是从分布里推出来的, 而离群值本身几乎不改变分布 ——
+    # 所以最离谱的那几张(fill=1.98 / n=86 / asp=2.53)反而卡不掉。
+    # 硬约束不看分布, 只看这一行**能不能是一行金额**:
+    HARD = [
+        ("fill>1.05",      lambda x: x["fill"] > 1.05,
+         "块宽之和超过框宽 —— 同一行不重叠的块**不可能**做到"),
+        ("aspect>1.4",     lambda x: x["aspect_med"] > 1.4,
+         "块比高还宽 —— 数字是竖长的"),
+        ("aspect<0.15",    lambda x: x["aspect_med"] < 0.15,
+         "块细成一条线 —— 是边框/分隔线, 不是字"),
+        ("n_glyph>20",     lambda x: x["n_glyph"] > 20,
+         "一行 20 多个块 —— 那是整段文字或噪点, 不是金额"),
+        ("rel_h>0.10",     lambda x: x["rel_h"] > 0.10,
+         "框高超过页高 10% —— 一行字不会这么高"),
+        ("h_cv>0.45",      lambda x: x["h_cv"] > 0.45,
+         "同一行里块高差得离谱 —— 不是一行字"),
+    ]
+    print("\n[b] **物理硬约束**(不是'罕见'而是'不可能', 所以误伤应当接近 0):")
+    for nm, fn, why in HARD:
+        ka = sum(1 for x in A if fn(x))
+        kb = sum(1 for x in B if fn(x))
+        print(f"  {nm:<14} 筛掉高分 {ka:>3}/{len(A)} = {100.0*ka/len(A):>5.1f}%"
+              f"   误伤对照 {kb:>3}/{len(B)} = {100.0*kb/len(B):>4.1f}%   {why}")
+
+    anyA = sum(1 for x in A if any(fn(x) for _, fn, _ in HARD))
+    anyB = sum(1 for x in B if any(fn(x) for _, fn, _ in HARD))
+    print(f"\n  ** 任一条命中 **  筛掉高分 {anyA}/{len(A)} = {100.0*anyA/len(A):.1f}%"
+          f"   误伤对照 {anyB}/{len(B)} = {100.0*anyB/len(B):.1f}%")
+    print("  -> 误伤低而筛出率可观, 这组硬约束就值得做成校验;")
+    print("     误伤也高的话, 说明真实收据里本来就有这些形态, 阈值要放宽。")
 
     print("\n高分组里最可疑的 12 张(按与对照中位的偏离排):")
     med = {k: _q([x[k] for x in B], 0.5) for k in KEYS}
