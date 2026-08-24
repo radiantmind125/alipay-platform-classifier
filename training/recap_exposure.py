@@ -124,6 +124,7 @@ def main() -> None:
             if not name_col or args.a_col not in cols:
                 print(f"  !! {c.name} 缺列。表头 = {cols}", flush=True)
                 continue
+            print(f"  {c.name}: 文件名列 = {name_col!r}, 分数列 = {args.a_col!r}", flush=True)
             for r in rd:
                 try:
                     rows.append((r[name_col], float(r[args.a_col])))
@@ -136,13 +137,24 @@ def main() -> None:
         raise SystemExit("!! 一行分数都没读到, 检查 --a-col 和 --name-col")
 
     # ---- 逐张分类 ----
+    # ★ CSV 里的"文件名"可能是**整条路径**, 也可能大小写不一致 —— 两边都归一化再对。
+    #   第一版直接拿原字符串查索引, 结果 57,999 行一条都没配上, 而且**没说为什么**。
+    idx_ci = {k.lower(): v for k, v in idx.items()}
+
+    def lookup(nm: str):
+        base = os.path.basename(nm.strip().replace("\\", "/"))
+        return idx.get(base) or idx_ci.get(base.lower()) or idx.get(nm) or idx_ci.get(nm.lower())
+
     print(f"\n逐张读文件头分类 {len(rows)} 张(不解码像素)...", flush=True)
     buckets: dict[str, list[float]] = {}
     missing = 0
+    unmatched: list[str] = []
     for i, (nm, sc) in enumerate(rows, 1):
-        p = idx.get(nm)
+        p = lookup(nm)
         if not p:
             missing += 1
+            if len(unmatched) < 5:
+                unmatched.append(nm)
             continue
         ok, why = classify(p)
         if ok is None:
@@ -159,7 +171,19 @@ def main() -> None:
 
     total = sum(len(v) for v in buckets.values())
     if not total:
-        raise SystemExit("!! 一张都没配上, 检查 --roots")
+        # ★ 光说"没配上"没用 —— 把两边各拿几个出来摆着, 一眼就能看出是路径问题还是目录给错了。
+        print("\n!! 一张都没配上。两边各抽几个看看:", flush=True)
+        print("\n  CSV 里的文件名长这样:")
+        for s in unmatched:
+            print(f"    {s!r}")
+        print("\n  --roots 索引到的文件名长这样:")
+        for s in list(idx)[:5]:
+            print(f"    {s!r}")
+        print("\n  常见原因:")
+        print("    1. CSV 里存的是**整条路径** -> 已自动取 basename 再对, 若仍不中则是原因 2")
+        print("    2. **图不在 --roots 给的目录里** —— 这份 summary.csv 当初是对哪个目录跑的?")
+        print("       把那个目录加进 --roots 再来一次。")
+        raise SystemExit(1)
 
     # ---- 报表 ----
     # 拒掉算不算误杀: 只看是不是**纯**相机 EXIF 那一类
