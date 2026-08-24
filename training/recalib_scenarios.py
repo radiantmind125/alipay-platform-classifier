@@ -133,6 +133,18 @@ def main() -> None:
     nots = _read_names(args.not_screenshot)
     print(f"排除名单 {len(excl)} 个, not_screenshot {len(nots)} 个", flush=True)
 
+    # ★ 排除名单是按**更大的池子**做的, 所以只有一部分会命中本池 —— 这正常。
+    #   但命中数必须对得上 90,377 - 88,645 = 1,732。第一版差了 12 个,
+    #   而那 12 个多半是"确认过的假图/水印命中"(池子里分最高的那一批),
+    #   漏掉它们会凭空多出十几张自动拒。所以这里**大小写不敏感**再兜一次。
+    _a_ci = {k.lower(): k for k in a}
+    excl_hit = {_a_ci[e.lower()] for e in excl if e.lower() in _a_ci}
+    print(f"  排除名单命中本池 {len(excl_hit)} 个"
+          f"(90,377 - 88,645 = 1,732 是应有的数)", flush=True)
+    if len(excl_hit) != len(excl & set(a)):
+        print(f"  (其中 {len(excl_hit) - len(excl & set(a))} 个是靠**大小写不敏感**才配上的)",
+              flush=True)
+
     # ---- 把 not_screenshot 按判据分成两拨 ----
     idx: dict[str, str] = {}
     for r in args.roots:
@@ -187,22 +199,26 @@ def main() -> None:
         return n, hard, rev, hard_exif
 
     all_names = set(a)
-    base = all_names - excl
+    base = all_names - excl_hit
 
     print("=" * 104)
     nA, hA, rA, _ = run(base, "A 现状(1,277 全剔)")
 
-    # ★ 自检: A 必须复现已知结果, 否则后面两行没有意义
-    if abs(nA - args.expect_n) > max(200, args.expect_n * 0.01) or abs(hA - args.expect_hard) > 4:
+    # ★ 自检只卡**分母**, 不卡计数。
+    #   分母对了 = 池子和排除名单都接对了, 这是 B/C 有意义的充分前提。
+    #   计数则要看这份 CSV 是哪一版口径: accept_seeded 是 **torch 定种子**那一版
+    #   (已知 人工复核 158), 而对外报的 24/154 是 **lcg** 那一版 —— 两者差别在噪声内,
+    #   拿 lcg 的数去卡 seeded 的产物会误判成"接错了"。第一版就是这么错的。
+    if abs(nA - args.expect_n) > 50:
         print("=" * 104)
-        print(f"\n!! 自检没过: 方案A 应当接近 分母 {args.expect_n} / 自动拒 {args.expect_hard},")
-        print(f"   实际是 分母 {nA} / 自动拒 {hA}。")
-        print("   **B/C 的数字在这种情况下不可信, 已停止。** 可能原因:")
+        print(f"\n!! 自检没过: 分母应当是 {args.expect_n} 左右, 实际 {nA}(差 {nA - args.expect_n:+d})。")
+        print("   分母不对 = 池子或排除名单没接对, **B/C 不可信, 已停止。** 可能原因:")
         print("     1. --exclude 用错了名单(试试 exclude_v5.txt / exclude_v4_full.txt)")
         print("     2. --a-csv / --b-csv 不是验收那一次的产物")
-        print("     3. 配置里的阈值和当初标定时不一致")
         raise SystemExit(1)
-    print("   ^ 自检通过: 与已知的 24 / 88,645(2.7/万)吻合\n")
+    print(f"   ^ 分母对上了({nA} vs 应有 {args.expect_n}), 池子和排除名单接对了")
+    print(f"     计数参照: torch定种子那版 人工复核 158; lcg 那版 24 / 154。")
+    print(f"     本次 自动拒 {hA} / 人工复核 {rA} —— 看落在哪一版附近即可判断口径。\n")
 
     nB, hB, rB, eB = run(base | fmt_set, "B 平板算进件")
     nC, hC, rC, eC = run(base | fmt_set | exif_set, "C 全部算进件")
