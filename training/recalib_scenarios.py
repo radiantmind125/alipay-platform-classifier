@@ -57,6 +57,14 @@ def _read_names(p: Path) -> set[str]:
     return {_norm(ln) for ln in p.read_text(encoding="utf-8-sig").splitlines() if ln.strip()}
 
 
+def _is_float(v) -> bool:
+    try:
+        float(v)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def _truthy(v: str) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "y", "t", "是")
 
@@ -144,6 +152,28 @@ def main() -> None:
     if len(excl_hit) != len(excl & set(a)):
         print(f"  (其中 {len(excl_hit) - len(excl & set(a))} 个是靠**大小写不敏感**才配上的)",
               flush=True)
+
+    # ★★ 少配的那几个要当回事: 短板 0b 说**阈值就是真图里第 k+1 高分, 污染物顶着阈值**。
+    #   88,645 张按 1/5000 预算, k 大约是 17 —— 也就是说**第 18 高分定线**。
+    #   若有确认过的假图/水印命中漏在池子里且分数很高, **它就是在替我们定阈值**。
+    #   所以这里不只报个数, 要把漏掉的名字和它们在池子里的分数排名打出来。
+    miss_named = sorted(e for e in excl if e.lower() not in _a_ci)
+    if miss_named:
+        print(f"\n  ⚠ 排除名单里有 {len(miss_named)} 个**没在本池找到**(名单是按更大的池子做的, 多数正常):")
+        for e in miss_named[:8]:
+            print(f"      {e}")
+        if len(miss_named) > 8:
+            print(f"      ... 另 {len(miss_named) - 8} 个")
+
+    # 反过来更要紧: 池子里**分最高**的那些, 有没有本该被排除却留下的?
+    top = sorted(((float(v[0]), k) for k, v in a.items()
+                  if _is_float(v[0])), reverse=True)[:25]
+    leaked = [(s, k) for s, k in top if k in excl_hit]
+    print(f"\n  池子里分最高的 25 张中, 属于排除名单的有 {len(leaked)} 张"
+          f"(这些**已经**被剔掉了, 只是提示污染确实顶在高分区)")
+    if leaked:
+        for s, k in leaked[:5]:
+            print(f"      {s:.4f}  {k}")
 
     # ---- 把 not_screenshot 按判据分成两拨 ----
     idx: dict[str, str] = {}
