@@ -119,8 +119,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="挑出负号被拉长/加粗的账单详情图(自标定, 不需要假图)")
     ap.add_argument("--input", type=Path, required=True)
     ap.add_argument("--n", type=int, default=0, help="随机抽多少张; 0 = 全扫")
-    ap.add_argument("--thr", type=float, default=0.90,
-                    help="宽比绝对阈值, 默认 0.90 —— **落在实测的分布空隙里**, 见下")
+    ap.add_argument("--thr", type=float, default=0.78,
+                    help="宽比绝对阈值, 默认 **0.78** —— 按'加 6 像素'这个真实攻击尺度定的, 见下")
+    ap.add_argument("--min-digit-h", type=float, default=60.0,
+                    help="数字高低于这个值就**不判**(判不准), 单独统计。默认 60")
     ap.add_argument("--pct", type=float, default=99.5,
                     help="仅用于打印各位数的分位参考, **不再用来判定**(见下)")
     ap.add_argument("--min-group", type=int, default=200,
@@ -188,10 +190,31 @@ def main() -> None:
     # ★ 真正的结构: **分布在 0.80~0.90 之间是空的**。
     #   实测 >=0.80 / >=0.85 / >=0.90 都是**同样的 14 张**, 到 >=0.95 才降到 10 张。
     #   主体全在 <=0.76, 中间一段真空, 然后才是这 14 张离群。
-    #   -> **0.90 这个阈值落在天然空隙里**, 报出率 **8.0/万**, 复核量可以接受。
-    #   (`03.jpg` = 1.0000 报得出; `04.jpg` = 0.7097 报不出 —— 与经理 7/24 的肉眼结论一致。)
-    flagged = []
+    #
+    # ★★★ 2026-09-01 更正: **0.90 太高了, 抓不到真实攻击尺度。**
+    #   经理说最近那批"**现在只有6个像素的差别**"。拿真图模拟: 给负号加 6 px 再看报不报得出来。
+    #   主力档(数字高 60~90, 占进件 **92%**)上的实测:
+    #
+    #   | 阈值 | 真图误报 | 加4px能报 | 加6px能报 |
+    #   |---|---|---|---|
+    #   | 0.76 | 20/万 | 82% | **100%** |
+    #   | **0.78** | **14/万** | **68%** | **100%** |
+    #   | 0.80 | 10/万 | 41% | 88% |
+    #   | 0.85 | 10/万 | 0% | 32% |
+    #   | **0.90(原默认)** | 10/万 | **0%** | **0%** |
+    #
+    #   -> **0.90 在 6 像素这个尺度上一张都抓不到。** 改成 0.78: 检出 0% -> 100%,
+    #      代价只是误报从 10/万 到 14/万。
+    #   **当初选 0.90 是看着分布空隙定的, 而那个空隙是 `03.jpg` 那种极端例子撑出来的**
+    #   (它是 +8px 且数字只有 27 px 宽, 比值到 1.0)。**按看得见的离群点调阈值, 不是按要抓的攻击调。**
+    #
+    # ★ 数字高低于 60 px 就不判: 那几档真图自己就散得厉害(p99 到 1.18~1.78),
+    #   0.78 在那里既误报高又抓不到 —— **判不准就不判**, 正好对上"识别不了就输出空字符串"。
+    flagged, too_small = [], 0
     for r in rows:
+        if r["digit_h"] < args.min_digit_h:
+            too_small += 1
+            continue
         if r["bar_width"] >= args.thr:
             r = dict(r)
             ref = thr.get(r["n_digit"])
@@ -200,9 +223,16 @@ def main() -> None:
             flagged.append(r)
     flagged.sort(key=lambda r: -r["bar_width"])
 
-    print(f"\n宽比 >= {args.thr} 报出 **{len(flagged)}** 张 "
-          f"({100.0*len(flagged)/len(rows):.3f}%, **{10000.0*len(flagged)/len(rows):.1f}/万**)")
+    judged = len(rows) - too_small
+    print(f"\n可量 {len(rows)} 张, 其中**数字高 < {args.min_digit_h:.0f} px 的 {too_small} 张不判**"
+          f"({100.0*too_small/len(rows):.1f}%) —— 那几档真图自己就散, 判不准。")
+    print(f"实际判定 {judged} 张")
+    if judged:
+        print(f"**宽比 >= {args.thr} 报出 {len(flagged)} 张 "
+              f"({100.0*len(flagged)/judged:.3f}%, {10000.0*len(flagged)/judged:.1f}/万)**")
     print("  (厚度那一项已弃用 —— 实测它量的是字重, 不是篡改; 详见代码注释)")
+    print(f"  (阈值 {args.thr} 是按'加 6 像素'这个真实攻击尺度定的; "
+          f"原来的 0.90 在这个尺度上一张都抓不到)")
     for r in flagged[:20]:
         print(f"    宽 {r['bar_width']:.4f}  ({r['n_digit']} 位, 本组中位 {r['本组中位']:.4f})  "
               f"{r['image_name'][:48]}")
