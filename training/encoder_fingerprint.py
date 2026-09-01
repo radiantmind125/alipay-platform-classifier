@@ -184,6 +184,8 @@ def main() -> None:
     ap.add_argument("--pool", type=Path, default=None, help="--verify 时到哪个目录找那些图")
     ap.add_argument("--drop", nargs="*", default=None,
                     help="从已有白名单里删掉这些指纹(不用重建整张表)")
+    ap.add_argument("--blacklist", nargs="*", default=None,
+                    help="★ **只报这几个指纹**(生成器黑名单)。给了它就不用 --wl。见 docstring §黑名单")
     ap.add_argument("--seed", type=int, default=20260831)
     args = ap.parse_args()
 
@@ -314,6 +316,53 @@ def main() -> None:
 
     if not args.input:
         raise SystemExit("!! 要么给 --build, 要么给 --input")
+
+    # ---- 黑名单模式: 只报指定的几个生成器指纹 ----
+    # ★★ 2026-09-01 在 87.3 万张上量出来的结论: **黑名单比白名单实用得多。**
+    #   白名单报出 4,904 张只有 298 张带铁证(**精度 6.1%**);
+    #   而三个指纹的黑名单报出 354 张就有 257 张带铁证(**精度 72.6%, 拿到 86% 的检出**)。
+    #   我原先论证"白名单能抓没见过的生成器"—— **实测一个都没抓到**,
+    #   所有未定性的指纹带铁证率都是 0%, 代价却是 4,550 个误报换 41 张假图。
+    #   -> **上线用黑名单; 白名单降级为"定期跑一次 + triage_flagged 定性"的发现工具。**
+    if args.blacklist is not None:
+        bl = set(args.blacklist)
+        if not bl:
+            raise SystemExit("!! --blacklist 要至少给一个指纹")
+        print(f"黑名单模式: 只报这 {len(bl)} 个指纹")
+        for f in sorted(bl):
+            print(f"   {f}")
+        print(f"\n清点 {args.input} ...", flush=True)
+        files = list(_walk(args.input))
+        total = len(files)
+        print(f"共 {total:,} 张", flush=True)
+        hits, n = [], 0
+        seen2: collections.Counter = collections.Counter()
+        t0 = time.time()
+        for i, p in enumerate(files, 1):
+            f = fingerprint(p)
+            if f:
+                n += 1
+                if f in bl:
+                    hits.append((os.path.basename(p), f))
+                    seen2[f] += 1
+            if i % 20000 == 0 or i == total:
+                el = time.time() - t0
+                rate = i / el if el else 0
+                print(f"  {i:,}/{total:,}  命中 {len(hits):,}  "
+                      f"剩约 {(total-i)/rate/60 if rate else 0:.1f} 分", flush=True)
+        print(f"\n看了 {n:,} 张, 用时 {(time.time()-t0)/60:.1f} 分钟")
+        print(f"**命中 {len(hits):,} 张 = {100.0*len(hits)/max(n,1):.4f}% "
+              f"= {10000.0*len(hits)/max(n,1):.1f}/万**")
+        for k, v in seen2.most_common():
+            print(f"   {v:>6}  {k[:58]}")
+        if args.out and hits:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text("\n".join(f"{a}\t{b}" for a, b in hits), encoding="utf-8")
+            print(f"\n名单 -> {args.out}")
+        print("\n★ 黑名单只抓**见过的生成器**。想发现新的, 要定期跑一次白名单模式再用 "
+              "`triage_flagged.py` 定性。")
+        return
+
     meta = json.loads(args.wl.read_text(encoding="utf-8"))
     wl = set(meta["fps"])
     if not meta.get("excluded_known_fakes"):
