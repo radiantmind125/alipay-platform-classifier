@@ -129,8 +129,15 @@ def main() -> None:
                     help="某个位数不够这么多张就不给它单独定阈值(样本太少定不准)")
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--sheet", type=Path, default=None, help="把报出来的金额区拼成一张图, 好人工看")
+    ap.add_argument("--since", type=str, default=None,
+                    help="只看这个日期(含)之后的, 格式 YYYYMMDD。日期取自文件名里的时间戳")
+    ap.add_argument("--until", type=str, default=None, help="只看这个日期(含)之前的, 格式 YYYYMMDD")
     ap.add_argument("--seed", type=int, default=20260831)
     args = ap.parse_args()
+
+    for _k, _v in (("--since", args.since), ("--until", args.until)):
+        if _v is not None and not (len(_v) == 8 and _v.isdigit()):
+            raise SystemExit(f"!! {_k} 要写成 YYYYMMDD 八位数字, 收到的是 {_v!r}")
 
     files = []
     for dp, _, fns in os.walk(args.input):
@@ -138,6 +145,31 @@ def main() -> None:
             if os.path.splitext(fn)[1].lower() in _EXTS:
                 files.append(Path(dp) / fn)
     print(f"候选 {len(files):,} 张", flush=True)
+
+    # ---- 按文件名里的时间戳筛日期 ----
+    # ★ 为什么需要: 经理关心的是"**最近**那个减号问题", 而手上验证用的 03/04 是 7 月的。
+    #   文件名形如 `s3_voucher_GWCZ<id>_20260803081137.png`, 日期就在里面。
+    # ★ 取不到日期的一律**排除并单独报数** —— 悄悄放行会让"这批是几月的"变成一笔糊涂账。
+    if args.since or args.until:
+        import re
+        _pat = re.compile(r"_(\d{8})\d{6}")
+        kept, nodate, outside = [], 0, 0
+        for p in files:
+            m = _pat.search(p.name)
+            if not m:
+                nodate += 1
+                continue
+            d = m.group(1)
+            if (args.since and d < args.since) or (args.until and d > args.until):
+                outside += 1
+                continue
+            kept.append(p)
+        rng = f"{args.since or '不限'} ~ {args.until or '不限'}"
+        print(f"按日期筛({rng}): 留下 **{len(kept):,}** 张, "
+              f"日期不在范围内 {outside:,} 张, 文件名里取不到日期 {nodate:,} 张", flush=True)
+        if not kept:
+            raise SystemExit("!! 这个日期范围里一张都没有 —— 先确认池子覆盖哪些日期")
+        files = kept
     if args.n and args.n < len(files):
         random.Random(args.seed).shuffle(files)
         files = files[: args.n]
