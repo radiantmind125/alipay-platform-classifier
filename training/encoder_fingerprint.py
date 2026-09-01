@@ -181,8 +181,30 @@ def main() -> None:
     ap.add_argument("--verify", type=Path, default=None,
                     help="★ 建完表**必须跑一次**: 拿一份已知假图名单量召回, 看白名单是不是被污染了")
     ap.add_argument("--pool", type=Path, default=None, help="--verify 时到哪个目录找那些图")
+    ap.add_argument("--drop", nargs="*", default=None,
+                    help="从已有白名单里删掉这些指纹(不用重建整张表)")
     ap.add_argument("--seed", type=int, default=20260831)
     args = ap.parse_args()
+
+    # ---- 从已有白名单里删指纹 ----
+    if args.drop is not None:
+        if not args.wl.is_file():
+            raise SystemExit(f"!! 白名单不存在: {args.wl}")
+        meta = json.loads(args.wl.read_text(encoding="utf-8"))
+        before = list(meta["fps"])
+        drop = set(args.drop)
+        unknown = drop - set(before)
+        if unknown:
+            print(f"!! 这些指纹本来就不在白名单里, 忽略: {sorted(unknown)}")
+        meta["fps"] = [f for f in before if f not in drop]
+        meta["dropped"] = sorted(set(meta.get("dropped", [])) | (drop & set(before)))
+        args.wl.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"白名单 {len(before)} -> **{len(meta['fps'])}** 种 (删掉 {len(before)-len(meta['fps'])} 个)")
+        for f in sorted(drop & set(before)):
+            print(f"   已删 {f}")
+        print(f"\n-> {args.wl}")
+        print("★ 删完**再跑一次 --verify**, 确认召回没被影响(删的应该是真图指纹, 召回不该降)。")
+        return
 
     # ---- 自检: 白名单有没有把攻击者的指纹收进去 ----
     # ★ 为什么必须单独验: 建表时给的 --exclude 名单**很可能只覆盖了池子的一小段**
@@ -261,10 +283,25 @@ def main() -> None:
         cov = sum(v for _, v in c.most_common(args.top))
         print(f"\n看了 {tot:,} 张, 共 **{len(c)}** 种指纹")
         print(f"前 {args.top} 种覆盖 **{100.0*cov/tot:.3f}%** -> 误报 **{100.0*(tot-cov)/tot:.3f}%**")
-        print("\n入选白名单的指纹(★ **占比很低的那几个要人工看一眼, 可能是混进来的假图**):")
-        for k, v in c.most_common(args.top):
-            flag = "  <- ★占比很低, 存疑" if v / tot < 0.001 else ""
+        # ★ 标注规则: 绝对占比低 **或** 排在末尾若干名, 两者取并集。
+        #   只看绝对阈值会漏: 实测服务器上 `JPEG:137d848413`(编辑类 app 的重编码签名)
+        #   占比正好 **0.100%**, 卡在 `< 0.1%` 的边上没被标出来。
+        #   末尾几名不管占比多少都值得看一眼 —— 它们本来就是最可能被污染的位置。
+        ranked = c.most_common(args.top)
+        tail_n = min(8, max(3, args.top // 3))
+        tail = {k for k, _ in ranked[-tail_n:]}
+        print(f"\n入选白名单的指纹(★ **末尾 {tail_n} 名或占比 <0.15% 的都要人工看一眼**):")
+        for i, (k, v) in enumerate(ranked):
+            why = []
+            if v / tot < 0.0015:
+                why.append("占比低")
+            if k in tail:
+                why.append(f"末尾{tail_n}名")
+            flag = ("  <- ★存疑(" + "+".join(why) + ")") if why else ""
             print(f"   {100.0*v/tot:7.3f}%  {k[:56]}{flag}")
+        print("\n  判读: 裸 PNG(无 sRGB 无 pHYs)= **桌面截图**, 不是手机截图, 一般该删;")
+        print("        聊天软件转发的重编码签名**不要删**(正常用户转发收据很常见)。")
+        print(f"        要删就用: --wl {args.wl} --drop 指纹1 指纹2")
         args.wl.parent.mkdir(parents=True, exist_ok=True)
         args.wl.write_text(json.dumps(
             {"top": args.top, "coverage": cov / tot, "n_build": tot,
