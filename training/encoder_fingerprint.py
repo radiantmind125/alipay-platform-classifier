@@ -117,6 +117,7 @@ import os
 import random
 import struct
 import sys
+import time
 from pathlib import Path
 
 from PIL import Image
@@ -320,17 +321,29 @@ def main() -> None:
     print(f"白名单 {len(wl)} 种 (建表覆盖 {100.0*meta.get('coverage',0):.3f}%, "
           f"建表样本 {meta.get('n_build',0):,} 张)")
 
+    print(f"清点 {args.input} ...", flush=True)
+    files = list(_walk(args.input))
+    total = len(files)
+    print(f"共 {total:,} 张, 开始扫", flush=True)
+
     odd, n = [], 0
     seen: collections.Counter = collections.Counter()
-    for p in _walk(args.input):
+    t0 = time.time()
+    for i, p in enumerate(files, 1):
         f = fingerprint(p)
-        if not f:
-            continue
-        n += 1
-        if f not in wl:
-            odd.append((os.path.basename(p), f))
-            seen[f] += 1
-    print(f"\n看了 {n:,} 张")
+        if f:
+            n += 1
+            if f not in wl:
+                odd.append((os.path.basename(p), f))
+                seen[f] += 1
+        # 大池子要跑很久, 不给进度的话根本不知道是在跑还是卡住了
+        if i % 20000 == 0 or i == total:
+            el = time.time() - t0
+            rate = i / el if el else 0
+            eta = (total - i) / rate if rate else 0
+            print(f"  {i:,}/{total:,}  报出 {len(odd):,}  "
+                  f"{rate:,.0f} 张/秒  已用 {el/60:.1f} 分  剩约 {eta/60:.1f} 分", flush=True)
+    print(f"\n看了 {n:,} 张, 用时 {(time.time()-t0)/60:.1f} 分钟")
     print(f"**白名单之外: {len(odd):,} 张 = {100.0*len(odd)/max(n,1):.3f}% "
           f"= {10000.0*len(odd)/max(n,1):.0f}/万**")
     print("\n报出来的指纹分布:")
