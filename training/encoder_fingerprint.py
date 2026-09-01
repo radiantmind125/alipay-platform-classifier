@@ -178,8 +178,57 @@ def main() -> None:
     ap.add_argument("--dirty-ok", action="store_true",
                     help="没有已知假图名单也要建表 —— **明确承认白名单可能吃进攻击者指纹**")
     ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--verify", type=Path, default=None,
+                    help="★ 建完表**必须跑一次**: 拿一份已知假图名单量召回, 看白名单是不是被污染了")
+    ap.add_argument("--pool", type=Path, default=None, help="--verify 时到哪个目录找那些图")
     ap.add_argument("--seed", type=int, default=20260831)
     args = ap.parse_args()
+
+    # ---- 自检: 白名单有没有把攻击者的指纹收进去 ----
+    # ★ 为什么必须单独验: 建表时给的 --exclude 名单**很可能只覆盖了池子的一小段**
+    #   (比如 inspect_meta 用 --limit 扫的是遍历顺序的前 N 张 = 基本只有某一天),
+    #   而建表是**全池随机抽样**。两者人群不同 -> 名单外的假图照样进了建表数据。
+    #   本机实测: 这种污染会让召回**从 95.1% 陡降到 55.6%**, 是断崖不是渐变, 一测就看得出来。
+    if args.verify:
+        if not args.wl.is_file():
+            raise SystemExit(f"!! 白名单不存在: {args.wl}")
+        wl = set(json.loads(args.wl.read_text(encoding="utf-8"))["fps"])
+        names = [os.path.basename(x.strip()) for x in
+                 args.verify.read_text(encoding="utf-8-sig").splitlines() if x.strip()]
+        root = args.pool or args.input or args.build
+        if not root:
+            raise SystemExit("!! --verify 还要给 --pool(到哪找这些图)")
+        idx = {os.path.basename(p): p for p in _walk(Path(root))}
+        hit = miss = gone = 0
+        missed_fps: collections.Counter = collections.Counter()
+        for n in names:
+            p = idx.get(n)
+            if not p:
+                gone += 1
+                continue
+            f = fingerprint(p)
+            if f is None:
+                gone += 1
+            elif f not in wl:
+                hit += 1
+            else:
+                miss += 1
+                missed_fps[f] += 1
+        n_ok = hit + miss
+        if not n_ok:
+            raise SystemExit("!! 一张都没找到, 检查 --pool 路径")
+        rec = 100.0 * hit / n_ok
+        print(f"自检: 已知假图 {len(names)} 张, 找到 {n_ok} 张(缺 {gone})")
+        print(f"  **召回 {hit}/{n_ok} = {rec:.1f}%**")
+        if rec >= 90:
+            print("  -> **白名单干净**, 可以用。")
+        else:
+            print(f"  -> ★★ **白名单被污染了** —— 有 {miss} 张假图的指纹落在白名单里面:")
+            for k, v in missed_fps.most_common(6):
+                print(f"       漏掉 {v:>4} 张   {k[:56]}")
+            print("     处理: 把上面这些指纹从白名单里删掉, 或者把 --top 调小(比如 20)重建,")
+            print("     然后**再验一次**。别拿被污染的白名单去筛 —— 它会报出奇少, 看着像流量很干净。")
+        return
 
     if args.build:
         bad: set[str] = set()
