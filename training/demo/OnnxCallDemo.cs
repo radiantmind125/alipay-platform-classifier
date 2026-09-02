@@ -17,9 +17,19 @@
 //   dotnet add package Microsoft.ML.OnnxRuntime
 //   dotnet add package SixLabors.ImageSharp
 //
-//   ⚠ ImageSharp 默认会按 EXIF Orientation 自动摆正, 真实进件必须**关掉**
-//     (见 ONNX_PORT_SPEC §0.5(1))。这里用的 7 张对照图是程序生成的 PNG, 不带 EXIF,
-//     所以 demo 里看不出差别 —— 但你的正式代码里要处理。
+//   ⚠⚠ **2026-09-02 更正: 上面这条不带版本号的命令现在会装到 4.x, 直接编不过。**
+//     4.x 起 ImageSharp 在**编译期**卡授权, 没有 license 时 `dotnet build -c Release`
+//     **直接报错** `No Six Labors license found`(Debug 只警告, 所以容易拖到打包才炸)。
+//     · **3.x 和 4.x 都是 Six Labors Split License, 商业使用的义务一样**,
+//       区别只是 4.x 多了强制检查 —— **钉 3.x 并不能绕开授权**。另外 3.1.5 有 NU1903 高危告警。
+//     · **只有 2.x 是 Apache-2.0。**
+//     -> 真要用就明确写版本, 并且先把授权问题问清楚; 更省事的做法是**用工程里已有的解码器**,
+//        参考 `MinusCheck.cs` 的做法(只收解码好的字节数组, 不依赖任何图像库)。
+//
+//   ⚠ **EXIF 摆正: 原来这里写"ImageSharp 默认会自动摆正, 必须关掉" —— 那是错的, 已实测推翻。**
+//     造了 Orientation = 1/3/6/8 四张图实测: **ImageSharp 3.1.5 不摆**(宽高和左上角像素都不变),
+//     **PIL 也不摆, 两边一致, 不用做任何处理**; 而且 ImageSharp 根本没有这个开关。
+//     详见 ONNX_PORT_SPEC §0.5(1) 里的更正。**换别的解码器之前要重新验一次。**
 //
 // 用法
 // ----

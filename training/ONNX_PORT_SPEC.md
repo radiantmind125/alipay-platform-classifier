@@ -44,8 +44,20 @@ ONNX 输入 **uint8 `(N, 32, 32, 3)` NHWC RGB**, 输出 **float32 `(N,)`**, 每�
 > 那在它自己的**命令行可视化入口 `main()`** 里, **打分这条路不经过它**。
 > 打分走的是 `locate_amount_auto(rgb)`, 收的已经是解好的数组。**以打分入口为准: 不旋转。**
 
-**★ .NET 这边要特别当心**: **ImageSharp 的 `Image.Load` 默认会按 Orientation 自动摆正**,
-GDI+ / SkiaSharp / WIC 默认不摆。**用 ImageSharp 就必须显式关掉自动摆正。**
+**★ .NET 这边要特别当心**: 解码器**摆不摆正**必须先确认, 摆了就和 Python 侧对不上。
+
+> **2026-09-02 实测更正**: 原来这里写的是"ImageSharp 的 `Image.Load` 默认会按 Orientation
+> 自动摆正, 用 ImageSharp 就必须显式关掉" —— **这条是错的, 已实测推翻**。
+>
+> 造了 Orientation = 1 / 3 / 6 / 8 四张 120x60 的四色块图, **ImageSharp 3.1.5 读出来
+> 一律还是 120x60, 左上角像素也不变** —— **它根本不摆**(JPEG / PNG / WebP / TIFF 都验过)。
+> PIL 的 `Image.open().convert("RGB")` 同样不摆。**两边本来就一致, 不需要做任何处理。**
+>
+> 而且 ImageSharp **没有**"关掉自动摆正"这个开关 —— 照原文去找会白找。
+> (`DecoderOptions.SkipMetadata` 管的是要不要读元数据, 和摆正无关。)
+>
+> **仍然要当心的是换解码器**: 有些库(比如某些 `AutoOrient` 默认开启的封装)会摆。
+> 换解码器之前, 拿上面那种带 Orientation 的图验一次, 确认宽高不对调。
 
 **不关掉会怎样**: Orientation = 5~8 的图 **宽高会对调**, 于是
 `y = next() % (H-32+1)` 和 `x = next() % (W-32+1)` 的上界全变 ->
