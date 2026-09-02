@@ -208,8 +208,9 @@ def main() -> None:
             ars = np.array([c[1] for c in ctrl if c[1] is not None])
             ar_lo = float(np.percentile(ars, 5)) if len(ars) >= 10 else None
             ar_hi = float(np.percentile(ars, 95)) if len(ars) >= 10 else None
+            ar_med = float(np.median(ars)) if len(ars) >= 10 else None
         else:
-            med = p95 = mx = float("nan"); ar_lo = ar_hi = None
+            med = p95 = mx = float("nan"); ar_lo = ar_hi = ar_med = None
         for nm, bw, ar in members:
             # ★★ 关键的一列: **数字本身**像不像同群。
             #   渲染变体会把**整个金额**都画得不一样(数字也跟着变);
@@ -229,9 +230,16 @@ def main() -> None:
                 verdict = "★ 高于同群 p95"
             else:
                 verdict = "同群内正常 -> 多半是渲染变体"
+            # ★ 光记"在不在带内"不够 —— 带可能很窄, 差一点点也会被判成"不一样"。
+            #   把**差多少**也记下来: 偏离同群中位百分之几。
+            #   偏离 2~3% = 量出来的抖动; 偏离 15%+ 才谈得上"渲染不同"。
+            ar_dev = (round(100.0 * (ar - ar_med) / ar_med, 1)
+                      if (ar is not None and ar_med) else "")
             out_rows.append({
                 "image_name": nm, "bar_width": round(bw, 4),
                 "digit_ar": round(ar, 4) if ar is not None else "",
+                "同群数字中位": round(ar_med, 4) if ar_med else "",
+                "数字偏离%": ar_dev,
                 "数字判读": digit_same,
                 "分辨率": f"{sz[0]}x{sz[1]}", "指纹": fp,
                 "同群对照数": n_ctrl,
@@ -262,6 +270,22 @@ def main() -> None:
         else:
             mean = ""
         print(f"{v_bar[:25]:<26}{v_dig[:19]:<20}{n:>6}   {mean}")
+    # ★★ 光看"在不在带内"会把微小抖动也算成"渲染不同"。看**偏离幅度**才说明问题。
+    devs = [abs(float(r["数字偏离%"])) for r in out_rows if r["数字偏离%"] != ""]
+    if devs:
+        devs_sorted = sorted(devs)
+        n_small = sum(1 for d in devs if d < 5)
+        n_mid = sum(1 for d in devs if 5 <= d < 15)
+        n_big = sum(1 for d in devs if d >= 15)
+        print("")
+        print("数字偏离同群中位的幅度(判断'数字也不一样'到底是不是真的不一样):")
+        print(f"   中位偏离 {devs_sorted[len(devs_sorted)//2]:.1f}%   "
+              f"最大 {max(devs):.1f}%")
+        print(f"   偏离 <5%(基本就是量出来的抖动): {n_small} 张")
+        print(f"   偏离 5~15%(存疑):               {n_mid} 张")
+        print(f"   偏离 >=15%(数字确实不一样):      {n_big} 张")
+        print("   ★ 若绝大多数都 <5%, 那'数字也不一样'只是带太窄, **不能读成渲染变体**。")
+
     tamper = sum(n for (b, d), n in cross.items()
                  if b.startswith("★") and d == "数字与同群一致")
     render = sum(n for (b, d), n in cross.items()
