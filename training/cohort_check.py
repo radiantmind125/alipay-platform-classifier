@@ -243,6 +243,43 @@ def main() -> None:
         print(f"  群 {ci}/{len(by_cohort)}  {sz[0]}x{sz[1]} {fp[:26]}  "
               f"报出 {len(members)} 张, 对照 {n_ctrl} 张  用时 {(time.time()-t0)/60:.1f} 分", flush=True)
 
+    # ★★ 最要紧的一张表: **负号判读 x 数字判读** 的交叉。
+    #   只报"负号离群"是不够的 —— 那既可能是篡改, 也可能是换了渲染器。
+    #   交叉之后才分得开: "负号离群 + 数字与同群一致" 才是篡改。
+    cross = collections.Counter(
+        (r["判读"].split("(")[0], r["数字判读"] or "(数字判不了)") for r in out_rows)
+    print("\n" + "=" * 70)
+    print("负号判读 x 数字判读")
+    print(f"{'-'*70}")
+    print(f"{'负号':<26}{'数字':<20}{'张数':>6}   含义")
+    for (v_bar, v_dig), n in sorted(cross.items(), key=lambda kv: -kv[1]):
+        if v_bar.startswith("★") and v_dig == "数字与同群一致":
+            mean = "**只有负号被动过 -> 篡改**"
+        elif v_bar.startswith("★") and v_dig.startswith("★"):
+            mean = "整体渲染都不同 -> 版本/渲染变体"
+        elif v_bar.startswith("样本不足"):
+            mean = "同群对照不够, 不下结论"
+        else:
+            mean = ""
+        print(f"{v_bar[:25]:<26}{v_dig[:19]:<20}{n:>6}   {mean}")
+    tamper = sum(n for (b, d), n in cross.items()
+                 if b.startswith("★") and d == "数字与同群一致")
+    render = sum(n for (b, d), n in cross.items()
+                 if b.startswith("★") and d.startswith("★"))
+    print(f"{'-'*70}")
+    print(f"  **数字没动、只有负号离群(篡改特征): {tamper} 张**")
+    print(f"  数字也不一样(渲染变体): {render} 张")
+
+    # 报出值有没有挤在少数几个精确取值上 —— 挤在一起说明是同一个工具/同一份模板
+    vals = collections.Counter(round(float(r["bar_width"]), 4) for r in out_rows)
+    top = vals.most_common(6)
+    if top and top[0][1] >= 3:
+        print("\n报出值的聚集情况(挤在少数几个精确取值上 = 同一个工具或同一份模板):")
+        for v, n in top:
+            szs = {r["分辨率"] for r in out_rows if round(float(r["bar_width"]), 4) == v}
+            print(f"   宽比 {v:<8} {n:>4} 张, 跨 {len(szs)} 种分辨率")
+        print("   ★ 同一个比值出现在**不同分辨率**上, 说明是**按比例**改的, 不是各改各的。")
+
     tally = collections.Counter(r["判读"].split("(")[0] for r in out_rows)
     print(f"\n{'='*66}")
     for k, v in tally.most_common():
