@@ -18,6 +18,26 @@ r"""**同群比对**: 报出来的图, 跟**同机型同版本**的真图比, �
 **不成立**: 日期连字符只有 3 px 高, 二值化差一个像素宽度就差约 10%,
 1,061 张真图上"两者之比"的 p5~p95 跨 **0.61~2.09**, 根本不是常数。
 
+★★ 最要紧的一列: **数字本身像不像同群**(2026-09-02 加)
+--------------------------------------------------
+只看负号还分不干净, 因为**同分辨率 + 同编码器指纹**未必能锁住 **Alipay 的版本** ——
+编码器指纹反映的是**系统截图管线**, 同一台手机上两个 app 版本的指纹是一样的。
+所以"新版本把负号画长了"仍可能藏在群里面。
+
+**用数字本身把这两种情况分开**:
+
+  · **渲染变体**会把**整个金额**都画得不一样 -> **数字的宽高比也会跟着变**
+  · **篡改**只动负号 -> **数字是原封不动的**, 宽高比跟同群一致
+
+所以输出里的 `数字判读` 一列:
+
+  | 负号 | 数字 | 结论 |
+  |---|---|---|
+  | 离群 | **与同群一致** | **只有负号被动过 -> 篡改** |
+  | 离群 | 也不一样 | 整体渲染就不同 -> **版本/渲染变体** |
+
+这一列比"负号离群"本身更能定性, 因为它**在同一张图里做对照**, 不依赖任何外部基线。
+
 这个脚本怎么绕开
 ----------------
 **不跟"所有真图"比, 只跟"同一群"比。**
@@ -95,6 +115,9 @@ def main() -> None:
     ap.add_argument("--min-cohort", type=int, default=25,
                     help="每群至少要有这么多张对照图才下结论, 不够就报'样本不足'")
     ap.add_argument("--max-cohort", type=int, default=60, help="每群最多量这么多张对照图")
+    ap.add_argument("--sample", type=int, default=0,
+                    help="只从池子里随机抽这么多张来找对照(0 = 全池建索引)。"
+                         "全池索引在 72 万张上实测要 93.7 分钟, 抽 5 万张几分钟就够")
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--seed", type=int, default=20260901)
     args = ap.parse_args()
@@ -123,10 +146,11 @@ def main() -> None:
             continue
         k = _cohort_key(p)
         if k:
-            fl.append((r["image_name"], float(r["bar_width"]), k))
+            ar = float(r["digit_ar"]) if r.get("digit_ar") else None
+            fl.append((r["image_name"], float(r["bar_width"]), ar, k))
     by_cohort = collections.defaultdict(list)
-    for nm, bw, k in fl:
-        by_cohort[k].append((nm, bw))
+    for nm, bw, ar, k in fl:
+        by_cohort[k].append((nm, bw, ar))
     print(f"  {len(fl):,} 张落在 **{len(by_cohort)}** 个群里")
 
     # ---- 2. 每群找对照图, 量它们的 bar_width ----
@@ -136,6 +160,9 @@ def main() -> None:
         pool_names = [n for n in pool_names
                       if (_TS.search(n) and _TS.search(n).group(1) >= args.since)]
     random.Random(args.seed).shuffle(pool_names)
+    if args.sample and args.sample < len(pool_names):
+        pool_names = pool_names[: args.sample]
+        print(f"  只用随机抽的 {len(pool_names):,} 张来找对照(--sample)", flush=True)
 
     # ★ 先把整池按分辨率建一次索引, **不要每个群各扫一遍池子**。
     #   原来的写法是每群从头扫 pool_names —— 87 万张池子 x 几十个群 = 几千万次开图,
@@ -173,14 +200,27 @@ def main() -> None:
                 continue
             m = measure_minus(Path(p))
             if m and m["bar_width"]:
-                ctrl.append(float(m["bar_width"]))
+                ctrl.append((float(m["bar_width"]), float(m["digit_ar"]) if m["digit_ar"] else None))
         n_ctrl = len(ctrl)
         if n_ctrl >= args.min_cohort:
-            arr = np.array(ctrl)
+            arr = np.array([c[0] for c in ctrl])
             med, p95, mx = float(np.median(arr)), float(np.percentile(arr, 95)), float(arr.max())
+            ars = np.array([c[1] for c in ctrl if c[1] is not None])
+            ar_lo = float(np.percentile(ars, 5)) if len(ars) >= 10 else None
+            ar_hi = float(np.percentile(ars, 95)) if len(ars) >= 10 else None
         else:
-            med = p95 = mx = float("nan")
-        for nm, bw in members:
+            med = p95 = mx = float("nan"); ar_lo = ar_hi = None
+        for nm, bw, ar in members:
+            # ★★ 关键的一列: **数字本身**像不像同群。
+            #   渲染变体会把**整个金额**都画得不一样(数字也跟着变);
+            #   篡改只动负号, **数字是原封不动的**。
+            #   所以 "数字正常 + 负号离群" = 篡改; "数字也离群" = 换了渲染器。
+            if ar is None or ar_lo is None:
+                digit_same = ""
+            elif ar_lo <= ar <= ar_hi:
+                digit_same = "数字与同群一致"
+            else:
+                digit_same = "★数字也不一样"
             if n_ctrl < args.min_cohort:
                 verdict = f"样本不足(同群只找到 {n_ctrl} 张)"
             elif bw > mx:
@@ -191,6 +231,8 @@ def main() -> None:
                 verdict = "同群内正常 -> 多半是渲染变体"
             out_rows.append({
                 "image_name": nm, "bar_width": round(bw, 4),
+                "digit_ar": round(ar, 4) if ar is not None else "",
+                "数字判读": digit_same,
                 "分辨率": f"{sz[0]}x{sz[1]}", "指纹": fp,
                 "同群对照数": n_ctrl,
                 "同群中位": round(med, 4) if n_ctrl >= args.min_cohort else "",
