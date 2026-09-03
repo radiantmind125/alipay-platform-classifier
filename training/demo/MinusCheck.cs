@@ -1,48 +1,4 @@
-// 负号几何检查 —— 不用模型, 不用显卡, 只做算术。
-//
-// 白底账单详情页里, 量**负号宽度 / 数字中位宽度**。真图这个比值很集中, 被拉长过的会明显偏出去。
-// 4 万张白单实测中位: 4 位金额 0.6739 / 5 位 0.7021 / 6 位 0.7021。
-//
-// **零依赖**, 只用 System.*, 这一个文件放进工程就能编。
-//
-// ★★ 先看这两条
-// -------------
-// 1. **拿 03.jpg / 04.jpg 自验会返回 CannotDetermine, 那不是没生效。**
-//    它们数字高只有 47 和 53, 低于默认的 60 px 弃权线。**要对的是 BarWidth**:
-//        03.jpg   BarWidth 1.0000   DigitHeight 47
-//        04.jpg   BarWidth 0.7097   DigitHeight 53
-//    把 `MinDigitHeight` 改成 0 再跑, 这两张就是 **Suspicious** 和 **Ok**, 都判对。
-// 2. **用 System.Drawing 解码时, `stride` 和 `PixelOrder.Bgr` 两个都必须传。**
-//    少传任何一个都会**静默出错**(整图逐行错位 / 页型认反), 不抛异常。
-//    文件末尾有现成的 GDI 写法, 照抄即可。
-//
-// 怎么调
-// ------
-//   var r = MinusCheck.Check(rgb, width, height);            // rgb = 解码好的字节数组
-//   if (r.Verdict == MinusVerdict.Suspicious) amount = "";   // 比例不对, 金额输出空
-//   // Ok 和 CannotDetermine 都照常走 OCR
-//
-// 多线程直接调没问题(没有可变的静态状态)。单线程约 38 ms 一张, 含解码。
-//
-// 阈值
-// ----
-// 0.78 是按"负号加 6 px"这个攻击尺度定的。1,473 对真图 + 加宽图实测能抓到的比例:
-//   0.76 -> 99.8%    **0.78 -> 99.5%**    0.80 -> 89.3%    0.85 -> 32.7%    0.90 -> 0%
-// 报出率(4 万张随机白单): 数字高 60 以上 **10.4/万**, 40~60 档 **13.7/万**。
-// ★ 这是**报出率, 不是误报率** —— 进件池没有逐张的真伪标注, 报出来的里面有真被改过的。
-//
-// ★ `MinDigitHeight` 这道闸实测作用不大: 报出率只从 10.6/万 降到 10.4/万,
-//   代价是丢掉 **6.9%** 可量的图, 而且报出率和字号并不是单调关系。
-//   **要关掉就设成 0。** 这是覆盖率和精度的取舍, 谁用谁定。
-//
-// 覆盖边界(别让人以为管得更宽)
-// ----------------------------
-// - 只管**白底账单详情页**。**蓝底转账页直接跳过**, 那种金额不带负号。
-//   不跳的话页面上的横线会被当成负号: 实测 1.2 万张蓝图有 40 张被量出, 其中九成会误报。
-// - 只管"负号被拉长"这一种手法。**改数字、复制粘贴数字, 这条一律看不见。**
-// - 判的是"负号和同一张图里的数字比例不对", **不是**"这张图是生成的"。
-
-#nullable enable      // 显式打开, 不管工程开没开 nullable, 编译都是零警告
+#nullable enable
 
 using System;
 using System.Collections.Generic;
@@ -52,53 +8,53 @@ namespace Ssp
 {
     public enum MinusVerdict
     {
-        // ★ CannotDetermine 放在 0 位: 默认构造是"不下结论"而不是"正常", 漏赋值时失败方向安全。
-        CannotDetermine = 0,   // 判不了 -> OCR 照常
-        Ok = 1,                // 负号正常
-        Suspicious = 2,        // 负号偏长 -> 金额输出空
+        CannotDetermine = 0,   // 判不了, 走正常流程
+        Ok = 1,
+        Suspicious = 2,        // 负号偏长
     }
 
     /// <summary>像素在字节数组里的通道顺序。</summary>
     public enum PixelOrder
     {
-        Rgb = 0,   // ImageSharp Rgb24 / SkiaSharp Rgba8888
-        Bgr = 1,   // ★ System.Drawing 的 Format24bppRgb 内存里其实是 BGR, 别选错
+        Rgb = 0,
+        Bgr = 1,   // System.Drawing 的 Format24bppRgb 实际是 BGR
     }
 
     public sealed class MinusResult
     {
         public MinusVerdict Verdict;
-        public double BarWidth;      // 负号宽 / 数字中位宽  <- 主判据
+        public double BarWidth;      // 负号宽 / 数字中位宽
         public double DigitHeight;   // 数字中位高
         public double DigitAspect;   // 数字中位宽 / 中位高
         public int DigitCount;
-        public bool Measured;        // 没量出 BarWidth 时上面几个都没意义
+        public bool Measured;        // 为 false 时上面几项无意义
         public string Reason = "";
     }
 
+    /// <summary>
+    /// 白底账单详情页的负号几何检查: 量负号宽度与数字中位宽度的比值。
+    /// 无外部依赖, 无静态可变状态, 可多线程调用。
+    /// </summary>
     public static class MinusCheck
     {
-        public const double Threshold = 0.78;      // 见文件头
-        public const double MinDigitHeight = 60;   // 低于这个不判; 设成 0 即关掉, 见文件头
-        const int GrayDark = 140;                  // 定位金额行时"算深色"的灰度阈
+        public const double Threshold = 0.78;
+        public const double MinDigitHeight = 60;   // 数字低于此高度不判定; 设为 0 可关闭
+        const int GrayDark = 140;                  // 定位金额行时的深色阈值
 
-        // 安全阀, 只用来挡恶意构造的图: 真实账单过筛后中位 6 个块, 最多见过 17 个。
-        public const int MaxComponents = 20_000;
+        public const int MaxComponents = 20_000;   // 上限保护, 见 LocateAmount
 
-        struct Comp   // 一个连通块
+        struct Comp
         {
             public int X, Y, W, H, Area;
         }
 
         /// <summary>
-        /// 入口。<paramref name="pixels"/> 是解码后的像素, 每像素 3 字节,
-        /// 第 y 行第 x 列的第一个分量在 <c>y*stride + x*3</c>。
+        /// 每像素 3 字节, 第 y 行第 x 列的首字节位于 y*stride + x*3。
         /// </summary>
-        /// <param name="order">通道顺序。System.Drawing 出来的要传 <see cref="PixelOrder.Bgr"/>。</param>
+        /// <param name="order">通道顺序; System.Drawing 解出的数据传 Bgr。</param>
         /// <param name="stride">
-        /// 每行占的字节数, 传 0 表示行间没有填充(即 width*3)。
-        /// ★ GDI 的 BitmapData.Stride 会补齐到 4 的倍数, 通常**大于** width*3, 必须如实传,
-        ///   否则整张图逐行错开, 而且不会报错。
+        /// 每行字节数, 传 0 表示 width*3。GDI 的 BitmapData.Stride 会补齐到 4 的倍数,
+        /// 需如实传入, 否则逐行错位且不会抛异常。
         /// </param>
         public static MinusResult Check(byte[] pixels, int width, int height,
                                         PixelOrder order = PixelOrder.Rgb, int stride = 0)
@@ -118,10 +74,10 @@ namespace Ssp
             var res = new MinusResult { Verdict = MinusVerdict.CannotDetermine };
             if (width < 16 || height < 16) { res.Reason = "图太小"; return res; }
 
-            int ri = order == PixelOrder.Rgb ? 0 : 2;   // 红在一个像素里的第几个字节
-            int bi = order == PixelOrder.Rgb ? 2 : 0;   // 蓝在第几个字节
+            int ri = order == PixelOrder.Rgb ? 0 : 2;
+            int bi = order == PixelOrder.Rgb ? 2 : 0;
 
-            // ★ 蓝底转账页金额不带符号, 覆盖率为 0; 不跳的话页面上的横线会被当成负号。
+            // 蓝底转账页金额不带符号, 不处理
             if (IsBluePage(pixels, width, height, stride, ri, bi))
             { res.Reason = "蓝底转账页, 金额不带负号"; return res; }
 
@@ -131,15 +87,12 @@ namespace Ssp
 
         static MinusResult Check(byte[,] gray, int W, int H, MinusResult res)
         {
-            // ---- 1. 定位金额行 ----
             var box = LocateAmount(gray, W, H);
             if (box == null) { res.Reason = "定位不到金额行"; return res; }
             int bx0 = box[0], by0 = box[1], bx1 = box[2], by1 = box[3];
 
-            // ---- 2. 在这一行内重新取块 ----
-            // ★ 必须重取, 而且**不设高度下限**: 定位那步的 hh < 0.02*H 会把负号整个滤掉
-            //   (1280 高的图下限就是 25.6 px, 而负号只有 7 px)。
-            // ★ 左边要**大幅**外扩: 定位给的 x0 只用数字算, 负号落在它左边, pad 小了够不着。
+            // 行内重新取块, 不设高度下限: 定位阶段的高度过滤会把负号滤掉。
+            // 左侧外扩较多, 因为定位框只覆盖数字, 负号落在框外。
             int pad = Math.Max(2, (int)((by1 - by0) * 0.15));
             int padx = Math.Max(pad, (int)((bx1 - bx0) * 0.30));
             int cx0 = Math.Max(0, bx0 - padx), cy0 = Math.Max(0, by0 - pad);
@@ -158,15 +111,14 @@ namespace Ssp
             for (int y = 0; y < ch; y++)
                 for (int x = 0; x < cw; x++)
                 { fg[y, x] = sub[y, x] <= otsu; if (fg[y, x]) on++; }
-            // 前景过半说明极性反了, 翻回来。★ 门槛是 127/255 = 0.498039, **不是 0.5**。
+            // 前景过半说明极性相反, 取反; 阈值为 127/255
             if (255L * on > 127L * ch * cw)
                 for (int y = 0; y < ch; y++)
                     for (int x = 0; x < cw; x++) fg[y, x] = !fg[y, x];
 
-            var glyphs = Label(fg, ch, cw, minArea: 6);   // ★ 不设高度下限
+            var glyphs = Label(fg, ch, cw, minArea: 6);
             if (glyphs.Count < 4) { res.Reason = "块数不够"; return res; }
 
-            // ---- 3. 分出数字和横杠 ----
             var hs = glyphs.Select(g => g.H).OrderBy(v => v).ToList();
             double medH = hs[hs.Count / 2];
             if (medH < 20) { res.Reason = "字太小"; return res; }
@@ -176,9 +128,7 @@ namespace Ssp
             if (digits.Count < 4) { res.Reason = "数字不够 4 个"; return res; }
             if (bars.Count == 0) { res.Reason = "没有负号"; return res; }
 
-            // ---- 4. 有效性闸 ----
-            // ★ 没有这三道, **一整张二维码**会混进来并排在离群榜第一 —— 它同样满足
-            //   "4 个近方块 + 1 根横条"。真金额行的数字高度几乎完全一致, 二维码不会。
+            // 有效性检查: 金额行的数字高度基本一致, 二维码等区域不满足
             double dhMean = digits.Average(g => (double)g.H);
             double dhStd = Std(digits.Select(g => (double)g.H));
             if (dhStd / dhMean > 0.08) { res.Reason = "数字高度不齐, 不像一行数字"; return res; }
@@ -191,14 +141,13 @@ namespace Ssp
             double ar = mw / mh;
             if (ar < 0.45 || ar > 0.75) { res.Reason = "数字宽高比不对"; return res; }
 
-            var bar = bars.OrderBy(g => g.X).First();   // 最靠左那条 = 负号
+            var bar = bars.OrderBy(g => g.X).First();   // 最左侧的横条即负号
             res.Measured = true;
             res.BarWidth = bar.W / mw;
             res.DigitHeight = mh;
             res.DigitAspect = ar;
             res.DigitCount = digits.Count;
 
-            // ---- 5. 判 ----
             if (mh < MinDigitHeight)
             {
                 res.Verdict = MinusVerdict.CannotDetermine;
@@ -210,9 +159,7 @@ namespace Ssp
             return res;
         }
 
-        // ---------- 下面都是工具 ----------
-
-        // 蓝底判定: 上三分之一的三通道均值, 蓝明显压过红和绿
+        // 上三分之一的通道均值判断蓝底
         static bool IsBluePage(byte[] px, int w, int h, int stride, int ri, int bi)
         {
             int h3 = Math.Max(1, h / 3);
@@ -230,10 +177,7 @@ namespace Ssp
             return b > r + 25 && b > g + 15;
         }
 
-        // 灰度化。★ 这三个常数**别动** —— 它和 OpenCV 的 cvtColor(RGB2GRAY) 是**逐位相同**的
-        //   (400 万随机像素实测零误差)。改成 0.299/0.587/0.114 的浮点写法会有 0.13% 的像素差 1 阶;
-        //   蓝色系数写成 3736(四舍五入值)而不是截断的 3735, 会差 0.38%。
-        //   灰度用在 `< 140` 那道闸和 Otsu 上, 差 1 阶就可能翻掉一个像素。
+        // 定点系数, 与 OpenCV cvtColor RGB2GRAY 结果一致, 不要改成浮点写法
         static byte[,] ToGray(byte[] px, int w, int h, int stride, int ri, int bi)
         {
             var gray = new byte[h, w];
@@ -250,8 +194,7 @@ namespace Ssp
             return gray;
         }
 
-        // 找金额行: 只在图的 8%~55% 那一段找, 取"同一行里字最高的那一行"。
-        // ★ 不能按"最高的连通块"选 —— 会被商家头像顶掉(头像 125~138 px, 金额才 71~78 px)。
+        // 在图像 8%~55% 高度范围内, 取同一行中字最高的那一行
         static int[]? LocateAmount(byte[,] gray, int W, int H)
         {
             int y0b = (int)(H * 0.08), y1b = (int)(H * 0.55);
@@ -265,19 +208,16 @@ namespace Ssp
             var comps = new List<Comp>();
             foreach (var c in all)
             {
-                // ★ 这道高度闸会把负号滤掉 —— 所以第 2 步要在行内重取
+                // 此高度过滤会滤掉负号, 所以后面要在行内重取
                 if (c.H < 0.02 * H || c.H > 0.22 * H || c.W > 0.5 * W) continue;
                 comps.Add(new Comp { X = c.X, Y = c.Y + y0b, W = c.W, H = c.H, Area = c.Area });
             }
             if (comps.Count == 0) return null;
 
-            // ★ 安全阀: 下面的按行聚类最坏是 O(N^2), 恶意构造的图能把 N 顶到十万级。
-            //   超上限直接当"判不了", 失败方向安全。
+            // 上限保护: 下面的行聚类最坏为 O(N^2)
             if (comps.Count > MaxComponents) return null;
 
-            // 按"同一行"聚类: 纵向重叠 >= 较矮那个高度的一半。
-            // 金额的每一位都在同一条基线上, 商家头像不在 —— 全部依据就是这一条。
-            // ★ 每行上下界增量维护(结果与逐次求 Min/Max 完全一样, 省一层 N)。
+            // 按纵向重叠聚类成行; 每行上下界增量维护
             var rows = new List<List<Comp>>();
             var bounds = new List<(int Y0, int Y1)>();
             foreach (var c in comps.OrderBy(k => k.Y))
@@ -304,11 +244,11 @@ namespace Ssp
             List<Comp>? best = null; double bestMed = -1;
             foreach (var r in rows)
             {
-                if (r.Count < 2) continue;                   // 至少要有几位数字
+                if (r.Count < 2) continue;
                 int x0 = r.Min(k => k.X), x1 = r.Max(k => k.X + k.W);
                 if (x1 - x0 < 0.1 * W) continue;             // 太窄的一行不是金额
                 var hh = r.Select(k => k.H).OrderBy(v => v).ToList();
-                double med = hh[r.Count / 2];                // 用中位高, 一个异常块带不偏
+                double med = hh[r.Count / 2];
                 if (med > bestMed) { bestMed = med; best = r; }
             }
             if (best == null) return null;
@@ -316,18 +256,17 @@ namespace Ssp
                            best.Max(k => k.X + k.W), best.Max(k => k.Y + k.H) };
         }
 
-        // 8 连通标记。用显式栈, 不用递归 —— 大连通块会把调用栈撑爆。
+        // 8 连通标记, 显式栈避免递归过深
         static List<Comp> Label(bool[,] fg, int h, int w, int minArea)
         {
             var seen = new bool[h, w];
             var outp = new List<Comp>();
-            var stack = new Stack<int>();          // 存 y*w+x, 比存元组省内存
+            var stack = new Stack<int>();
             for (int sy = 0; sy < h; sy++)
                 for (int sx = 0; sx < w; sx++)
                 {
                     if (!fg[sy, sx] || seen[sy, sx]) continue;
-                    // ★ 光栅扫描下第一次碰到某块的像素必然在它最上面一行, 所以 minY 就是 sy,
-                    //   不用再更新; minX/maxX 不成立, 必须更新。
+                    // 扫描顺序保证种子点位于该块最上一行, 故 minY 即 sy
                     int minX = sx, maxX = sx, maxY = sy, area = 0;
                     stack.Push(sy * w + sx); seen[sy, sx] = true;
                     while (stack.Count > 0)
@@ -355,10 +294,10 @@ namespace Ssp
                         outp.Add(new Comp { X = minX, Y = sy, W = maxX - minX + 1,
                                             H = maxY - sy + 1, Area = area });
                 }
-            return outp;   // ★ 不排序: 保持发现顺序, 结果确定
+            return outp;   // 保持发现顺序
         }
 
-        // Otsu: 直方图最大类间方差
+        // Otsu 阈值
         static int Otsu(byte[,] a, int h, int w)
         {
             var hist = new long[256];
@@ -378,8 +317,7 @@ namespace Ssp
             return thr;
         }
 
-        // ★ 偶数个时必须取中间两个的平均(和 numpy 的 median 一致)。
-        //   金额位数经常是偶数, 图省事取上中位的话 04.jpg 的 0.7097 就复现不出来。
+        // 偶数个时取中间两个的平均
         static double Median(IEnumerable<double> xs)
         {
             var v = xs.OrderBy(k => k).ToList();
@@ -388,7 +326,7 @@ namespace Ssp
                                     : (v[v.Count / 2 - 1] + v[v.Count / 2]) / 2.0;
         }
 
-        // 总体标准差(除以 n)
+        // 总体标准差
         static double Std(IEnumerable<double> xs)
         {
             var v = xs.ToList(); if (v.Count == 0) return 0;
@@ -398,31 +336,17 @@ namespace Ssp
     }
 }
 
-// ---------------------------------------------------------------------------
-// 用 System.Drawing 解码的现成写法(Windows 上不用装任何包)
+// System.Drawing 调用示例:
 //
-//   using System.Drawing;
-//   using System.Drawing.Imaging;
-//
-//   static MinusResult CheckFileGdi(string path)
+//   using var bmp = new Bitmap(path);
+//   var d = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height),
+//                        ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+//   try
 //   {
-//       using var bmp = new Bitmap(path);
-//       var rect = new Rectangle(0, 0, bmp.Width, bmp.Height);
-//       var d = bmp.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-//       try
-//       {
-//           var px = new byte[(long)d.Stride * bmp.Height];
-//           System.Runtime.InteropServices.Marshal.Copy(d.Scan0, px, 0, px.Length);
-//           // ★★ 下面两个参数都不能少, 少了**不报错**, 只会安静地给错结果:
-//           //   1. d.Stride —— GDI 每行补齐到 4 的倍数。实测进件里 33.8% 的宽度不是 4 的倍数
-//           //      (1179 / 1290 / 1170 / 1206 这些), 不传就整张图逐行错开。
-//           //   2. PixelOrder.Bgr —— Format24bppRgb 名字叫 Rgb, 内存里其实是 BGR。
-//           //      传错的话蓝底页会被当成白底页, 蓝图那道闸就废了。
-//           return MinusCheck.Check(px, bmp.Width, bmp.Height, PixelOrder.Bgr, d.Stride);
-//       }
-//       finally { bmp.UnlockBits(d); }
+//       var px = new byte[(long)d.Stride * bmp.Height];
+//       Marshal.Copy(d.Scan0, px, 0, px.Length);
+//       return MinusCheck.Check(px, bmp.Width, bmp.Height, PixelOrder.Bgr, d.Stride);
 //   }
+//   finally { bmp.UnlockBits(d); }
 //
-// ★ 用别的解码器也一样: 拿到"每像素 3 字节"的缓冲区, 把宽、高、通道顺序、行跨距如实传进来。
-//   行间没有填充就传 stride = 0。
-// ---------------------------------------------------------------------------
+// Stride 与 Bgr 两个参数都要传, 少传不会抛异常, 但结果是错的。
