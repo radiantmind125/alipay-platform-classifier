@@ -39,6 +39,11 @@ r"""返回箭头异常扫描 —— 不用模型, 只量左上角那个 `<` 的�
   python training/chevron_scan.py D:\download2\OtherImages --out D:\probe\chev.csv
   # 先小样本试跑
   python training/chevron_scan.py D:\download2\OtherImages --limit 20000 --out D:\probe\chev.csv
+  # 只看某个时期(基线和被判的图要同期)
+  python training/chevron_scan.py D:\download2\OtherImages --since 20260801 --out D:\probe\chev9.csv
+
+★ 输出里有一栏**按月的常态箭头**。各月都一样 = 素材没变过, 可以放心混着judge;
+  某个月不一样 = app 换过素材, **那就要用 --since/--until 分月各判各的**。
 
 **只读**: 只读图片, 只往 --out 写。
 """
@@ -48,6 +53,7 @@ import argparse
 import collections
 import csv
 import os
+import re
 import struct
 import sys
 from pathlib import Path
@@ -56,6 +62,7 @@ import numpy as np
 from PIL import Image
 
 _EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+_TS = re.compile(r"_(\d{8})\d{6}")   # 文件名里的时间戳, 形如 _20260902211530
 
 
 def header_size(path):
@@ -133,8 +140,14 @@ def main() -> None:
                     help="高和宽都低于该分辨率常态的这个比例才算偏小。默认 0.92")
     ap.add_argument("--blur-mult", type=float, default=1.5,
                     help="虚实比超过该分辨率中位数的几倍才算发虚。默认 1.5")
+    ap.add_argument("--since", type=str, default=None, help="只看这个日期(含)之后的, YYYYMMDD")
+    ap.add_argument("--until", type=str, default=None, help="只看这个日期(含)之前的, YYYYMMDD")
     ap.add_argument("--seed", type=int, default=20260903)
     args = ap.parse_args()
+
+    for _k, _v in (("--since", args.since), ("--until", args.until)):
+        if _v is not None and not (len(_v) == 8 and _v.isdigit()):
+            raise SystemExit(f"!! {_k} 要写成 YYYYMMDD 八位数字, 收到的是 {_v!r}")
 
     files = []
     for dp, _, fns in os.walk(args.input):
@@ -142,6 +155,28 @@ def main() -> None:
             if os.path.splitext(fn)[1].lower() in _EXTS:
                 files.append(os.path.join(dp, fn))
     print(f"候选 {len(files):,} 张", flush=True)
+
+    # ★ 按文件名日期筛。基线和要判的图**必须是同一个时期** ——
+    #   app 换过素材的话, 拿旧月份的常态去量新月份会整批误判。
+    if args.since or args.until:
+        kept, nodate, outside = [], 0, 0
+        for p in files:
+            m = _TS.search(os.path.basename(p))
+            if not m:
+                nodate += 1
+                continue
+            d = m.group(1)
+            if (args.since and d < args.since) or (args.until and d > args.until):
+                outside += 1
+                continue
+            kept.append(p)
+        rng = f"{args.since or '不限'} ~ {args.until or '不限'}"
+        print(f"按日期筛({rng}): 留下 **{len(kept):,}** 张, 不在范围内 {outside:,}, "
+              f"取不到日期 {nodate:,}", flush=True)
+        if not kept:
+            raise SystemExit("!! 这个日期范围里一张都没有")
+        files = kept
+
     if args.limit and args.limit < len(files):
         import random
         random.Random(args.seed).shuffle(files)
@@ -158,7 +193,9 @@ def main() -> None:
         if not m:
             nomeas += 1
             continue
-        rows.append([os.path.basename(p), sz[0], sz[1], m[0], m[1], round(m[2], 4)])
+        _m = _TS.search(os.path.basename(p))
+        rows.append([os.path.basename(p), sz[0], sz[1], m[0], m[1], round(m[2], 4),
+                     _m.group(1)[:6] if _m else ""])
         if i % 5000 == 0:
             print(f"  {i:,}/{len(files):,}  量到 {len(rows):,}", flush=True)
 
@@ -192,6 +229,25 @@ def main() -> None:
         print(f"{str(sz):>14}{len(grp):>8}{f'{mode_h}x{mode_w}':>12}"
               f"{med_blur:>12.3f}{len(hits):>8}")
 
+        # ★★ 按月再拆一次常态。**这一栏是用来看 app 有没有换过素材的** ——
+        #    如果各月的常态箭头不一样, 说明素材变过, 那就必须按月分别定常态,
+        #    否则拿混合出来的常态去判, 会把某一整个月都判成异常。
+        hit_ids = {id(r) for r in hits}
+        bym = collections.defaultdict(list)
+        for r in grp:
+            if r[6]:
+                bym[r[6]].append(r)
+        if len(bym) > 1:
+            print(f"{'':>14}{'按月:':>8}")
+            for mo in sorted(bym):
+                g2 = bym[mo]
+                h2 = collections.Counter(r[3] for r in g2).most_common(1)[0]
+                w2 = collections.Counter(r[4] for r in g2).most_common(1)[0]
+                b2 = float(np.median([r[5] for r in g2]))
+                n2 = sum(1 for r in g2 if id(r) in hit_ids)
+                print(f"{'':>14}{mo:>8}{len(g2):>8}  {h2[0]}x{w2[0]}"
+                      f" ({100.0*h2[1]/len(g2):.0f}%)  虚实比 {b2:.3f}  报出 {n2}")
+
     n_judged = sum(len(g) for g in by.values() if len(g) >= args.min_group)
     print(f"\n**报出 {len(flagged)} 张 / 实际判定 {n_judged:,} 张 "
           f"= {100.0 * len(flagged) / max(n_judged, 1):.4f}%**")
@@ -204,7 +260,7 @@ def main() -> None:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         with args.out.open("w", encoding="utf-8-sig", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["file", "W", "H", "chev_h", "chev_w", "blur", "flagged"])
+            w.writerow(["file", "W", "H", "chev_h", "chev_w", "blur", "month", "flagged"])
             fset = {id(r) for r in flagged}
             for r in rows:
                 w.writerow(r + [1 if id(r) in fset else 0])
