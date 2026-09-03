@@ -79,27 +79,7 @@ namespace Ssp
 }
 
 // ---------------------------------------------------------------------------
-// 不想引 ImageSharp 的话, Windows 上用 System.Drawing 是这样(不用装包):
-//
-//   using System.Drawing;
-//   using System.Drawing.Imaging;
-//
-//   static MinusResult CheckFileGdi(string path)
-//   {
-//       using var bmp = new Bitmap(path);
-//       var rect = new Rectangle(0, 0, bmp.Width, bmp.Height);
-//       var d = bmp.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-//       try
-//       {
-//           var px = new byte[(long)d.Stride * bmp.Height];
-//           System.Runtime.InteropServices.Marshal.Copy(d.Scan0, px, 0, px.Length);
-//           // ★★ 两个都不能错:
-//           //   1. 传 d.Stride —— GDI 每行会补齐到 4 的倍数, 实测本地进件 33.8% 的宽度
-//           //      不是 4 的倍数(1179 / 1290 / 1170 / 1206 这些), 不传就整张图斜着错开。
-//           //   2. 传 PixelOrder.Bgr —— Format24bppRgb 名字叫 Rgb, **内存里其实是 BGR**。
-//           //      传错的话蓝底页会被当成白底页, 蓝图那道闸就废了。
-//           return MinusCheck.Check(px, bmp.Width, bmp.Height, PixelOrder.Bgr, d.Stride);
-//       }
-//       finally { bmp.UnlockBits(d); }
-//   }
+// 不想引 ImageSharp 的话, 用 System.Drawing 就行, Windows 上不用装任何包 ——
+// **现成的写法在 MinusCheck.cs 文件末尾**, 那边一并写清楚了 stride 和 BGR 这两个坑。
+// 那条路只需要 MinusCheck.cs 一个文件, 这个文件可以整个不要。
 // ---------------------------------------------------------------------------

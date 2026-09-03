@@ -2,7 +2,15 @@
 //
 // ★ 这个文件**不依赖任何第三方包**, 只用 System.*, 直接拖进工程就能编。
 //   入口收的是**解码好的像素字节数组**, 你现在用什么解码器都行, 不用为它装新包。
-//   (需要现成的读文件封装的话见同目录 MinusCheckLoader.cs, 那个是可选的。)
+//   **一个文件就够, 不需要别的。**
+//
+// ★★ 拿到先看这两条, 不然容易走弯路
+// ---------------------------------
+// 1. **拿 03.jpg / 04.jpg 自验会看到 CannotDetermine, 那不是没生效。**
+//    它们数字高只有 47 和 53, 低于默认的 60 px 弃权线。详见下面"怎么自验"那一节。
+// 2. **用 System.Drawing 解码的话, `stride` 和 `PixelOrder.Bgr` 两个都必须传。**
+//    少传任何一个都会**静默出错**(整图错位 / 页型认反), 不会抛异常。
+//    文件最后有现成的 GDI 调用示例, 照抄即可。
 //
 // 干什么
 // ------
@@ -530,3 +538,34 @@ namespace Ssp
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// 用 System.Drawing 解码的现成写法(Windows 上不用装任何包)
+//
+//   using System.Drawing;
+//   using System.Drawing.Imaging;
+//
+//   static MinusResult CheckFileGdi(string path)
+//   {
+//       using var bmp = new Bitmap(path);
+//       var rect = new Rectangle(0, 0, bmp.Width, bmp.Height);
+//       var d = bmp.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+//       try
+//       {
+//           var px = new byte[(long)d.Stride * bmp.Height];
+//           System.Runtime.InteropServices.Marshal.Copy(d.Scan0, px, 0, px.Length);
+//           // ★★ 下面两个参数都不能少, 少了**不会报错**, 只会安静地给错结果:
+//           //   1. d.Stride —— GDI 每行会补齐到 4 的倍数。实测本地进件里
+//           //      **33.8% 的宽度不是 4 的倍数**(1179 / 1290 / 1170 / 1206 这些),
+//           //      不传 stride 的话整张图**逐行斜着错开**, 量出来全是垃圾。
+//           //   2. PixelOrder.Bgr —— Format24bppRgb 名字叫 Rgb,
+//           //      **内存里其实是 BGR**。传错的话蓝底页会被当成白底页,
+//           //      蓝图那道闸就废了(蓝图是误杀最大的来源, 见文件头)。
+//           return MinusCheck.Check(px, bmp.Width, bmp.Height, PixelOrder.Bgr, d.Stride);
+//       }
+//       finally { bmp.UnlockBits(d); }
+//   }
+//
+// ★ 用别的解码器也一样: 只要拿到"每像素 3 字节"的缓冲区, 把 宽、高、通道顺序、行跨距
+//   如实传进来就行。行与行之间没有填充就传 stride = 0。
+// ---------------------------------------------------------------------------
