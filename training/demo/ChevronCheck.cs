@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using OpenCvSharp;
 
 namespace Ssp
 {
@@ -31,11 +32,11 @@ namespace Ssp
     /// 用固定尺寸素材拼出来的图, 箭头会偏小而且发虚 —— 发虚是因为它被缩放过,
     /// 原生渲染无论多大都是利的。
     ///
-    /// 只对苹果机型有效。安卓各家 ROM 自己画导航栏, 同一分辨率下实测有五百多种不同的
+    /// 只对苹果机型有效。安卓各家 ROM 自己画导航栏, 同一分辨率下实测有九百多种不同的
     /// 箭头位图, 最常见的才占 7%, 没有可比的基准; 而且安卓的正常箭头尺寸落在
     /// 和异常箭头相同的区间里, 分不开。所以遇到非苹果分辨率一律不判。
     ///
-    /// 无外部依赖, 无静态可变状态, 可多线程调用。
+    /// 只读入参, 内部全部用 ROI 视图, 不复制整图。无静态可变状态, 可多线程调用。
     /// </summary>
     public static class ChevronCheck
     {
@@ -67,90 +68,71 @@ namespace Ssp
             (1125, 2436), (1242, 2688),
         };
 
-        struct Comp { public int X, Y, W, H, Area; }
-
-        /// <summary>
-        /// 每像素 3 字节, 第 y 行第 x 列的首字节位于 y*stride + x*3。
-        /// </summary>
-        /// <param name="order">通道顺序; System.Drawing 解出的数据传 Bgr。</param>
-        /// <param name="stride">
-        /// 每行字节数, 传 0 表示 width*3。GDI 的 BitmapData.Stride 会补齐到 4 的倍数,
-        /// 需如实传入, 否则逐行错位且不会抛异常。
+        /// <param name="image">
+        /// 8 位图, 1 / 3 / 4 通道均可; 多通道按 OpenCV 惯例视为 BGR(A)。
+        /// 传进来的 Mat 不会被修改, 也不会被释放。
         /// </param>
-        public static ChevronResult Check(byte[] pixels, int width, int height,
-                                          PixelOrder order = PixelOrder.Rgb, int stride = 0)
+        public static ChevronResult Check(Mat image)
         {
-            if (pixels == null) throw new ArgumentNullException(nameof(pixels));
-            if (width <= 0 || height <= 0)
-                throw new ArgumentException("宽高必须为正");
-            if (stride == 0) stride = width * 3;
-            if (stride < width * 3)
-                throw new ArgumentException($"stride {stride} 小于一行需要的 {width * 3} 字节");
-            long need = (long)(height - 1) * stride + (long)width * 3;
-            if (pixels.Length < need)
-                throw new ArgumentException(
-                    $"像素数组长度 {pixels.Length} 不够, 按 stride={stride} 需要 {need} 字节");
+            if (image == null) throw new ArgumentNullException(nameof(image));
 
             var res = new ChevronResult { Verdict = ChevronVerdict.CannotDetermine };
+            if (image.Empty()) { res.Reason = "图为空"; return res; }
+            if (image.Depth() != MatType.CV_8U)
+                throw new ArgumentException("只支持 8 位图");
 
+            int cn = image.Channels();
+            if (cn != 1 && cn != 3 && cn != 4)
+                throw new ArgumentException($"不支持 {cn} 通道");
+
+            int width = image.Width, height = image.Height;
             if (!Supported.Contains((width, height)))
             {
                 res.Reason = $"{width}x{height} 不是已知的苹果机型分辨率, 不判";
                 return res;
             }
 
-            int ri = order == PixelOrder.Rgb ? 0 : 2;
-            int bi = order == PixelOrder.Rgb ? 2 : 0;
-
-            // 只看左上角一小块, 导航栏一定在这个范围内
+            // 只看左上角一小块, 导航栏一定在这个范围内。ROI 是视图, 不复制。
             int cw = (int)(width * 0.13), ch = (int)(height * 0.12);
             if (cw < 16 || ch < 16) { res.Reason = "图太小"; return res; }
 
-            var gray = new byte[ch, cw];
-            for (int y = 0; y < ch; y++)
-            {
-                int row = y * stride;
-                for (int x = 0; x < cw; x++)
-                {
-                    int o = row + x * 3;
-                    gray[y, x] = (byte)((pixels[o + ri] * 9798 + pixels[o + 1] * 19235
-                                         + pixels[o + bi] * 3735 + 16384) >> 15);
-                }
-            }
+            using var corner = new Mat(image, new Rect(0, 0, cw, ch));
+            using var gray = new Mat();
+            if (cn == 1) corner.CopyTo(gray);
+            else Cv2.CvtColor(corner, gray,
+                cn == 4 ? ColorConversionCodes.BGRA2GRAY : ColorConversionCodes.BGR2GRAY);
 
-            var arrow = LocateArrow(gray, ch, cw);
+            var arrow = LocateArrow(gray);
             if (arrow == null) { res.Reason = "找不到返回箭头"; return res; }
             var a = arrow.Value;
 
             // 虚实比: 半灰边缘像素数 / 实心笔画像素数。
             // 原生渲染的图标边缘干净, 这个比值小; 缩放过的会糊出一圈半灰, 比值明显变大。
-            int core = 0, mid = 0;
-            for (int y = a.Y; y < a.Y + a.H; y++)
-                for (int x = a.X; x < a.X + a.W; x++)
-                {
-                    int g = gray[y, x];
-                    if (g < CoreThr) core++;
-                    else if (g < MidThr) mid++;
-                }
+            using var box = new Mat(gray, a);
+            using var mask = new Mat();
+            Cv2.InRange(box, 0, CoreThr - 1, mask);
+            int core = Cv2.CountNonZero(mask);
+            Cv2.InRange(box, CoreThr, MidThr - 1, mask);
+            int mid = Cv2.CountNonZero(mask);
             if (core == 0) { res.Reason = "箭头没有实心像素"; return res; }
 
             res.Measured = true;
-            res.ArrowHeight = a.H;
-            res.ArrowWidth = a.W;
-            res.ArrowTop = a.Y;
+            res.ArrowHeight = a.Height;
+            res.ArrowWidth = a.Width;
+            res.ArrowTop = a.Top;
             res.Blur = (double)mid / core;
 
-            bool small = a.H < NormalHeight * SizeFraction && a.W < NormalWidth * SizeFraction;
+            bool small = a.Height < NormalHeight * SizeFraction && a.Width < NormalWidth * SizeFraction;
             bool fuzzy = res.Blur >= BlurThreshold;
             if (small && fuzzy)
             {
                 res.Verdict = ChevronVerdict.Suspicious;
-                res.Reason = $"箭头 {a.H}x{a.W} 小于常态 {NormalHeight}x{NormalWidth}, 虚实比 {res.Blur:F3}";
+                res.Reason = $"箭头 {a.Height}x{a.Width} 小于常态 {NormalHeight}x{NormalWidth}, 虚实比 {res.Blur:F3}";
             }
             else
             {
                 res.Verdict = ChevronVerdict.Ok;
-                res.Reason = $"箭头 {a.H}x{a.W}, 虚实比 {res.Blur:F3}";
+                res.Reason = $"箭头 {a.Height}x{a.Width}, 虚实比 {res.Blur:F3}";
             }
             return res;
         }
@@ -159,54 +141,36 @@ namespace Ssp
         /// 找导航栏的返回箭头。用连通域找, 不用固定窗口 ——
         /// 状态栏高度各机型不一样, 固定窗口会切到箭头上或者整个错过。
         /// </summary>
-        static Comp? LocateArrow(byte[,] gray, int h, int w)
+        static Rect? LocateArrow(Mat gray)
         {
-            var fg = new bool[h, w];
-            for (int y = 0; y < h; y++)
-                for (int x = 0; x < w; x++)
-                    fg[y, x] = gray[y, x] < GrayDark;
+            using var dark = new Mat();
+            // 判据是 gray < 170, 即 <= 169; BinaryInv 的判据是 src <= thresh
+            Cv2.Threshold(gray, dark, GrayDark - 1, 255, ThresholdTypes.BinaryInv);
 
-            Comp? best = null;
-            var seen = new bool[h, w];
-            var stack = new Stack<int>();
-            for (int sy = 0; sy < h; sy++)
-                for (int sx = 0; sx < w; sx++)
-                {
-                    if (!fg[sy, sx] || seen[sy, sx]) continue;
-                    int minX = sx, maxX = sx, maxY = sy, area = 0;
-                    stack.Push(sy * w + sx); seen[sy, sx] = true;
-                    while (stack.Count > 0)
-                    {
-                        int v = stack.Pop();
-                        int y = v / w, x = v - y * w;
-                        area++;
-                        if (x < minX) minX = x; else if (x > maxX) maxX = x;
-                        if (y > maxY) maxY = y;
-                        for (int dy = -1; dy <= 1; dy++)
-                        {
-                            int ny = y + dy;
-                            if (ny < 0 || ny >= h) continue;
-                            for (int dx = -1; dx <= 1; dx++)
-                            {
-                                if (dy == 0 && dx == 0) continue;
-                                int nx = x + dx;
-                                if (nx < 0 || nx >= w) continue;
-                                if (fg[ny, nx] && !seen[ny, nx])
-                                { seen[ny, nx] = true; stack.Push(ny * w + nx); }
-                            }
-                        }
-                    }
-                    int bh = maxY - sy + 1, bw = maxX - minX + 1;
-                    // 箭头: 竖着比横着长, 有一定墨量, 且尺寸落在合理范围内。
-                    // 尺寸下限很重要: 没有返回箭头的页面上, 不加下限会挑中别的小图标
-                    // (实测挑到 18x11、19x15 这种), 误报会从万分之 0.8 涨到万分之 6。
-                    if (bh < MinPlausibleH || bh > MaxPlausibleH) continue;
-                    if (bw < MinPlausibleW || bw > MaxPlausibleW) continue;
-                    if (bh < bw || area < 100) continue;
-                    // 状态栏的图标也可能过筛, 取最靠下的那个 —— 导航栏在状态栏下面
-                    if (best == null || sy > best.Value.Y)
-                        best = new Comp { X = minX, Y = sy, W = bw, H = bh, Area = area };
-                }
+            using var labels = new Mat();
+            using var stats = new Mat();
+            using var centroids = new Mat();
+            int n = Cv2.ConnectedComponentsWithStats(dark, labels, stats, centroids,
+                                                     PixelConnectivity.Connectivity8, MatType.CV_32S);
+
+            Rect? best = null;
+            for (int i = 1; i < n; i++)      // 0 是背景
+            {
+                int bw = stats.At<int>(i, (int)ConnectedComponentsTypes.Width);
+                int bh = stats.At<int>(i, (int)ConnectedComponentsTypes.Height);
+                int area = stats.At<int>(i, (int)ConnectedComponentsTypes.Area);
+                // 箭头: 竖着比横着长, 有一定墨量, 且尺寸落在合理范围内。
+                // 尺寸下限很重要: 没有返回箭头的页面上, 不加下限会挑中别的小图标
+                // (实测挑到 18x11、19x15 这种), 误报会从万分之 0.8 涨到万分之 6。
+                if (bh < MinPlausibleH || bh > MaxPlausibleH) continue;
+                if (bw < MinPlausibleW || bw > MaxPlausibleW) continue;
+                if (bh < bw || area < 100) continue;
+                int x = stats.At<int>(i, (int)ConnectedComponentsTypes.Left);
+                int y = stats.At<int>(i, (int)ConnectedComponentsTypes.Top);
+                // 状态栏的图标也可能过筛, 取最靠下的那个 —— 导航栏在状态栏下面
+                if (best == null || y > best.Value.Top)
+                    best = new Rect(x, y, bw, bh);
+            }
             return best;
         }
     }

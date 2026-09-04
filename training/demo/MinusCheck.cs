@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using OpenCvSharp;
 
 namespace Ssp
 {
@@ -11,13 +12,6 @@ namespace Ssp
         CannotDetermine = 0,   // 判不了, 走正常流程
         Ok = 1,
         Suspicious = 2,        // 负号偏长
-    }
-
-    /// <summary>像素在字节数组里的通道顺序。</summary>
-    public enum PixelOrder
-    {
-        Rgb = 0,
-        Bgr = 1,   // System.Drawing 的 Format24bppRgb 实际是 BGR
     }
 
     public sealed class MinusResult
@@ -33,7 +27,7 @@ namespace Ssp
 
     /// <summary>
     /// 白底账单详情页的负号几何检查: 量负号宽度与数字中位宽度的比值。
-    /// 无外部依赖, 无静态可变状态, 可多线程调用。
+    /// 直接收 Mat, 内部全部用 ROI 视图, 不复制像素。无静态可变状态, 可多线程调用。
     /// </summary>
     public static class MinusCheck
     {
@@ -48,48 +42,54 @@ namespace Ssp
             public int X, Y, W, H, Area;
         }
 
-        /// <summary>
-        /// 每像素 3 字节, 第 y 行第 x 列的首字节位于 y*stride + x*3。
-        /// </summary>
-        /// <param name="order">通道顺序; System.Drawing 解出的数据传 Bgr。</param>
-        /// <param name="stride">
-        /// 每行字节数, 传 0 表示 width*3。GDI 的 BitmapData.Stride 会补齐到 4 的倍数,
-        /// 需如实传入, 否则逐行错位且不会抛异常。
+        /// <param name="image">
+        /// 8 位图, 1 / 3 / 4 通道均可; 多通道按 OpenCV 惯例视为 BGR(A)。
+        /// 传进来的 Mat 不会被修改, 也不会被释放。
         /// </param>
-        public static MinusResult Check(byte[] pixels, int width, int height,
-                                        PixelOrder order = PixelOrder.Rgb, int stride = 0)
+        public static MinusResult Check(Mat image)
         {
-            if (pixels == null) throw new ArgumentNullException(nameof(pixels));
-            if (width <= 0 || height <= 0)
-                throw new ArgumentException("宽高必须为正");
-            if (stride == 0) stride = width * 3;
-            if (stride < width * 3)
-                throw new ArgumentException(
-                    $"stride {stride} 小于一行需要的 {width * 3} 字节");
-            long need = (long)(height - 1) * stride + (long)width * 3;
-            if (pixels.Length < need)
-                throw new ArgumentException(
-                    $"像素数组长度 {pixels.Length} 不够, 按 stride={stride} 需要 {need} 字节");
+            if (image == null) throw new ArgumentNullException(nameof(image));
 
             var res = new MinusResult { Verdict = MinusVerdict.CannotDetermine };
-            if (width < 16 || height < 16) { res.Reason = "图太小"; return res; }
+            if (image.Empty()) { res.Reason = "图为空"; return res; }
+            if (image.Depth() != MatType.CV_8U)
+                throw new ArgumentException("只支持 8 位图");
 
-            int ri = order == PixelOrder.Rgb ? 0 : 2;
-            int bi = order == PixelOrder.Rgb ? 2 : 0;
+            int cn = image.Channels();
+            if (cn != 1 && cn != 3 && cn != 4)
+                throw new ArgumentException($"不支持 {cn} 通道");
+            if (image.Width < 16 || image.Height < 16) { res.Reason = "图太小"; return res; }
 
             // 蓝底转账页金额不带符号, 不处理
-            if (IsBluePage(pixels, width, height, stride, ri, bi))
+            if (cn >= 3 && IsBluePage(image))
             { res.Reason = "蓝底转账页, 金额不带负号"; return res; }
 
-            var gray = ToGray(pixels, width, height, stride, ri, bi);
-            return Check(gray, width, height, res);
+            // 单通道时直接用入参, 不复制也不释放; 多通道才需要转换出一张自己的灰度图
+            Mat? owned = null;
+            try
+            {
+                Mat gray;
+                if (cn == 1) gray = image;
+                else
+                {
+                    owned = new Mat();
+                    Cv2.CvtColor(image, owned,
+                        cn == 4 ? ColorConversionCodes.BGRA2GRAY : ColorConversionCodes.BGR2GRAY);
+                    gray = owned;
+                }
+                return Check(gray, res);
+            }
+            finally { owned?.Dispose(); }
         }
 
-        static MinusResult Check(byte[,] gray, int W, int H, MinusResult res)
+        static MinusResult Check(Mat gray, MinusResult res)
         {
-            var box = LocateAmount(gray, W, H);
+            int W = gray.Width, H = gray.Height;
+
+            var box = LocateAmount(gray);
             if (box == null) { res.Reason = "定位不到金额行"; return res; }
-            int bx0 = box[0], by0 = box[1], bx1 = box[2], by1 = box[3];
+            int bx0 = box.Value.Left, by0 = box.Value.Top;
+            int bx1 = box.Value.Right, by1 = box.Value.Bottom;
 
             // 行内重新取块, 不设高度下限: 定位阶段的高度过滤会把负号滤掉。
             // 左侧外扩较多, 因为定位框只覆盖数字, 负号落在框外。
@@ -100,23 +100,17 @@ namespace Ssp
             int cw = cx1 - cx0, ch = cy1 - cy0;
             if (cw < 8 || ch < 8) { res.Reason = "金额行裁出来太小"; return res; }
 
-            var sub = new byte[ch, cw];
-            for (int y = 0; y < ch; y++)
-                for (int x = 0; x < cw; x++)
-                    sub[y, x] = gray[cy0 + y, cx0 + x];
+            // ROI 是视图, 不复制
+            using var sub = new Mat(gray, new Rect(cx0, cy0, cw, ch));
+            using var fg = new Mat();
+            // BinaryInv 得到 src <= otsu 的前景, 与手写版的判据一致
+            Cv2.Threshold(sub, fg, 0, 255, ThresholdTypes.BinaryInv | ThresholdTypes.Otsu);
 
-            int otsu = Otsu(sub, ch, cw);
-            var fg = new bool[ch, cw];
-            long on = 0;
-            for (int y = 0; y < ch; y++)
-                for (int x = 0; x < cw; x++)
-                { fg[y, x] = sub[y, x] <= otsu; if (fg[y, x]) on++; }
             // 前景过半说明极性相反, 取反; 阈值为 127/255
-            if (255L * on > 127L * ch * cw)
-                for (int y = 0; y < ch; y++)
-                    for (int x = 0; x < cw; x++) fg[y, x] = !fg[y, x];
+            long on = Cv2.CountNonZero(fg);
+            if (255L * on > 127L * ch * cw) Cv2.BitwiseNot(fg, fg);
 
-            var glyphs = Label(fg, ch, cw, minArea: 6);
+            var glyphs = Label(fg, minArea: 6);
             if (glyphs.Count < 4) { res.Reason = "块数不够"; return res; }
 
             var hs = glyphs.Select(g => g.H).OrderBy(v => v).ToList();
@@ -159,52 +153,29 @@ namespace Ssp
             return res;
         }
 
-        // 上三分之一的通道均值判断蓝底
-        static bool IsBluePage(byte[] px, int w, int h, int stride, int ri, int bi)
+        // 上三分之一的通道均值判断蓝底; Mean 收 ROI 视图, 不复制
+        static bool IsBluePage(Mat bgr)
         {
-            int h3 = Math.Max(1, h / 3);
-            double r = 0, g = 0, b = 0; long n = (long)h3 * w;
-            for (int y = 0; y < h3; y++)
-            {
-                int row = y * stride;
-                for (int x = 0; x < w; x++)
-                {
-                    int o = row + x * 3;
-                    r += px[o + ri]; g += px[o + 1]; b += px[o + bi];
-                }
-            }
-            r /= n; g /= n; b /= n;
-            return b > r + 25 && b > g + 15;
-        }
-
-        // 定点系数, 与 OpenCV cvtColor RGB2GRAY 结果一致, 不要改成浮点写法
-        static byte[,] ToGray(byte[] px, int w, int h, int stride, int ri, int bi)
-        {
-            var gray = new byte[h, w];
-            for (int y = 0; y < h; y++)
-            {
-                int row = y * stride;
-                for (int x = 0; x < w; x++)
-                {
-                    int o = row + x * 3;
-                    gray[y, x] = (byte)((px[o + ri] * 9798 + px[o + 1] * 19235
-                                         + px[o + bi] * 3735 + 16384) >> 15);
-                }
-            }
-            return gray;
+            int h3 = Math.Max(1, bgr.Height / 3);
+            using var top = new Mat(bgr, new Rect(0, 0, bgr.Width, h3));
+            var m = Cv2.Mean(top);            // BGR 顺序: Val0=B, Val1=G, Val2=R
+            return m.Val0 > m.Val2 + 25 && m.Val0 > m.Val1 + 15;
         }
 
         // 在图像 8%~55% 高度范围内, 取同一行中字最高的那一行
-        static int[]? LocateAmount(byte[,] gray, int W, int H)
+        static Rect? LocateAmount(Mat gray)
         {
+            int W = gray.Width, H = gray.Height;
             int y0b = (int)(H * 0.08), y1b = (int)(H * 0.55);
             int bh = y1b - y0b;
             if (bh < 8) return null;
-            var dark = new bool[bh, W];
-            for (int y = 0; y < bh; y++)
-                for (int x = 0; x < W; x++) dark[y, x] = gray[y0b + y, x] < GrayDark;
 
-            var all = Label(dark, bh, W, minArea: 20);
+            using var band = new Mat(gray, new Rect(0, y0b, W, bh));   // 视图
+            using var dark = new Mat();
+            // 手写版判据是 gray < 140, 即 <= 139; BinaryInv 的判据是 src <= thresh
+            Cv2.Threshold(band, dark, GrayDark - 1, 255, ThresholdTypes.BinaryInv);
+
+            var all = Label(dark, minArea: 20);
             var comps = new List<Comp>();
             foreach (var c in all)
             {
@@ -252,69 +223,33 @@ namespace Ssp
                 if (med > bestMed) { bestMed = med; best = r; }
             }
             if (best == null) return null;
-            return new[] { best.Min(k => k.X), best.Min(k => k.Y),
-                           best.Max(k => k.X + k.W), best.Max(k => k.Y + k.H) };
+            return Rect.FromLTRB(best.Min(k => k.X), best.Min(k => k.Y),
+                                 best.Max(k => k.X + k.W), best.Max(k => k.Y + k.H));
         }
 
-        // 8 连通标记, 显式栈避免递归过深
-        static List<Comp> Label(bool[,] fg, int h, int w, int minArea)
+        // 8 连通标记; 非零算前景, 与手写版的 fg 口径一致
+        static List<Comp> Label(Mat bin, int minArea)
         {
-            var seen = new bool[h, w];
-            var outp = new List<Comp>();
-            var stack = new Stack<int>();
-            for (int sy = 0; sy < h; sy++)
-                for (int sx = 0; sx < w; sx++)
-                {
-                    if (!fg[sy, sx] || seen[sy, sx]) continue;
-                    // 扫描顺序保证种子点位于该块最上一行, 故 minY 即 sy
-                    int minX = sx, maxX = sx, maxY = sy, area = 0;
-                    stack.Push(sy * w + sx); seen[sy, sx] = true;
-                    while (stack.Count > 0)
-                    {
-                        int v = stack.Pop();
-                        int y = v / w, x = v - y * w;
-                        area++;
-                        if (x < minX) minX = x; else if (x > maxX) maxX = x;
-                        if (y > maxY) maxY = y;
-                        for (int dy = -1; dy <= 1; dy++)
-                        {
-                            int ny = y + dy;
-                            if (ny < 0 || ny >= h) continue;
-                            for (int dx = -1; dx <= 1; dx++)
-                            {
-                                if (dy == 0 && dx == 0) continue;
-                                int nx = x + dx;
-                                if (nx < 0 || nx >= w) continue;
-                                if (fg[ny, nx] && !seen[ny, nx])
-                                { seen[ny, nx] = true; stack.Push(ny * w + nx); }
-                            }
-                        }
-                    }
-                    if (area >= minArea)
-                        outp.Add(new Comp { X = minX, Y = sy, W = maxX - minX + 1,
-                                            H = maxY - sy + 1, Area = area });
-                }
-            return outp;   // 保持发现顺序
-        }
-
-        // Otsu 阈值
-        static int Otsu(byte[,] a, int h, int w)
-        {
-            var hist = new long[256];
-            for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) hist[a[y, x]]++;
-            long total = (long)h * w, sum = 0;
-            for (int i = 0; i < 256; i++) sum += (long)i * hist[i];
-            long sumB = 0, wB = 0; double maxVar = -1; int thr = 0;
-            for (int t = 0; t < 256; t++)
+            using var labels = new Mat();
+            using var stats = new Mat();
+            using var centroids = new Mat();
+            int n = Cv2.ConnectedComponentsWithStats(bin, labels, stats, centroids,
+                                                     PixelConnectivity.Connectivity8, MatType.CV_32S);
+            var outp = new List<Comp>(Math.Max(0, n - 1));
+            for (int i = 1; i < n; i++)      // 0 是背景
             {
-                wB += hist[t]; if (wB == 0) continue;
-                long wF = total - wB; if (wF == 0) break;
-                sumB += (long)t * hist[t];
-                double mB = (double)sumB / wB, mF = (double)(sum - sumB) / wF;
-                double v = (double)wB * wF * (mB - mF) * (mB - mF);
-                if (v > maxVar) { maxVar = v; thr = t; }
+                int area = stats.At<int>(i, (int)ConnectedComponentsTypes.Area);
+                if (area < minArea) continue;
+                outp.Add(new Comp
+                {
+                    X = stats.At<int>(i, (int)ConnectedComponentsTypes.Left),
+                    Y = stats.At<int>(i, (int)ConnectedComponentsTypes.Top),
+                    W = stats.At<int>(i, (int)ConnectedComponentsTypes.Width),
+                    H = stats.At<int>(i, (int)ConnectedComponentsTypes.Height),
+                    Area = area,
+                });
             }
-            return thr;
+            return outp;
         }
 
         // 偶数个时取中间两个的平均
@@ -335,18 +270,3 @@ namespace Ssp
         }
     }
 }
-
-// System.Drawing 调用示例:
-//
-//   using var bmp = new Bitmap(path);
-//   var d = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height),
-//                        ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-//   try
-//   {
-//       var px = new byte[(long)d.Stride * bmp.Height];
-//       Marshal.Copy(d.Scan0, px, 0, px.Length);
-//       return MinusCheck.Check(px, bmp.Width, bmp.Height, PixelOrder.Bgr, d.Stride);
-//   }
-//   finally { bmp.UnlockBits(d); }
-//
-// Stride 与 Bgr 两个参数都要传, 少传不会抛异常, 但结果是错的。
