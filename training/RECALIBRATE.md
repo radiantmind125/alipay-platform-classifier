@@ -58,12 +58,16 @@ python training\font_scan.py $data --limit 5000 --min-group 50 --out D:\probe\fo
 
 ### 看三件事
 
-1. **`判不了的占 xx%`** —— 本机是 **42%** 左右。
-   - 明显更高(比如 80%+): 目录不对, 或者这批图不是账单详情页。**停下来, 别往下跑。**
-2. **分辨率表里的 `众数占比`** —— 本机是 **55%~65%**。
+1. **`判不了的占 xx%`** —— 应该在 **10%~15%**(本机 12.2%, 服务器 12.4%)。
+   - 明显更高(比如 50%+): 目录不对, 或者这批图不是账单详情页。**停下来, 别往下跑。**
+2. **分辨率表里的 `众数占比`** —— 服务器实测 **73%~98%**。
    - 明显更低(比如 30%): 该分辨率的"常态"根本立不住, 这条线在那个机型上没用。
 3. **每个分辨率的 `张数`** —— 少于 `--min-group`(默认 300)的分辨率会被**整组跳过**。
    跳过 = **不判**, 不是判为正常。
+
+> `Premature end of JPEG file` 是 OpenCV 对图库里截断 JPEG 的提示, **不是错误**, 忽略即可。
+> **不要给 python 加 `2>&1`** —— PowerShell 5.1 会把原生程序 stderr 的每一行包成
+> `NativeCommandError` 显示成红色报错, 看着像崩了其实没有。不加就正常打屏。
 
 ---
 
@@ -72,7 +76,7 @@ python training\font_scan.py $data --limit 5000 --min-group 50 --out D:\probe\fo
 一次跑完, 不用跑两遍。5 万张大概要**半小时到一个多小时**, 取决于磁盘。
 
 ```powershell
-python training\font_scan.py $data --limit 50000 --out D:\probe\font.csv --emit-table 2>&1 | Tee-Object D:\probe\font_log.txt
+python training\font_scan.py $data --limit 50000 --out D:\probe\font.csv --emit-table | Tee-Object D:\probe\font_log.txt
 ```
 
 > `Tee-Object` 会同时打屏和存文件。如果 `font_log.txt` 里中文是乱码,
@@ -136,7 +140,7 @@ python training\font_scan.py $data --replay D:\probe\font.csv --size-mult 1.05 -
 分月各判各的。例如只用八月之后的数据:
 
 ```powershell
-python training\font_scan.py $data --since 20260801 --out D:\probe\font_0801.csv --emit-table 2>&1 | Tee-Object D:\probe\font_0801_log.txt
+python training\font_scan.py $data --since 20260801 --out D:\probe\font_0801.csv --emit-table | Tee-Object D:\probe\font_0801_log.txt
 ```
 
 `--since / --until` 都是 `YYYYMMDD` 八位, 取的是文件名里的时间戳。
@@ -168,7 +172,7 @@ python training\font_scan.py $data --since 20260801 --out D:\probe\font_0801.csv
 `ChevronCheck.cs` 里的 `56x33` 和那张分辨率白名单也是硬编码的, 同样的毛病。
 
 ```powershell
-python training\chevron_scan.py $data --limit 50000 --emit-table 2>&1 | Tee-Object D:\probe\chev_log.txt
+python training\chevron_scan.py $data --limit 50000 --emit-table | Tee-Object D:\probe\chev_log.txt
 ```
 
 ★ 这条的 `--emit-table` 会**顺便验证 ChevronCheck.cs 赖以成立的那个前提**:
@@ -188,9 +192,26 @@ git pull
 $data = "D:\download2\OtherImages"
 if (-not (Test-Path D:\probe)) { New-Item -ItemType Directory D:\probe | Out-Null }
 
-python training\font_scan.py $data --limit 5000 --out D:\probe\font_try.csv
-python training\font_scan.py $data --limit 50000 --out D:\probe\font.csv --emit-table 2>&1 | Tee-Object D:\probe\font_log.txt
-python training\chevron_scan.py $data --limit 50000 --emit-table 2>&1 | Tee-Object D:\probe\chev_log.txt
+python training\font_scan.py $data --limit 5000 --min-group 50 --out D:\probe\font_try.csv
+python training\font_scan.py $data --limit 50000 --out D:\probe\font.csv --emit-table | Tee-Object D:\probe\font_log.txt
+python training\font_scan.py $data --replay D:\probe\font.csv --sheet D:\probe\font_hits.png
+python training\chevron_scan.py $data --limit 50000 --out D:\probe\chev.csv --emit-table | Tee-Object D:\probe\chev_log.txt
 ```
 
-跑完把 `D:\probe\font_log.txt` 和 `D:\probe\chev_log.txt` 两份留着, 里面有全部结论。
+跑完把 `font.csv` / `font_log.txt` / `font_hits.png` / `chev.csv` / `chev_log.txt` 留着,
+里面有全部结论。**其中 `font.csv` 最要紧** —— 有了它, 之后换阈值、看分月、出拼图
+都能用 `--replay` 秒级重做, 不用再动图库。
+
+---
+
+## 2026-09-04 第一次在服务器上跑出来的结果(留个底, 下次比对用)
+
+图库 **873,045 个文件**。抽 5,000 张, 量到 4,381 张, 判不了 12.4%。
+
+- **常态表和本机七月标的那张一个不差**: 14 个分辨率全部一致, 0 个不一致。
+  服务器上还多出三个: `1200x2652->73`, `1256x2760->76`, `720x1612->43`。
+- **按月常态: 七月和八月完全一样**(72/66/78/71/79 五个分辨率两个月都没变) ——
+  **支付宝没改过金额字号**, "会随版本漂移"这个担心在这个跨度上没有发生。
+- **但这一批里没有九月的数据**, 而经理给的假图是 09-02, 九月这一档还没验过。
+- `金额/正文` 常态中位 **2.433**(本机量的是 2.414)。
+- 阈值 `1.03 / 1.08` 报出 **0/3,073**; 但 n 太小, 95% 上界约 9.8/万, **不能说成零误报**。
