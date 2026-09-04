@@ -237,8 +237,8 @@ def main() -> None:
                     help="同分辨率少于这么多张就不判(标不出可信的常态)")
     ap.add_argument("--size-mult", type=float, default=1.03,
                     help="金额高超过常态的这个倍数算偏大")
-    ap.add_argument("--ratio-mult", type=float, default=1.08,
-                    help="金额/正文超过常态的这个倍数算偏大")
+    ap.add_argument("--ratio-mult", type=float, default=1.05,
+                    help="金额/正文超过**该分辨率**常态的这个倍数算偏大")
     ap.add_argument("--since", type=str, default=None, help="只看这个日期(含)之后的, YYYYMMDD")
     ap.add_argument("--until", type=str, default=None, help="只看这个日期(含)之前的, YYYYMMDD")
     ap.add_argument("--emit-table", action="store_true",
@@ -374,18 +374,31 @@ def _analyse(args, rows, skipped, n_files) -> None:
 
     norm = {k: Counter(int(round(x["amount_h"])) for x in v).most_common(1)[0][0]
             for k, v in groups.items()}
+    # ★ 比值常态必须**按分辨率**算, 不能用全局中位。
+    #   实测全局 p99/中位 = 1.19, 而苹果各分辨率组内只有 1.00~1.03 ——
+    #   全局那个宽度几乎全是机型间的差异, 不是同机型内的波动。
+    #   用全局中位就得把阈值放到 1.08 才不误报, 于是"金额放大 10% 以下"全查不出来;
+    #   按分辨率算之后阈值能收紧, 检出下限跟着降下来。
+    norm_ratio = {k: float(np.median([r["amt_to_body"] for r in v]))
+                  for k, v in groups.items()}
     ratio_all = np.array([r["amt_to_body"] for k in groups for r in groups[k]])
-    norm_ratio = float(np.median(ratio_all))
 
-    print(f"\n金额/正文 的真图常态(中位) = {norm_ratio:.3f}   "
-          f"p1 {np.percentile(ratio_all, 1):.3f}  p99 {np.percentile(ratio_all, 99):.3f}")
+    print(f"\n金额/正文: 全局中位 {np.median(ratio_all):.3f} "
+          f"(p1 {np.percentile(ratio_all, 1):.3f}  p99 {np.percentile(ratio_all, 99):.3f}) "
+          f"—— 判定用的是下表里各分辨率自己的中位, 不是这个全局值")
 
-    print(f"\n{'分辨率':>14} {'张数':>7} {'常态高':>6} {'众数占比':>8} {'高度分布(前3)':<22}")
+    print(f"\n{'分辨率':>14} {'张数':>7} {'常态高':>6} {'众数占比':>8} "
+          f"{'比值中位':>8} {'p99/中位':>9} {'高度分布(前3)':<22}")
     for k, v in sorted(groups.items(), key=lambda kv: -len(kv[1])):
         c = Counter(int(round(x["amount_h"])) for x in v)
         dist = " ".join(f"{h}:{n}" for h, n in c.most_common(3))
+        rr = np.array([r["amt_to_body"] for r in v])
+        # p99/中位 是这一组还剩多少余量: 接近 1.00 说明比值几乎是常数, 阈值可以收得很紧;
+        # 明显大于 1.1(实测安卓那几个是 1.27~1.36)说明这一组本身就散, 这条判据在它上面没用。
+        spread = np.percentile(rr, 99) / np.median(rr)
         print(f"{k[0]}x{k[1]:<7} {len(v):>7,} {norm[k]:>6} "
-              f"{100.0 * c.most_common(1)[0][1] / len(v):>7.1f}% {dist:<22}")
+              f"{100.0 * c.most_common(1)[0][1] / len(v):>7.1f}% "
+              f"{norm_ratio[k]:>8.3f} {spread:>9.3f} {dist:<22}")
 
     # ---- 按月常态: app 改版的诊断 ----
     months = sorted({r["month"] for r in rows if r["month"]})
@@ -404,16 +417,16 @@ def _analyse(args, rows, skipped, n_files) -> None:
     print(f"\n阈值对照表 (两个条件都要满足才报; 报出的都是真图, 所以这一栏就是误报率)")
     print(f"{'字号倍数':>9} {'比值倍数':>9} {'报出':>13} {'万分之':>9}")
     for sm in (1.02, 1.03, 1.05, 1.08):
-        for rm in (1.00, 1.05, 1.08, 1.12):
+        for rm in (1.00, 1.02, 1.03, 1.05, 1.08):
             hit = sum(1 for k in groups for r in groups[k]
                       if r["amount_h"] > sm * norm[k]
-                      and r["amt_to_body"] > rm * norm_ratio)
+                      and r["amt_to_body"] > rm * norm_ratio[k])
             tot = sum(len(v) for v in groups.values())
             print(f"{sm:>9.2f} {rm:>9.2f} {hit:>6,}/{tot:<6,} {10000.0 * hit / tot:>8.2f}")
 
     hits = [r for k in groups for r in groups[k]
             if r["amount_h"] > args.size_mult * norm[(r['W'], r['H'])]
-            and r["amt_to_body"] > args.ratio_mult * norm_ratio]
+            and r["amt_to_body"] > args.ratio_mult * norm_ratio[(r['W'], r['H'])]]
     tot = sum(len(v) for v in groups.values())
     print(f"\n当前参数 (--size-mult {args.size_mult} --ratio-mult {args.ratio_mult}): "
           f"报出 {len(hits)}/{tot:,} = {10000.0 * len(hits) / max(1, tot):.2f}/万")
@@ -434,7 +447,11 @@ def _analyse(args, rows, skipped, n_files) -> None:
         for k, v in sorted(groups.items(), key=lambda kv: -len(kv[1])):
             print(f"            {{ ({k[0]}, {k[1]}), {norm[k]} }},   // n={len(v):,}")
         print("        };")
-        print(f"        public const double NormalAmountToBody = {norm_ratio:.2f};")
+        print("        static readonly Dictionary<(int, int), double> NormalAmountToBody = new()")
+        print("        {")
+        for k, v in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+            print(f"            {{ ({k[0]}, {k[1]}), {norm_ratio[k]:.4f} }},   // n={len(v):,}")
+        print("        };")
 
 
 def _make_sheet(input_dir, hits, norm, out_path):
