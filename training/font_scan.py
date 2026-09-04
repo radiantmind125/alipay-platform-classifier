@@ -263,8 +263,27 @@ def main() -> None:
             for k in ("amount_h", "body_h", "amt_to_body", "height_cv"):
                 r[k] = float(r[k])
         print(f"从 {args.replay} 读回 {len(rows):,} 张的测量值, 不重新扫图")
-        skipped = 0
-        _analyse(args, rows, skipped, len(rows))
+        # 日期筛在 replay 模式下也要生效 —— 这里不做的话 --since/--until 会被
+        # 静默忽略, 用的人会以为筛过了, 拿到的却是全量结果。
+        if args.since or args.until:
+            kept, no_date = [], 0
+            for r in rows:
+                m = _TS.search(r["name"])
+                if not m:
+                    no_date += 1
+                    continue
+                d = m.group(1)
+                if (args.since and d < args.since) or (args.until and d > args.until):
+                    continue
+                kept.append(r)
+            print(f"按日期筛({args.since or chr(19981)+chr(38480)} ~ "
+                  f"{args.until or chr(19981)+chr(38480)}): 留下 {len(kept):,}, "
+                  f"取不到日期的 {no_date:,} 张已排除")
+            rows = kept
+        if not rows:
+            print("筛完一张都不剩")
+            return
+        _analyse(args, rows, skipped=0, n_files=len(rows))
         return
 
     files = [p for p in args.input.rglob("*") if p.suffix.lower() in _EXTS]
@@ -291,18 +310,38 @@ def main() -> None:
         files = files[: args.limit]
         print(f"抽样 {len(files):,} 张")
 
+    # 边扫边写, 不要等扫完再写 —— 几万张要跑一两个小时, 中途停掉不该把结果一起丢掉。
     rows, skipped = [], 0
-    for i, p in enumerate(files, 1):
-        if i % 20000 == 0:
-            print(f"  ...{i:,}/{len(files):,}, 量到 {len(rows):,}")
-        try:
-            r = measure(str(p))
-        except Exception:
-            r = None
-        if r:
+    fh = writer = None
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(args.out, "w", newline="", encoding="utf-8-sig")
+    try:
+        for i, p in enumerate(files, 1):
+            if i % 5000 == 0:
+                print(f"  ...{i:,}/{len(files):,}, 量到 {len(rows):,}", flush=True)
+            try:
+                r = measure(str(p))
+            except Exception:
+                r = None
+            if not r:
+                skipped += 1
+                continue
             rows.append(r)
-        else:
-            skipped += 1
+            if fh is not None:
+                if writer is None:
+                    writer = csv.DictWriter(fh, fieldnames=list(r.keys()))
+                    writer.writeheader()
+                writer.writerow(r)
+                if len(rows) % 500 == 0:
+                    fh.flush()
+    except KeyboardInterrupt:
+        # Ctrl+C 只停扫描, 已经量到的照常出结论
+        print(f"\n收到中断, 停止扫描。已经量到的 {len(rows):,} 张照常分析。")
+    finally:
+        if fh is not None:
+            fh.flush()
+            fh.close()
 
     _analyse(args, rows, skipped, len(files))
 
@@ -314,10 +353,6 @@ def _analyse(args, rows, skipped, n_files) -> None:
         print("一张都没量到, 检查目录对不对"); return
 
     if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-            w.writeheader(); w.writerows(rows)
         print(f"逐张测量值 -> {args.out}")
 
     # ---- 自标定: 每个分辨率的常态高 = 众数 ----
