@@ -326,6 +326,8 @@ namespace Ssp
             for (int i = 1; i < n; i++)      // 0 是背景
             {
                 int area = stats.At<int>(i, (int)ConnectedComponentsTypes.Area);
+                // 这句不能省: OpenCV 自己不做面积过滤。实测 600 个金额裁块里有 4 个(0.7%)
+                // 会多出最多 53 个碎块, 它们会把 medH 带偏, 进而搞乱数字和横条的分类。
                 if (area < minArea) continue;
                 outp.Add(new Comp
                 {
