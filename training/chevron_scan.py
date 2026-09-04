@@ -142,6 +142,8 @@ def main() -> None:
                     help="虚实比超过该分辨率中位数的几倍才算发虚。默认 1.5")
     ap.add_argument("--since", type=str, default=None, help="只看这个日期(含)之后的, YYYYMMDD")
     ap.add_argument("--until", type=str, default=None, help="只看这个日期(含)之前的, YYYYMMDD")
+    ap.add_argument("--emit-table", action="store_true",
+                    help="把标定出来的常态打成 C# 字面量, 贴进 ChevronCheck.cs")
     ap.add_argument("--seed", type=int, default=20260903)
     args = ap.parse_args()
 
@@ -209,6 +211,7 @@ def main() -> None:
         by[(r[1], r[2])].append(r)
 
     flagged = []
+    norms = {}          # 分辨率 -> (常态高, 常态宽, 张数), 供 --emit-table 用
     print(f"\n{'分辨率':>14}{'张数':>8}{'常态箭头':>12}{'虚实比中位':>12}{'报出':>8}")
     for sz in sorted(by, key=lambda k: -len(by[k])):
         grp = by[sz]
@@ -217,6 +220,7 @@ def main() -> None:
         mode_h, _ = collections.Counter(r[3] for r in grp).most_common(1)[0]
         mode_w, _ = collections.Counter(r[4] for r in grp).most_common(1)[0]
         med_blur = float(np.median([r[5] for r in grp]))
+        norms[sz] = (mode_h, mode_w, len(grp))
         # ★ 用"占常态的比例"而不是"比常态小就算" —— 后者太松。
         #   实测同一分辨率下真图有两簇(56x33 占 98.1%, 54x32 占 1.8%),
         #   只要求"比常态小"会把第二簇整个报出来。而假图是 47x28, 只有常态的 0.84,
@@ -266,6 +270,34 @@ def main() -> None:
                 w.writerow(r + [1 if id(r) in fset else 0])
         print(f"\n明细 -> {args.out}")
         print("★ 报出来的**一定要人工看一眼**再下结论。")
+
+
+
+    # ---- 把标定结果打成 ChevronCheck.cs 能直接贴的字面量 ----
+    if args.emit_table and norms:
+        print()
+        print("=" * 72)
+        print(f"// 贴进 ChevronCheck.cs。标定自 {args.input}, "
+              f"日期 {args.since or '不限'}~{args.until or '不限'}")
+        sizes = collections.Counter((h, w) for h, w, _n in norms.values())
+        top, top_n = sizes.most_common(1)[0]
+        odd = {sz: v for sz, v in norms.items() if (v[0], v[1]) != top}
+        print(f"//   常态 {top[0]}x{top[1]} 覆盖 {top_n}/{len(norms)} 个分辨率")
+        if odd:
+            # ChevronCheck.cs 假设所有苹果机型共用一个尺寸(导航图标按点数渲染)。
+            # 这里只要打印出东西, 就说明那个前提在这批数据上不成立。
+            print("// ★ 下列分辨率的常态和上面不一样, '所有苹果机型同尺寸'这个前提不成立,")
+            print("//   要么把它们从白名单去掉, 要么改成按分辨率查表:")
+            for sz, v in sorted(odd.items(), key=lambda kv: -kv[1][2]):
+                print(f"//     {sz[0]}x{sz[1]}  常态 {v[0]}x{v[1]}  n={v[2]:,}")
+        print(f"        public const int NormalHeight = {top[0]};")
+        print(f"        public const int NormalWidth  = {top[1]};")
+        print("        static readonly HashSet<(int, int)> Supported = new()")
+        print("        {")
+        for sz, v in sorted(norms.items(), key=lambda kv: -kv[1][2]):
+            if (v[0], v[1]) == top:
+                print(f"            ({sz[0]}, {sz[1]}),   // n={v[2]:,}")
+        print("        };")
 
 
 if __name__ == "__main__":

@@ -69,11 +69,18 @@ namespace Ssp
         public const int MaxComponents = 20_000;   // 上限保护, 见 LocateAmount
 
         /// <summary>
-        /// 各分辨率的金额数字常态高(像素), 2026-07 的 12,000 张真图实测众数。
-        /// 只收了每组样本 150 张以上的分辨率; 不在表里的一律返回 CannotDetermine, 不猜。
+        /// 各分辨率的金额数字常态高(像素)。不在表里的一律返回 CannotDetermine, 不猜。
         ///
-        /// 支付宝改版会让这张表整体失效, 需要按月重新标定 —— 这是绝对像素判据的固有代价,
-        /// MinusCheck 那种比值判据没有这个问题。
+        /// ★ 下面这张表是**临时的**: 标定自一批 2026-07 的图, 只有 12,000 张,
+        ///   而且不是线上那批数据。**用之前必须在服务器上重新生成一次:**
+        ///
+        ///       python training/font_scan.py D:\download2\OtherImages --emit-table
+        ///
+        ///   把它打印出来的字典整段替换掉下面这段, 并把日期范围记在提交说明里。
+        ///
+        /// 为什么必须重标: 这是**绝对像素**判据, 支付宝改一次字号整张表就失效。
+        /// font_scan.py 的输出里有一栏按月常态, 各月不一样就说明改过版, 那就要分月各判各的。
+        /// MinusCheck 那种比值判据没有这个问题, 所以它不需要表。
         /// </summary>
         static readonly Dictionary<(int, int), int> NormalDigitHeight = new()
         {
