@@ -167,8 +167,12 @@ namespace Ssp
                 if (bh < bw || area < 100) continue;
                 int x = stats.At<int>(i, (int)ConnectedComponentsTypes.Left);
                 int y = stats.At<int>(i, (int)ConnectedComponentsTypes.Top);
-                // 状态栏的图标也可能过筛, 取最靠下的那个 —— 导航栏在状态栏下面
-                if (best == null || y > best.Value.Top)
+                // 状态栏的图标也可能过筛, 取最靠下的那个 —— 导航栏在状态栏下面。
+                // 同高时取最靠左的: 返回箭头就在导航栏最左边。
+                // 这一条必须写出来, 不能靠连通域的返回顺序 —— 它依实现而定
+                // (cv2 按 2x2 块光栅序, 手写的按像素光栅序), 实测同高的情况真的会出现。
+                if (best == null || y > best.Value.Top
+                    || (y == best.Value.Top && x < best.Value.Left))
                     best = new Rect(x, y, bw, bh);
             }
             return best;

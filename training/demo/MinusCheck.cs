@@ -135,7 +135,8 @@ namespace Ssp
             double ar = mw / mh;
             if (ar < 0.45 || ar > 0.75) { res.Reason = "数字宽高比不对"; return res; }
 
-            var bar = bars.OrderBy(g => g.X).First();   // 最左侧的横条即负号
+            // 排序取全序: 连通域的返回顺序依实现而定(cv2 按 2x2 块光栅序), 并列时不能靠它决定
+            var bar = bars.OrderBy(g => g.X).ThenBy(g => g.Y).ThenBy(g => g.W).First();
             res.Measured = true;
             res.BarWidth = bar.W / mw;
             res.DigitHeight = mh;
@@ -191,7 +192,7 @@ namespace Ssp
             // 按纵向重叠聚类成行; 每行上下界增量维护
             var rows = new List<List<Comp>>();
             var bounds = new List<(int Y0, int Y1)>();
-            foreach (var c in comps.OrderBy(k => k.Y))
+            foreach (var c in comps.OrderBy(k => k.Y).ThenBy(k => k.X))
             {
                 bool placed = false;
                 for (int i = 0; i < rows.Count; i++)
