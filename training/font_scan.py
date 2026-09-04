@@ -243,12 +243,29 @@ def main() -> None:
     ap.add_argument("--until", type=str, default=None, help="只看这个日期(含)之前的, YYYYMMDD")
     ap.add_argument("--emit-table", action="store_true",
                     help="把标定出来的常态表打成 C# 字典, 贴进 FontCheck.cs")
+    ap.add_argument("--sheet", type=Path, default=None,
+                    help="把报出来的金额行拼成一张图, 好人工看")
+    ap.add_argument("--replay", type=Path, default=None,
+                    help="不重新扫图, 直接读之前 --out 存的 CSV 重做分析(秒级)")
     ap.add_argument("--seed", type=int, default=20260904)
     args = ap.parse_args()
 
     for _k, _v in (("--since", args.since), ("--until", args.until)):
         if _v is not None and not re.fullmatch(r"\d{8}", _v):
             ap.error(f"{_k} 要写成 YYYYMMDD, 收到的是 {_v!r}")
+
+    if args.replay:
+        with open(args.replay, encoding="utf-8-sig") as f:
+            rows = [dict(r) for r in csv.DictReader(f)]
+        for r in rows:
+            for k in ("W", "H", "n_digit", "baseline_spread"):
+                r[k] = int(float(r[k]))
+            for k in ("amount_h", "body_h", "amt_to_body", "height_cv"):
+                r[k] = float(r[k])
+        print(f"从 {args.replay} 读回 {len(rows):,} 张的测量值, 不重新扫图")
+        skipped = 0
+        _analyse(args, rows, skipped, len(rows))
+        return
 
     files = [p for p in args.input.rglob("*") if p.suffix.lower() in _EXTS]
     print(f"目录里 {len(files):,} 个文件")
@@ -287,8 +304,12 @@ def main() -> None:
         else:
             skipped += 1
 
+    _analyse(args, rows, skipped, len(files))
+
+
+def _analyse(args, rows, skipped, n_files) -> None:
     print(f"\n量到 {len(rows):,} 张, 判不了 {skipped:,} 张 "
-          f"(判不了的占 {100.0 * skipped / max(1, len(files)):.1f}%)")
+          f"(判不了的占 {100.0 * skipped / max(1, n_files):.1f}%)")
     if not rows:
         print("一张都没量到, 检查目录对不对"); return
 
@@ -366,6 +387,9 @@ def main() -> None:
         print(f"    {r['amount_h']:.0f} vs 常态 {n} ({r['amount_h'] / n:.3f}x)  "
               f"金额/正文 {r['amt_to_body']:.3f}  {r['name']}")
 
+    if args.sheet and hits:
+        _make_sheet(args.input, hits, norm, args.sheet)
+
     if args.emit_table:
         print("\n// 贴进 FontCheck.cs 的 NormalDigitHeight。"
               f"标定自 {args.input}, 日期 {args.since or '不限'}~{args.until or '不限'}, "
@@ -376,6 +400,45 @@ def main() -> None:
             print(f"            {{ ({k[0]}, {k[1]}), {norm[k]} }},   // n={len(v):,}")
         print("        };")
         print(f"        public const double NormalAmountToBody = {norm_ratio:.2f};")
+
+
+def _make_sheet(input_dir, hits, norm, out_path):
+    """把报出来的图各裁一条金额行, 上下叠成一张 PNG, 供人工看。
+
+    标签只写 ASCII(cv2.putText 画不了中文): 实测高/常态高=倍数, r=金额比正文。
+    """
+    tiles = []
+    for r in hits[:40]:
+        hit = next(input_dir.rglob(r["name"]), None)
+        if hit is None:
+            continue
+        img = cv2.imread(str(hit), cv2.IMREAD_COLOR)
+        if img is None:
+            continue
+        H, W = img.shape[:2]
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        box = _locate_amount(gray, W, H)
+        if box is None:
+            continue
+        bx0, by0, bx1, by1 = box
+        m = int((by1 - by0) * 0.6)
+        crop = img[max(0, by0 - m):min(H, by1 + m), :]
+        if crop.size == 0:
+            continue
+        scale = 900.0 / crop.shape[1]
+        crop = cv2.resize(crop, (900, max(1, int(crop.shape[0] * scale))))
+        bar = np.full((26, 900, 3), 240, np.uint8)
+        n = norm[(r["W"], r["H"])]
+        cv2.putText(bar, f'{r["amount_h"]:.0f}/{n}={r["amount_h"] / n:.3f}x  '
+                         f'r={r["amt_to_body"]:.3f}  {r["name"][:52]}',
+                    (6, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+        tiles.append(np.vstack([bar, crop]))
+    if not tiles:
+        print("没有可拼的图(报出的文件在目录里找不到?)")
+        return
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out_path), np.vstack(tiles))
+    print(f"拼图 -> {out_path}  (**一定要人工看一遍再下结论**)")
 
 
 if __name__ == "__main__":

@@ -114,6 +114,23 @@ python training\font_scan.py $data --limit 50000 --out D:\probe\font.csv --emit-
 
 ---
 
+## 第 2b 步 把报出来的图拼成一张, 人工看
+
+**不用重新扫。** `--replay` 直接读第 2 步存下的 CSV, 秒级出结果:
+
+```powershell
+python training\font_scan.py $data --replay D:\probe\font.csv --sheet D:\probe\font_hits.png
+```
+
+出来的 `font_hits.png` 是把每张报出来的**金额行**裁下来上下叠在一起,
+每条上面标着 `实测高/常态高=倍数  r=金额比正文  文件名`。**打开看一眼。**
+
+`--replay` 还能用来换参数重算, 同样是秒级, 不用重扫:
+
+```powershell
+python training\font_scan.py $data --replay D:\probe\font.csv --size-mult 1.05 --ratio-mult 1.12
+```
+
 ## 第 3 步 如果第 2 步发现改过版
 
 分月各判各的。例如只用八月之后的数据:
