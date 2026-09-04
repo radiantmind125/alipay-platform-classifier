@@ -135,6 +135,26 @@ python training\font_scan.py $data --replay D:\probe\font.csv --sheet D:\probe\f
 python training\font_scan.py $data --replay D:\probe\font.csv --size-mult 1.05 --ratio-mult 1.12
 ```
 
+## 第 2c 步 造几张"金额被放大"的假图, 实测检出率
+
+**我们手上一张这种假图都没有**, 所以检出率不能靠算, 要造出来实测。
+
+```powershell
+python training\font_synth_test.py $data --n 400
+```
+
+它拿真图把金额行整体放大若干倍再贴回去, **走完整条管线重新量**, 报出每个倍数的实测检出率。
+本机实测(按分辨率算比值常态, 阈值 1.03 / 1.05):
+
+| 放大 | 检出率 |
+|---|---|
+| 3% | 0% |
+| 5% | 27% |
+| 8% | **90%** |
+| 10% | **98%** |
+
+想看造出来的图长什么样, 加 `--save D:\probe\synth`。
+
 ## 第 3 步 如果第 2 步发现改过版
 
 分月各判各的。例如只用八月之后的数据:
@@ -195,6 +215,7 @@ if (-not (Test-Path D:\probe)) { New-Item -ItemType Directory D:\probe | Out-Nul
 python training\font_scan.py $data --limit 5000 --min-group 50 --out D:\probe\font_try.csv
 python training\font_scan.py $data --limit 50000 --out D:\probe\font.csv --emit-table | Tee-Object D:\probe\font_log.txt
 python training\font_scan.py $data --replay D:\probe\font.csv --sheet D:\probe\font_hits.png
+python training\font_synth_test.py $data --n 400 | Tee-Object D:\probe\synth_log.txt
 python training\chevron_scan.py $data --limit 50000 --out D:\probe\chev.csv --emit-table | Tee-Object D:\probe\chev_log.txt
 ```
 
