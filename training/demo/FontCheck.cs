@@ -20,7 +20,7 @@ namespace Ssp
         public int DigitHeight;        // 金额数字中位高(像素)
         public int NormalHeight;       // 该分辨率的常态高; 0 表示表里没有
         public double SizeRatio;       // DigitHeight / NormalHeight
-        public int BodyHeight;         // 正文字高(像素)
+        public double BodyHeight;      // 正文字高(像素), 保留小数
         public double AmountToBody;    // DigitHeight / BodyHeight
         public int DigitCount;
         // 下面两项只做输出, 不参与判定, 原因见类注释
@@ -198,7 +198,7 @@ namespace Ssp
             if (mw / mh < 0.45 || mw / mh > 0.75) { res.Reason = "数字宽高比不对"; return res; }
 
             // 正文字高: 金额行下方那一片明显更小的文字。用它把"整页放大"和"只放大金额"分开。
-            int bodyH = BodyHeight(gray, by1);
+            double bodyH = BodyHeight(gray, by1);
             if (bodyH <= 0) { res.Reason = "量不到正文字高, 判不准所以不判"; return res; }
 
             var bottoms = digits.Select(g => g.Y + g.H).ToList();
@@ -232,9 +232,9 @@ namespace Ssp
         }
 
         /// <summary>
-        /// 金额行下方正文文字的中位块高。取块数不足时返回 0, 由调用方弃权。
+        /// 金额行下方正文文字的中位块高。块数不足返回 0, 由调用方弃权。
         /// </summary>
-        static int BodyHeight(Mat gray, int amountBottom)
+        static double BodyHeight(Mat gray, int amountBottom)
         {
             int W = gray.Width, H = gray.Height;
             int y0 = amountBottom + (int)(H * 0.01), y1 = Math.Min(H, (int)(H * 0.75));
@@ -248,7 +248,9 @@ namespace Ssp
             foreach (var c in Label(dark, minArea: 20))
                 if (c.H > 0.008 * H && c.H < 0.030 * H && c.W < 0.4 * W) hs.Add(c.H);
             if (hs.Count < 8) return 0;
-            return (int)Math.Round(Median(hs));
+            // 不要取整: 这个值是比值的分母, 块数为偶数时中位数会是 x.5,
+            // 取整最多引入 1.6% 的误差(0.5/30), 而判据阈值本身才 1.08。
+            return Median(hs);
         }
 
         // 上三分之一的通道均值判断蓝底; Mean 收 ROI 视图, 不复制
