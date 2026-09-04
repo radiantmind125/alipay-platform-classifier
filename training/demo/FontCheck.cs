@@ -45,6 +45,10 @@ namespace Ssp
     /// 所以必须同时要求"金额相对同一张图里的正文也偏大", 两个条件都满足才报。
     /// 少了这一条, 这个 check 会系统性地误伤需要大字体的用户。
     ///
+    /// 检出率是**造图实测**的, 不是推算的(training/font_synth_test.py):
+    /// 服务器数据上放大 5% 查出 49.5%, 放大 8% 查出 92.1%, 放大 10% 查出 97.0%,
+    /// 而 104 张对照真图报出 0 张。**放大 3% 及以下查不出来。**
+    ///
     /// 行内一致性(底边对齐、高度齐不齐)只输出不判定。它原理上只能抓"逐位重打/贴图",
     /// 抓不到"整行重画"(整行重渲染时每位数字仍然共用同一基线); 而且实测 PNG 与 JPEG
     /// 之间的报出率差 43 倍, 阈值没法统一。留着这两个数是给人工复核排序用的。
@@ -56,14 +60,16 @@ namespace Ssp
         /// <summary>金额字高超过本分辨率常态的这个倍数, 才算"偏大"。</summary>
         public const double SizeThreshold = 1.03;
 
-        /// <summary>金额字高 / 正文字高 的真图常态(实测中位 2.414)。</summary>
-        public const double NormalAmountToBody = 2.41;
-
         /// <summary>
-        /// 上面那个比值超过常态的这个倍数, 才算"只有金额被放大"。
+        /// 金额字高 / 正文字高 超过**该分辨率**常态的这个倍数, 才算"只有金额被放大"。
         /// 两个条件必须同时满足才报 —— 见类注释里系统大字体那一段。
+        ///
+        /// 这个比值必须按分辨率查表, 不能用一个全局常数: 服务器 34,261 张实测,
+        /// 全局的 p99/中位 是 1.19, 但那个宽度几乎全是机型之间的差异 ——
+        /// 分组之后组内只有 1.00~1.03。用全局值就得把阈值放到 1.08 才不误报,
+        /// 于是"金额放大 8% 以下"全查不出来。
         /// </summary>
-        public const double RatioThreshold = 1.08;
+        public const double RatioThreshold = 1.05;
 
         const int GrayDark = 140;                  // 定位金额行时的深色阈值
         public const int MaxComponents = 20_000;   // 上限保护, 见 LocateAmount
@@ -71,12 +77,15 @@ namespace Ssp
         /// <summary>
         /// 各分辨率的金额数字常态高(像素)。不在表里的一律返回 CannotDetermine, 不猜。
         ///
-        /// ★ 下面这张表是**临时的**: 标定自一批 2026-07 的图, 只有 12,000 张,
-        ///   而且不是线上那批数据。**用之前必须在服务器上重新生成一次:**
+        /// 标定自服务器图库 D:\download2\OtherImages, 2026-07 ~ 2026-08, 抽样 50,000 张,
+        /// 量到 44,076 张, 过闸后 19,212 张进表。支付宝改版后要重新生成:
         ///
         ///       python training/font_scan.py D:\download2\OtherImages --emit-table
         ///
-        ///   把它打印出来的字典整段替换掉下面这段, 并把日期范围记在提交说明里。
+        /// ★ 表里只有 6 个分辨率, 全部是苹果机型 —— 这不是写死的, 是脚本按两条自标定的
+        ///   闸筛出来的: 高度众数占比要够(否则"常态高"没意义), 且组内 金额/正文 的
+        ///   p99/中位 要够小(否则比值那一条卡不住)。安卓各组实测是 1.19~1.33, 全部被剔掉。
+        ///   服务器实测: 只判过闸的组, 误报从 6.13/万 降到 1.01/万。
         ///
         /// 为什么必须重标: 这是**绝对像素**判据, 支付宝改一次字号整张表就失效。
         /// font_scan.py 的输出里有一栏按月常态, 各月不一样就说明改过版, 那就要分月各判各的。
@@ -84,11 +93,25 @@ namespace Ssp
         /// </summary>
         static readonly Dictionary<(int, int), int> NormalDigitHeight = new()
         {
-            { (1179, 2556), 72 }, { (1320, 2868), 79 }, { (1290, 2796), 78 },
-            { (1080, 2400), 66 }, { (1170, 2532), 71 }, { (1206, 2622), 73 },
-            { (1260, 2800), 77 }, { (1080, 2412), 66 }, { (1284, 2778), 78 },
-            { (1080, 2340), 66 }, {  (720, 1600), 43 }, {  (828, 1792), 51 },
-            { (1080, 2376), 66 }, { (1080, 2408), 66 },
+            { (1179, 2556), 72 },   // n=4,165
+            { (1290, 2796), 78 },   // n=3,830
+            { (1170, 2532), 71 },   // n=3,625
+            { (1320, 2868), 79 },   // n=3,528
+            { (1206, 2622), 73 },   // n=2,575
+            { (1284, 2778), 78 },   // n=1,489
+        };
+
+        /// <summary>
+        /// 各分辨率的 金额字高/正文字高 常态。与上表同一批数据标定, 两张表要一起换。
+        /// </summary>
+        static readonly Dictionary<(int, int), double> NormalAmountToBody = new()
+        {
+            { (1179, 2556), 2.4000 },
+            { (1290, 2796), 2.4375 },
+            { (1170, 2532), 2.4483 },
+            { (1320, 2868), 2.4375 },
+            { (1206, 2622), 2.4333 },
+            { (1284, 2778), 2.4375 },
         };
 
         struct Comp
@@ -212,13 +235,14 @@ namespace Ssp
             res.BaselineSpread = bottoms.Max() - bottoms.Min();
             res.HeightSpread = dhStd / dhMean;
 
+            double normRatio = NormalAmountToBody[(W, H)];
             bool tooBigOnScreen = res.SizeRatio > SizeThreshold;
-            bool tooBigInPage = res.AmountToBody > NormalAmountToBody * RatioThreshold;
+            bool tooBigInPage = res.AmountToBody > normRatio * RatioThreshold;
             if (tooBigOnScreen && tooBigInPage)
             {
                 res.Verdict = FontVerdict.Suspicious;
                 res.Reason = $"金额字高 {res.DigitHeight} 是常态 {res.NormalHeight} 的 {res.SizeRatio:F3} 倍, "
-                           + $"且金额/正文 {res.AmountToBody:F3} 高于常态 {NormalAmountToBody}";
+                           + $"且金额/正文 {res.AmountToBody:F3} 高于常态 {normRatio:F3}";
             }
             else
             {

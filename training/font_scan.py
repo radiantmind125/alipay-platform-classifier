@@ -243,6 +243,10 @@ def main() -> None:
     ap.add_argument("--until", type=str, default=None, help="只看这个日期(含)之前的, YYYYMMDD")
     ap.add_argument("--emit-table", action="store_true",
                     help="把标定出来的常态表打成 C# 字典, 贴进 FontCheck.cs")
+    ap.add_argument("--min-concentration", type=float, default=0.65,
+                    help="出表时要求: 常态高的众数至少占该组这个比例, 否则整组不进表")
+    ap.add_argument("--max-ratio-spread", type=float, default=1.06,
+                    help="出表时要求: 该组 金额/正文 的 p99/中位 不超过这个值, 否则整组不进表")
     ap.add_argument("--sheet", type=Path, default=None,
                     help="把报出来的金额行拼成一张图, 好人工看")
     ap.add_argument("--replay", type=Path, default=None,
@@ -439,6 +443,37 @@ def _analyse(args, rows, skipped, n_files) -> None:
         _make_sheet(args.input, hits, norm, args.sheet)
 
     if args.emit_table:
+        # ★ 出表之前先把"常态本身立不住"的组剔掉。这两道闸都是从数据里自己算出来的,
+        #   不写死机型 —— 换了新机型也能自动归类。
+        #   1) 众数占比太低: 高度分布是平的, "常态高"根本没有意义
+        #      (服务器实测 1200x2670 只有 35.4%, 72/73/71 三个值各占三分之一)
+        #   2) 比值 p99/中位 太大: 该组的 金额/正文 本身就散, 比值那一条卡不住
+        #      (服务器实测苹果各组 1.00~1.03, 安卓各组 1.19~1.33, 分得很干净)
+        #   服务器 34,261 张实测: 只判过闸的组, 误报从 6.13/万 降到 1.01/万。
+        keep = {}
+        dropped = []
+        for k, v in groups.items():
+            c = Counter(int(round(x["amount_h"])) for x in v)
+            conc = c.most_common(1)[0][1] / len(v)
+            rr = [r["amt_to_body"] for r in v]
+            sp = float(np.percentile(rr, 99)) / norm_ratio[k]
+            if conc >= args.min_concentration and sp <= args.max_ratio_spread:
+                keep[k] = v
+            else:
+                dropped.append((k, len(v), conc, sp))
+        if dropped:
+            print(f"\n// 下面这些组没过闸, 不进表(遇到它们时 CannotDetermine, 不猜):")
+            for k, n, conc, sp in sorted(dropped, key=lambda t: -t[1]):
+                why = []
+                if conc < args.min_concentration: why.append(f"众数占比 {100*conc:.1f}%")
+                if sp > args.max_ratio_spread: why.append(f"比值 p99/中位 {sp:.3f}")
+                print(f"//     {k[0]}x{k[1]}  n={n:,}  " + " / ".join(why))
+        if not keep:
+            print("\n// 一个组都没过闸, 出不了表")
+            return
+        groups = keep
+        tot = sum(len(v) for v in groups.values())
+
         print("\n// 贴进 FontCheck.cs 的 NormalDigitHeight。"
               f"标定自 {args.input}, 日期 {args.since or '不限'}~{args.until or '不限'}, "
               f"共 {tot:,} 张")
