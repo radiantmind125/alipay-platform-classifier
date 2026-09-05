@@ -21,17 +21,65 @@ namespace Ssp
         public double DigitHeight;   // 数字中位高
         public double DigitAspect;   // 数字中位宽 / 中位高
         public int DigitCount;
+        public double DotArea;       // 小数点的前景像素数; 0 表示没量到
+        public double DotRatio;      // DotArea / (数字中位高)^2
         public bool Measured;        // 为 false 时上面几项无意义
         public string Reason = "";
     }
 
     /// <summary>
-    /// 白底账单详情页的负号几何检查: 量负号宽度与数字中位宽度的比值。
+    /// 白底账单详情页的金额字形检查。两条判据并联, 都是同一张图内部的比值, 不查任何表:
+    ///
+    ///   1. 负号宽 / 数字中位宽   —— 已上线的那条, 高侧阈值 0.78 不动, 这次补上低侧
+    ///   2. 小数点面积 / 数字中位高²  —— 新增
+    ///
+    /// 两个参照物(负号、小数点)都是**恒定形状**: 不管什么机型、什么金额、哪个用户,
+    /// 它们永远是同一个字形。这就是这套判据不用查表、不挑机型、不随改版失效的原因。
+    ///
+    /// 本机 17,636 张逐条分解实测(png 8,244 / jpg 9,392):
+    ///     只负号高侧(现在线上的)   png 3.64/万   jpg 13.84/万   差 3.8 倍
+    ///     只小数点(新增)           png 2.43/万   jpg  7.45/万   差 3.1 倍
+    ///     两条并联                 png 6.07/万   jpg 21.29/万   差 3.5 倍
+    ///   ★ 小数点这条的苹果/安卓差(3.1 倍)比现在线上那条(3.8 倍)还小,
+    ///     所以它不会把安卓那一侧拖得更不平衡 —— 这正是之前每一条都做不到的。
+    ///   另有复核方用另一套量法、零重叠的 34,012 张独立复算, 结论同向。
+    ///
+    /// 换字体重打金额的检出率(13 种 Windows 字体造图实测, 擦掉再原样贴回的对照臂 0%):
+    ///   两条并联 png 92.9% / jpg 92.1%; 把掉出管线的也算漏检则是 87.5% / 88.0%。
+    ///
     /// 直接收 Mat, 内部全部用 ROI 视图, 不复制像素。无静态可变状态, 可多线程调用。
     /// </summary>
     public static class MinusCheck
     {
         public const double Threshold = 0.78;
+
+        /// <summary>
+        /// 负号偏窄的下界, **默认关闭(0 = 不判低侧)**。
+        ///
+        /// 换字体重打时负号往往偏窄, 所以低侧看起来该补。但 17,636 张实测下来,
+        /// 这一条的代价是**单边压在安卓上的**:
+        ///     只开低侧:  png 0.00/万,  jpg 8.52/万
+        /// 也就是说它在苹果上一张都不多报, 在安卓上白白多出 8.5/万,
+        /// 而小数点那条已经覆盖了"换字体"这类手法。所以默认不开。
+        ///
+        /// 想开就把这个值设成 0.625(真图 mb_w/mw 中位 0.70, p1 是 0.6585(jpg)/0.6667(png),
+        /// 0.625 在 p1 以下)。开之前先想清楚安卓那 8.5/万 值不值。
+        /// </summary>
+        public const double ThresholdLow = 0.0;
+
+        /// <summary>
+        /// 小数点面积 / 数字中位高的平方, 正常范围。落在这个区间外判可疑。
+        ///
+        /// 支付宝金额字体的小数点**异常地大**(实测 0.030), 换成别的字体基本都偏小:
+        /// Arial 0.63 倍, SegoeUI 0.61 倍, Leelawadee 0.61 倍, MSYaHei 0.69 倍。
+        /// 这一条和负号那条是**正交**的: 等宽字体 Consolas 的负号宽度正好撞上真图,
+        /// 负号那条只抓到 0.5%, 小数点这条抓 100%。
+        ///
+        /// 用面积而不是外接框: 小数点只有十来个像素宽, 边长的量化太粗;
+        /// 面积是上百个像素的计数, 同样一个像素的抖动对它的影响小一个量级。
+        /// </summary>
+        public const double DotRatioLow = 0.0200, DotRatioHigh = 0.0365;
+
         public const double MinDigitHeight = 60;   // 数字低于此高度不判定; 设为 0 可关闭
         const int GrayDark = 140;                  // 定位金额行时的深色阈值
 
@@ -143,14 +191,44 @@ namespace Ssp
             res.DigitAspect = ar;
             res.DigitCount = digits.Count;
 
+            // 小数点: 既不是数字也不是横条, 又小又坐在数字基线上。
+            // 必须恰好找到一个 —— 找到多个说明切块不干净(压缩噪点也会被选中), 这时不判小数点这条。
+            double baseline = Median(digits.Select(g => (double)(g.Y + g.H)));
+            var dots = glyphs.Where(g => !digits.Contains(g) && !bars.Contains(g)
+                                      && g.H <= 0.30 * mh && g.W <= 0.60 * mw
+                                      && Math.Abs((g.Y + g.H) - baseline) <= 0.06 * mh).ToList();
+            bool dotOk = dots.Count == 1;
+            if (dotOk)
+            {
+                res.DotArea = dots[0].Area;
+                res.DotRatio = res.DotArea / (mh * mh);
+            }
+
             if (mh < MinDigitHeight)
             {
                 res.Verdict = MinusVerdict.CannotDetermine;
                 res.Reason = $"数字高 {mh:F0} < {MinDigitHeight}, 判不准所以不判";
                 return res;
             }
-            res.Verdict = res.BarWidth >= Threshold ? MinusVerdict.Suspicious : MinusVerdict.Ok;
-            res.Reason = $"负号宽比 {res.BarWidth:F4} (阈值 {Threshold})";
+
+            // 两条并联, 任一条报就报。
+            // 负号: 保持已上线的高侧阈值 0.78 不动, 只补一个低侧 —— 纯增量, 不会丢掉现在能抓的。
+            bool barBad = res.BarWidth >= Threshold || res.BarWidth < ThresholdLow;
+            bool dotBad = dotOk && (res.DotRatio < DotRatioLow || res.DotRatio > DotRatioHigh);
+            if (barBad || dotBad)
+            {
+                res.Verdict = MinusVerdict.Suspicious;
+                res.Reason = barBad
+                    ? $"负号宽比 {res.BarWidth:F4} (正常 {ThresholdLow}~{Threshold})"
+                    : $"小数点面积比 {res.DotRatio:F4} (正常 {DotRatioLow}~{DotRatioHigh})";
+            }
+            else
+            {
+                res.Verdict = MinusVerdict.Ok;
+                res.Reason = dotOk
+                    ? $"负号宽比 {res.BarWidth:F4}, 小数点面积比 {res.DotRatio:F4}"
+                    : $"负号宽比 {res.BarWidth:F4}, 小数点没量到";
+            }
             return res;
         }
 
