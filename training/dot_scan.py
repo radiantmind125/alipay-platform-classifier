@@ -229,7 +229,11 @@ def _analyse(args, rows):
               f"{np.median(d):>10.4f} {_pct(d,1):>10.4f} {_pct(d,99):>10.4f} "
               f"{np.median(bw):>9.4f} {_pct(bw,1):>8.4f} {_pct(bw,99):>8.4f}")
 
-    print(f"\n逐条分解 (报出的都是真图, 所以就是误报率)")
+    # ★ 不要写"误报率"。服务器那个池子是**真实进件流**, 里面本来就有假图
+    #   (箭头那条已经在里面抓到过 2 张和经理给的假图同指纹的)。
+    #   所以这一栏只能叫"报出率" —— 里面有多少是真欺诈, 要靠人工看或者线上的处置结果才知道。
+    #   本机 white/TempFakeImages 那个池子是干净子集, 那里才能叫误报率。
+    print(f"\n逐条分解 (报出率; 服务器池是真实进件流, 里面可能有真欺诈, 不要当成纯误报)")
     print(f"{'组合':<26} {'png':>16} {'jpg':>16} {'jpg/png':>9}")
     combos = [
         ("只负号高侧(已上线)", lambda r: r["bar_ratio"] >= BAR_HIGH),
@@ -276,20 +280,33 @@ def _analyse(args, rows):
                 cells.append(f"{np.median(d):.4f}({len(d)})" if d else "-")
             print(f"  {f:<8} " + " ".join(f"{c:>12}" for c in cells))
 
-    hits = [r for r in ok if r["n_dot"] == 1 and not (DOT_LOW <= r["dot_ratio"] <= DOT_HIGH)]
-    print(f"\n小数点报出的 {len(hits)} 张(★ 一定要人工看一眼再下结论):")
-    for r in sorted(hits, key=lambda r: r["dot_ratio"])[:30]:
+    dot_hits = [r for r in ok if r["n_dot"] == 1 and not (DOT_LOW <= r["dot_ratio"] <= DOT_HIGH)]
+    bar_hits = [r for r in ok if r["bar_ratio"] >= BAR_HIGH]
+    for r in dot_hits: r["_why"] = f"dot={r['dot_ratio']:.4f}"
+    for r in bar_hits: r["_why"] = f"BAR={r['bar_ratio']:.4f}"
+
+    print(f"\n小数点报出的 {len(dot_hits)} 张(★ 一定要人工看一眼再下结论):")
+    for r in sorted(dot_hits, key=lambda r: r["dot_ratio"])[:30]:
         print(f"    面积比 {r['dot_ratio']:.4f}  面积 {r['dot_area']:.0f}  字高 {r['mh']:.0f}  "
               f"{r['fmt']}  {r['name'][:52]}")
 
-    if args.sheet and hits:
-        _make_sheet(args.input, hits, args.sheet)
+    # ★ 已上线那条报出的也要看。服务器实测它报出率是小数点这条的六七倍,
+    #   但没人知道那里面有多少是真欺诈 —— 这是目前最该搞清楚的一件事。
+    print(f"\n★ 已上线的负号那条报出的 {len(bar_hits)} 张(比小数点那条多得多, 更该人工看):")
+    for r in sorted(bar_hits, key=lambda r: -r["bar_ratio"])[:30]:
+        print(f"    负号宽比 {r['bar_ratio']:.4f}  字高 {r['mh']:.0f}  "
+              f"{r['fmt']}  {r['name'][:52]}")
+
+    if args.sheet:
+        want = {"dot": dot_hits, "minus": bar_hits, "both": dot_hits + bar_hits}[args.sheet_of]
+        if want:
+            _make_sheet(args.input, want, args.sheet)
 
 
 def _make_sheet(input_dir, hits, out_path):
     """把报出来的金额行裁下来叠成一张 PNG。标签只写 ASCII(cv2 画不了中文)。"""
     tiles = []
-    for r in sorted(hits, key=lambda r: r["dot_ratio"])[:40]:
+    for r in hits[:40]:
         hit = next(Path(input_dir).rglob(r["name"]), None)
         if hit is None:
             continue
@@ -307,7 +324,7 @@ def _make_sheet(input_dir, hits, out_path):
             continue
         crop = cv2.resize(crop, (900, max(1, int(crop.shape[0] * 900.0 / crop.shape[1]))))
         bar = np.full((26, 900, 3), 240, np.uint8)
-        cv2.putText(bar, f"dot={r['dot_ratio']:.4f} area={r['dot_area']:.0f} "
+        cv2.putText(bar, f"{r.get('_why','')} area={r['dot_area']:.0f} "
                          f"mh={r['mh']:.0f} {r['fmt']} {r['name'][:44]}",
                     (6, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
         tiles.append(np.vstack([bar, crop]))
@@ -329,6 +346,8 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="只抽这么多张, 0 = 全扫")
     ap.add_argument("--replay", type=Path, default=None, help="读之前存的 CSV 重做分析, 不重扫")
     ap.add_argument("--sheet", type=Path, default=None, help="把报出来的金额行拼成一张图")
+    ap.add_argument("--sheet-of", choices=["dot", "minus", "both"], default="both",
+                    help="拼图要画哪一条报出的: 小数点 / 已上线的负号 / 两条都画(默认)")
     ap.add_argument("--since", type=str, default=None, help="只看这个日期(含)之后的, YYYYMMDD")
     ap.add_argument("--until", type=str, default=None, help="只看这个日期(含)之前的, YYYYMMDD")
     ap.add_argument("--seed", type=int, default=20260905)
