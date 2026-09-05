@@ -123,6 +123,29 @@ def _locate_amount(gray, W, H):
             max(k[0] + k[2] for k in best), max(k[1] + k[3] for k in best))
 
 
+def corner_icon(img):
+    """左上角那个图标的宽高。用来分页型:
+
+    账单详情页是 `<` 返回箭头, 高宽比约 1.7(实测 56x33)。
+    商家账单页是 `X` 关闭图标, 近正方形(实测 44x44)。
+    ★ 这两种页用的金额字体不一样 —— 商家账单页的负号明显更宽,
+      所以拿账单详情页标出来的阈值去判它, 会整页型误报。
+    返回 (w, h) 或 None。
+    """
+    H, W = img.shape[:2]
+    g = cv2.cvtColor(img[0:int(H * 0.12), 0:int(W * 0.13)], cv2.COLOR_BGR2GRAY)
+    _, dark = cv2.threshold(g, 169, 255, cv2.THRESH_BINARY_INV)
+    n, _, st, _ = cv2.connectedComponentsWithStats(dark, 8)
+    best = None
+    for i in range(1, n):
+        x, y, w, h, a = st[i]
+        if a < 100 or not (25 <= h <= 80) or not (15 <= w <= 80):
+            continue
+        if best is None or y > best[1]:      # 取最靠下的, 导航栏在状态栏下面
+            best = (x, y, w, h)
+    return (best[2], best[3]) if best else None
+
+
 def measure(path):
     """逐条对应 MinusCheck.cs 的判定链。返回 dict 或 None(判不了)。"""
     img = cv2.imread(path, cv2.IMREAD_COLOR)
@@ -189,8 +212,16 @@ def measure(path):
             yen = True
             mw_noyen = float(np.median([k[2] for k in ds[1:]]))
 
+    ic = corner_icon(img)
+    if ic is None:
+        page = "unknown"
+    else:
+        ar = ic[1] / ic[0]
+        page = "close" if 0.85 <= ar <= 1.15 else ("back" if ar >= 1.4 else "other")
+
     return dict(
         name=os.path.basename(path), W=W, H=H,
+        page=page, icon_w=(ic[0] if ic else 0), icon_h=(ic[1] if ic else 0),
         mh=mh, mw=mw, n_digit=len(digits),
         bar_ratio=bar[2] / mw,
         bar_ratio_noyen=bar[2] / mw_noyen,
@@ -251,6 +282,21 @@ def _analyse(args, rows):
             cells.append(f"{h:>4}={rate:>7.2f}/万")
         ratio = f"{rates['jpg']/rates['png']:.1f}x" if rates.get("png") else "-"
         print(f"{lbl:<26} {cells[0]:>16} {cells[1]:>16} {ratio:>9}")
+
+    # ★★ 按页型拆开 —— 这是 2026-09-05 查出来的关键混杂
+    #   商家账单页(左上角是 X 关闭图标)和账单详情页(左上角是 < 返回箭头)
+    #   用的金额字体不一样, 负号明显更宽。拿详情页标的阈值去判它会整页型误报。
+    print(f"\n★ 按页型拆(左上角图标: back = < 返回箭头, close = X 关闭图标)")
+    print(f"{'页型':<10} {'张数':>8} {'占比':>7} {'负号中位':>9} {'负号>=0.78':>14}")
+    for pg in ("back", "close", "other", "unknown"):
+        v = [r for r in ok if r.get("page") == pg]
+        if not v:
+            continue
+        b = np.array([r["bar_ratio"] for r in v])
+        h = sum(1 for x in b if x >= BAR_HIGH)
+        print(f"  {pg:<8} {len(v):>8,} {100.0*len(v)/len(ok):>6.2f}% {np.median(b):>9.4f} "
+              f"{h:>5} = {10000.0*h/len(v):>8.1f}/万")
+    print("  ★ close 那一行的报出率如果远高于 back, 就说明线上那条在整页型误伤商家账单页。")
 
     # ★ ¥ 对已上线那条的影响
     print(f"\n¥ 排查(¥ 被当成数字算进去, 会把 mw 拉低、把负号宽比顶高)")
@@ -361,7 +407,9 @@ def main():
         with open(args.replay, encoding="utf-8-sig") as f:
             rows = [dict(r) for r in csv.DictReader(f)]
         for r in rows:
-            for k in ("W", "H", "n_digit", "n_dot", "yen"):
+            r.setdefault("page", "unknown")
+            r.setdefault("icon_w", 0); r.setdefault("icon_h", 0)
+            for k in ("W", "H", "n_digit", "n_dot", "yen", "icon_w", "icon_h"):
                 r[k] = int(float(r[k]))
             for k in ("mh", "mw", "bar_ratio", "bar_ratio_noyen", "dot_area", "dot_ratio"):
                 r[k] = float(r[k])
