@@ -199,7 +199,7 @@ namespace Ssp
                         cn == 4 ? ColorConversionCodes.BGRA2GRAY : ColorConversionCodes.BGR2GRAY);
                     gray = owned;
                 }
-                res.Rephotograph = IsRephotograph(W, H);
+                res.Rephotograph = IsRephotograph(image.Width, image.Height);
                 if (IsMerchantPage(gray))
                 {
                     res.MerchantPage = true;
