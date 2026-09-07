@@ -22,7 +22,8 @@ namespace Ssp
         public double DigitAspect;   // 数字中位宽 / 中位高
         public int DigitCount;
         public double DotArea;       // 小数点的前景像素数; 0 表示没量到
-        public double DotRatio;      // DotArea / (数字中位高)^2
+        public double DotRatio;      // DotArea / (数字中位高)^2, 只输出不判定
+        public double DotFill;       // DotArea / 小数点外接框面积。实心方点 = 1.0, 圆点 = 0.785
         public bool Measured;        // 为 false 时上面几项无意义
         public string Reason = "";
     }
@@ -68,15 +69,29 @@ namespace Ssp
         public const double ThresholdLow = 0.0;
 
         /// <summary>
-        /// 小数点面积 / 数字中位高的平方, 正常范围。落在这个区间外判可疑。
+        /// ★ 小数点的**填充率**下界: 面积 / 外接框面积。低于这个值判可疑。
         ///
-        /// 支付宝金额字体的小数点**异常地大**(实测 0.030), 换成别的字体基本都偏小:
-        /// Arial 0.63 倍, SegoeUI 0.61 倍, Leelawadee 0.61 倍, MSYaHei 0.69 倍。
-        /// 这一条和负号那条是**正交**的: 等宽字体 Consolas 的负号宽度正好撞上真图,
-        /// 负号那条只抓到 0.5%, 小数点这条抓 100%。
+        /// 支付宝金额字体的小数点是一个**实心方块**, 每个像素都是墨, 填充率 1.000。
+        /// 圆点的填充率是 pi/4 = 0.785。经理 2026-09-05 的原话是
+        /// "昨晚那个图就只有小数点是圆的了" —— 判别的关键是**形状**, 不是大小。
         ///
-        /// 用面积而不是外接框: 小数点只有十来个像素宽, 边长的量化太粗;
-        /// 面积是上百个像素的计数, 同样一个像素的抖动对它的影响小一个量级。
+        /// 两侧实测(真图 9,000 张, 圆点假图 21 张, 假图是肉眼确认过的):
+        ///     圆点假图 填充率最大 0.8947
+        ///     真图 png 填充率最小 0.9121
+        ///   **完全分开, 没有重叠。** 阈值 0.90 时 21/21 全抓到, png 侧 0/4,292 零误报。
+        ///
+        /// ★ 只对**无损图(PNG)**有效。JPEG 会把方点的角压圆, 真图 jpg 最低能到 0.7059,
+        ///   和真圆点分不开(阈值 0.90 时 jpg 误报 78.6/万)。这是压缩的物理限制, 不是阈值问题。
+        ///   所以判定要靠调用方传 lossless=true 打开, 默认不判, 只输出 DotFill。
+        /// </summary>
+        public const double DotFillLow = 0.90;
+
+        /// <summary>
+        /// 小数点面积 / 数字中位高的平方。**只输出, 不参与判定。**
+        ///
+        /// 这是上一版的判据, 用合成字体标出来的区间是 0.0200~0.0365。
+        /// 拿真实圆点假图一测, 21 张里只抓到 2 张(10%), 所以降级成只报不判。
+        /// 教训: 合成样本标出来的阈值和真实假图不在同一个位置。
         /// </summary>
         public const double DotRatioLow = 0.0200, DotRatioHigh = 0.0365;
 
@@ -94,7 +109,11 @@ namespace Ssp
         /// 8 位图, 1 / 3 / 4 通道均可; 多通道按 OpenCV 惯例视为 BGR(A)。
         /// 传进来的 Mat 不会被修改, 也不会被释放。
         /// </param>
-        public static MinusResult Check(Mat image)
+        /// <param name="lossless">
+        /// 源图是不是无损格式(PNG)。为 true 才用小数点形状那条判定 ——
+        /// JPEG 会把方点的角压圆, 在有损图上这条判不了。默认 false, 行为和原来一致。
+        /// </param>
+        public static MinusResult Check(Mat image, bool lossless = false)
         {
             if (image == null) throw new ArgumentNullException(nameof(image));
 
@@ -125,12 +144,12 @@ namespace Ssp
                         cn == 4 ? ColorConversionCodes.BGRA2GRAY : ColorConversionCodes.BGR2GRAY);
                     gray = owned;
                 }
-                return Check(gray, res);
+                return Check(gray, res, lossless);
             }
             finally { owned?.Dispose(); }
         }
 
-        static MinusResult Check(Mat gray, MinusResult res)
+        static MinusResult Check(Mat gray, MinusResult res, bool lossless)
         {
             int W = gray.Width, H = gray.Height;
 
@@ -202,6 +221,8 @@ namespace Ssp
             {
                 res.DotArea = dots[0].Area;
                 res.DotRatio = res.DotArea / (mh * mh);
+                int dw = dots[0].W, dh2 = dots[0].H;
+                res.DotFill = (dw > 0 && dh2 > 0) ? res.DotArea / (double)(dw * dh2) : 0.0;
             }
 
             if (mh < MinDigitHeight)
@@ -214,19 +235,20 @@ namespace Ssp
             // 两条并联, 任一条报就报。
             // 负号: 保持已上线的高侧阈值 0.78 不动, 只补一个低侧 —— 纯增量, 不会丢掉现在能抓的。
             bool barBad = res.BarWidth >= Threshold || res.BarWidth < ThresholdLow;
-            bool dotBad = dotOk && (res.DotRatio < DotRatioLow || res.DotRatio > DotRatioHigh);
+            // 形状那条只在无损图上判 —— JPEG 会把方点的角压圆
+            bool dotBad = dotOk && lossless && res.DotFill > 0 && res.DotFill < DotFillLow;
             if (barBad || dotBad)
             {
                 res.Verdict = MinusVerdict.Suspicious;
                 res.Reason = barBad
                     ? $"负号宽比 {res.BarWidth:F4} (正常 {ThresholdLow}~{Threshold})"
-                    : $"小数点面积比 {res.DotRatio:F4} (正常 {DotRatioLow}~{DotRatioHigh})";
+                    : $"小数点是圆的, 填充率 {res.DotFill:F4} (实心方点应为 1.0, 阈值 {DotFillLow})";
             }
             else
             {
                 res.Verdict = MinusVerdict.Ok;
                 res.Reason = dotOk
-                    ? $"负号宽比 {res.BarWidth:F4}, 小数点面积比 {res.DotRatio:F4}"
+                    ? $"负号宽比 {res.BarWidth:F4}, 小数点填充率 {res.DotFill:F4}"
                     : $"负号宽比 {res.BarWidth:F4}, 小数点没量到";
             }
             return res;
