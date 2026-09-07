@@ -23,6 +23,15 @@ namespace Ssp
         public double DotArea;       // 小数点的前景像素数
         public double DigitHeight;   // 金额数字中位高, 用来判断字号够不够大
         public bool MerchantPage;    // 左上角是关闭图标的商家账单页
+        /// <summary>
+        /// 蓝底转账页那道闸是否真的跑过。
+        ///
+        /// ★ 入参是**单通道**(已经转好的灰度图)时, 这道闸需要颜色, 跑不了, 这里就是 false。
+        ///   1,200 张实测: 蓝底闸挡下 8 张, 其中 6 张(0.5%)喂灰度后判定会变。
+        ///   喂灰度本身是合法用法(能省掉一次整帧转换, 实测快 18.5%),
+        ///   但**要知道自己少了一道闸** —— 所以这里明说, 不做静默处理。
+        /// </summary>
+        public bool BlueGateRan;
         public bool Rephotograph;    // 疑似翻拍
         public bool Measured;        // 为 false 时上面几项无意义
         public string Reason = "";
@@ -51,6 +60,16 @@ namespace Ssp
     ///   - 这条和负号那条抓的**不是同一种手法**: 只改负号的那种它看不见;
     ///     两条都响的, 基本是整个金额被重打过。
     ///
+    ///
+    /// 关于开销(经理 2026-09-03: "别用内存拷贝"):
+    ///   入参只读, 内部全部用 ROI 视图, 不复制整图, 也不碰 System.Drawing。
+    ///   唯一的整帧分配是 BGR 转灰度那一次; 单通道入参时连这次也没有。
+    ///
+    ///   ★ 两个类是各自独立的, 所以**同时调用会把定位金额行那套活做两遍**。
+    ///     实测 13.55 ms/张(两条一起) 对 6.76 ms/张(只跑负号)。
+    ///     调用方自己转一次灰度再喂两个类能省 18.5%(降到 11.05 ms/张),
+    ///     **但那样蓝底页那道闸就跑不了了**(它需要颜色), 实测 0.5% 的图判定会变。
+    ///     要省这一下就看 BlueGateRan 字段, 别当它没发生。
     /// 只读入参, 内部全部用 ROI 视图, 不复制整图。无静态可变状态, 可多线程调用。
     /// </summary>
     public static class DotCheck
@@ -130,7 +149,8 @@ namespace Ssp
 
                 // 蓝底转账页金额排版不同
                 // ★ 必须放在降位之后: 这里用的是 8 位绝对阈值(+25/+15), 16 位上会失效
-                if (cn >= 3 && IsBluePage(src))
+                res.BlueGateRan = cn >= 3;
+                if (res.BlueGateRan && IsBluePage(src))
                 { res.Reason = "蓝底转账页, 不判"; return res; }
 
                 Mat gray;
