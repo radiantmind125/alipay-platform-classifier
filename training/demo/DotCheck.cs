@@ -70,43 +70,71 @@ namespace Ssp
         }
 
         /// <param name="image">
-        /// 8 位图, 1 / 3 / 4 通道均可; 多通道按 OpenCV 惯例视为 BGR(A)。
+        /// 8 位或 16 位图, 1 / 3 / 4 通道均可。
+        /// 16 位会先按 1/256 降成 8 位, 和标定时的 cv2.IMREAD_COLOR 一致。
+        /// 位深或通道数不支持时返回 CannotDetermine, **不抛异常**。
+        /// ★ 多通道必须是 **BGR(A)** 序, 也就是 OpenCV 自己的惯例(Cv2.ImRead / ImDecode 都是)。
+        /// Mat 不携带通道序信息, 传成 RGB 不会报错也不会抛异常, 只会让结果**悄悄漂**:
+        /// 实测蓝底页判定翻转 1.1~1.5%, 负号判定不一致 2.4%。
+        /// 注意共享仓库里的 PaddleOcrImageOps.ToRgbMat 是**故意**产出 RGB 序的, 不能直接喂进来。
         /// 传进来的 Mat 不会被修改, 也不会被释放。
         /// </param>
         /// <param name="lossless">
-        /// 源图是不是无损格式(PNG)。为 false 时只量不判, Verdict 恒为 CannotDetermine。
+        /// 源图是不是无损格式(PNG)。
+        ///
+        /// ★ **故意不给默认值。** 传 false 时这条判据整个不工作 —— 会在赋 Verdict 之前
+        ///   就返回, 任何输入的 Verdict 都是 CannotDetermine, 不抛异常也不打日志。
+        ///   给了默认值的话, 调用点照着 MinusCheck.Check(mat) 的样子写成 DotCheck.Check(mat)
+        ///   就会编译通过而整条判据静默全关。没有默认值, 编译器会逼每个调用点自己表态。
+        ///
+        ///   判断依据是**源文件的容器格式**, 不是 Mat 的内容 —— Mat 解码之后不带格式信息,
+        ///   得由调用方从扩展名或字节头传进来。png 传 true, jpg/jpeg/webp 传 false。
         /// </param>
-        public static DotResult Check(Mat image, bool lossless = false)
+        public static DotResult Check(Mat image, bool lossless)
         {
             if (image == null) throw new ArgumentNullException(nameof(image));
 
             var res = new DotResult { Verdict = DotVerdict.CannotDetermine };
             if (image.Empty()) { res.Reason = "图为空"; return res; }
-            if (image.Depth() != MatType.CV_8U)
-                throw new ArgumentException("只支持 8 位图");
 
+            // ★ 这两种都是**数据问题**不是编程错误 —— 批量跑图时返回"不判"而不是中断流程
             int cn = image.Channels();
             if (cn != 1 && cn != 3 && cn != 4)
-                throw new ArgumentException($"不支持 {cn} 通道");
+            { res.Reason = $"不支持 {cn} 通道, 不判"; return res; }
+            bool is8 = image.Depth() == MatType.CV_8U;
+            if (!is8 && image.Depth() != MatType.CV_16U)
+            { res.Reason = "位深不是 8 位或 16 位, 不判"; return res; }
 
             int W = image.Width, H = image.Height;
             if (W < 16 || H < 16) { res.Reason = "图太小"; return res; }
 
             res.Rephotograph = IsRephotograph(W, H);
 
-            // 蓝底转账页金额排版不同
-            if (cn >= 3 && IsBluePage(image))
-            { res.Reason = "蓝底转账页, 不判"; return res; }
-
+            Mat? owned8 = null;
             Mat? owned = null;
             try
             {
+                // ★ 16 位按 1/256 降到 8 位 —— 和标定时用的 cv2.IMREAD_COLOR 完全一致
+                //   (实测逐像素零差异)。真实图池里 3.32% 是 16 位 PNG, 当初就在标定集里。
+                Mat src = image;
+                if (!is8)
+                {
+                    owned8 = new Mat();
+                    image.ConvertTo(owned8, MatType.CV_8U, 1.0 / 256.0);
+                    src = owned8;
+                }
+
+                // 蓝底转账页金额排版不同
+                // ★ 必须放在降位之后: 这里用的是 8 位绝对阈值(+25/+15), 16 位上会失效
+                if (cn >= 3 && IsBluePage(src))
+                { res.Reason = "蓝底转账页, 不判"; return res; }
+
                 Mat gray;
-                if (cn == 1) gray = image;
+                if (cn == 1) gray = src;
                 else
                 {
                     owned = new Mat();
-                    Cv2.CvtColor(image, owned,
+                    Cv2.CvtColor(src, owned,
                         cn == 4 ? ColorConversionCodes.BGRA2GRAY : ColorConversionCodes.BGR2GRAY);
                     gray = owned;
                 }
@@ -119,7 +147,7 @@ namespace Ssp
                 }
                 return Check(gray, res, lossless);
             }
-            finally { owned?.Dispose(); }
+            finally { owned?.Dispose(); owned8?.Dispose(); }
         }
 
         static DotResult Check(Mat gray, DotResult res, bool lossless)
