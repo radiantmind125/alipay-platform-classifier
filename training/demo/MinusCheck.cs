@@ -21,31 +21,22 @@ namespace Ssp
         public double DigitHeight;   // 数字中位高
         public double DigitAspect;   // 数字中位宽 / 中位高
         public int DigitCount;
-        public double DotArea;       // 小数点的前景像素数; 0 表示没量到
-        public double DotRatio;      // DotArea / (数字中位高)^2, 只输出不判定
-        public double DotFill;       // DotArea / 小数点外接框面积。实心方点 = 1.0, 圆点 = 0.785
         public bool MerchantPage;    // 左上角是 X 关闭图标 = 商家账单页, 字体不一样, 不判
-        public bool Rephotograph;    // 疑似翻拍(相机分辨率或长宽比不像手机屏), 小数点那条不判
         public bool Measured;        // 为 false 时上面几项无意义
         public string Reason = "";
     }
 
     /// <summary>
-    /// 白底账单详情页的金额字形检查。两条判据并联, 都是同一张图内部的比值, 不查任何表:
+    /// 白底账单详情页的**负号**字形检查: 负号宽 / 数字中位宽, 同一张图内部的比值, 不查任何表。
     ///
-    ///   1. 负号宽 / 数字中位宽   —— 已上线的那条, 高侧阈值 0.78 不动, 这次补上低侧
-    ///   2. 小数点面积 / 数字中位高²  —— 新增
+    /// ★ 小数点那条已经按经理 2026-09-07 的要求拆成单独的 <see cref="DotCheck"/>, 这里不再管。
     ///
-    /// 两个参照物(负号、小数点)都是**恒定形状**: 不管什么机型、什么金额、哪个用户,
-    /// 它们永远是同一个字形。这就是这套判据不用查表、不挑机型、不随改版失效的原因。
+    /// 参照物(负号)是**恒定形状**: 不管什么机型、什么金额、哪个用户, 它永远是同一个字形。
+    /// 这就是这条判据不用查表、不挑机型、不随改版失效的原因。
     ///
-    /// 本机 17,636 张逐条分解实测(png 8,244 / jpg 9,392):
-    ///     只负号高侧(现在线上的)   png 3.64/万   jpg 13.84/万   差 3.8 倍
-    ///     只小数点(新增)           png 2.43/万   jpg  7.45/万   差 3.1 倍
-    ///     两条并联                 png 6.07/万   jpg 21.29/万   差 3.5 倍
-    ///   ★ 小数点这条的苹果/安卓差(3.1 倍)比现在线上那条(3.8 倍)还小,
-    ///     所以它不会把安卓那一侧拖得更不平衡 —— 这正是之前每一条都做不到的。
-    ///   另有复核方用另一套量法、零重叠的 34,012 张独立复算, 结论同向。
+    /// 服务器 159,675 张实测(非翻拍 + 账单详情页):
+    ///     高侧 &gt;=0.78 (已上线)   png 9.57/万   jpg 7.13/万
+    ///     低侧 &lt;0.625            png 2.42/万   jpg 5.78/万
     ///
     /// 换字体重打金额的检出率(13 种 Windows 字体造图实测, 擦掉再原样贴回的对照臂 0%):
     ///   两条并联 png 92.9% / jpg 92.1%; 把掉出管线的也算漏检则是 87.5% / 88.0%。
@@ -79,33 +70,6 @@ namespace Ssp
         /// 三条判据方向一致。
         /// </summary>
         public const double ThresholdLow = 0.625;
-
-        /// <summary>
-        /// ★ 小数点的**填充率**下界: 面积 / 外接框面积。低于这个值判可疑。
-        ///
-        /// 支付宝金额字体的小数点是一个**实心方块**, 每个像素都是墨, 填充率 1.000。
-        /// 圆点的填充率是 pi/4 = 0.785。经理 2026-09-05 的原话是
-        /// "昨晚那个图就只有小数点是圆的了" —— 判别的关键是**形状**, 不是大小。
-        ///
-        /// 两侧实测(真图 9,000 张, 圆点假图 21 张, 假图是肉眼确认过的):
-        ///     圆点假图 填充率最大 0.8947
-        ///     真图 png 填充率最小 0.9121
-        ///   **完全分开, 没有重叠。** 阈值 0.90 时 21/21 全抓到, png 侧 0/4,292 零误报。
-        ///
-        /// ★ 只对**无损图(PNG)**有效。JPEG 会把方点的角压圆, 真图 jpg 最低能到 0.7059,
-        ///   和真圆点分不开(阈值 0.90 时 jpg 误报 78.6/万)。这是压缩的物理限制, 不是阈值问题。
-        ///   所以判定要靠调用方传 lossless=true 打开, 默认不判, 只输出 DotFill。
-        /// </summary>
-        public const double DotFillLow = 0.90;
-
-        /// <summary>
-        /// 小数点面积 / 数字中位高的平方。**只输出, 不参与判定。**
-        ///
-        /// 这是上一版的判据, 用合成字体标出来的区间是 0.0200~0.0365。
-        /// 拿真实圆点假图一测, 21 张里只抓到 2 张(10%), 所以降级成只报不判。
-        /// 教训: 合成样本标出来的阈值和真实假图不在同一个位置。
-        /// </summary>
-        public const double DotRatioLow = 0.0200, DotRatioHigh = 0.0365;
 
         public const double MinDigitHeight = 60;   // 数字低于此高度不判定; 设为 0 可关闭
         const int GrayDark = 140;                  // 定位金额行时的深色阈值
@@ -156,29 +120,11 @@ namespace Ssp
             return ar >= 0.85 && ar <= 1.15;      // 近正方形 = X 关闭图标
         }
 
-        /// <summary>
-        /// 疑似翻拍(拿相机拍屏幕)。翻拍会把方点的角拍糊, 填充率跟着掉,
-        /// 所以小数点形状那条在翻拍图上不能用。
-        ///
-        /// 服务器实测: 翻拍占 0.80%, 其中 29.0% 的小数点填充率低于 0.90;
-        /// 非翻拍只有 0.14%。**翻拍出现"圆点"的概率是干净图的 200 倍。**
-        /// </summary>
-        static bool IsRephotograph(int w, int h)
-        {
-            long px = (long)w * h;
-            double ar = Math.Max(w, h) / (double)Math.Min(w, h);
-            return px >= 6_000_000 || ar < 1.7;
-        }
-
         /// <param name="image">
         /// 8 位图, 1 / 3 / 4 通道均可; 多通道按 OpenCV 惯例视为 BGR(A)。
         /// 传进来的 Mat 不会被修改, 也不会被释放。
         /// </param>
-        /// <param name="lossless">
-        /// 源图是不是无损格式(PNG)。为 true 才用小数点形状那条判定 ——
-        /// JPEG 会把方点的角压圆, 在有损图上这条判不了。默认 false, 行为和原来一致。
-        /// </param>
-        public static MinusResult Check(Mat image, bool lossless = false)
+        public static MinusResult Check(Mat image)
         {
             if (image == null) throw new ArgumentNullException(nameof(image));
 
@@ -209,19 +155,18 @@ namespace Ssp
                         cn == 4 ? ColorConversionCodes.BGRA2GRAY : ColorConversionCodes.BGR2GRAY);
                     gray = owned;
                 }
-                res.Rephotograph = IsRephotograph(image.Width, image.Height);
-                if (IsMerchantPage(gray))
+                    if (IsMerchantPage(gray))
                 {
                     res.MerchantPage = true;
                     res.Reason = "商家账单页(左上角是关闭图标), 金额字体和详情页不一样, 不判";
                     return res;
                 }
-                return Check(gray, res, lossless);
+                return Check(gray, res);
             }
             finally { owned?.Dispose(); }
         }
 
-        static MinusResult Check(Mat gray, MinusResult res, bool lossless)
+        static MinusResult Check(Mat gray, MinusResult res)
         {
             int W = gray.Width, H = gray.Height;
 
@@ -282,21 +227,6 @@ namespace Ssp
             res.DigitAspect = ar;
             res.DigitCount = digits.Count;
 
-            // 小数点: 既不是数字也不是横条, 又小又坐在数字基线上。
-            // 必须恰好找到一个 —— 找到多个说明切块不干净(压缩噪点也会被选中), 这时不判小数点这条。
-            double baseline = Median(digits.Select(g => (double)(g.Y + g.H)));
-            var dots = glyphs.Where(g => !digits.Contains(g) && !bars.Contains(g)
-                                      && g.H <= 0.30 * mh && g.W <= 0.60 * mw
-                                      && Math.Abs((g.Y + g.H) - baseline) <= 0.06 * mh).ToList();
-            bool dotOk = dots.Count == 1;
-            if (dotOk)
-            {
-                res.DotArea = dots[0].Area;
-                res.DotRatio = res.DotArea / (mh * mh);
-                int dw = dots[0].W, dh2 = dots[0].H;
-                res.DotFill = (dw > 0 && dh2 > 0) ? res.DotArea / (double)(dw * dh2) : 0.0;
-            }
-
             if (mh < MinDigitHeight)
             {
                 res.Verdict = MinusVerdict.CannotDetermine;
@@ -304,26 +234,16 @@ namespace Ssp
                 return res;
             }
 
-            // 两条并联, 任一条报就报。
-            // 负号: 保持已上线的高侧阈值 0.78 不动, 只补一个低侧 —— 纯增量, 不会丢掉现在能抓的。
-            bool barBad = res.BarWidth >= Threshold || res.BarWidth < ThresholdLow;
-            // 形状那条只在无损图上判 —— JPEG 会把方点的角压圆
-            // 形状那条: 只在无损图上判, 且翻拍图不判(翻拍会把方点的角拍糊)
-            bool dotBad = dotOk && lossless && !res.Rephotograph
-                       && res.DotFill > 0 && res.DotFill < DotFillLow;
-            if (barBad || dotBad)
+            // 保持已上线的高侧阈值 0.78 不动, 低侧 0.625 是纯增量, 不会丢掉现在能抓的。
+            if (res.BarWidth >= Threshold || res.BarWidth < ThresholdLow)
             {
                 res.Verdict = MinusVerdict.Suspicious;
-                res.Reason = barBad
-                    ? $"负号宽比 {res.BarWidth:F4} (正常 {ThresholdLow}~{Threshold})"
-                    : $"小数点是圆的, 填充率 {res.DotFill:F4} (实心方点应为 1.0, 阈值 {DotFillLow})";
+                res.Reason = $"负号宽比 {res.BarWidth:F4} (正常 {ThresholdLow}~{Threshold})";
             }
             else
             {
                 res.Verdict = MinusVerdict.Ok;
-                res.Reason = dotOk
-                    ? $"负号宽比 {res.BarWidth:F4}, 小数点填充率 {res.DotFill:F4}"
-                    : $"负号宽比 {res.BarWidth:F4}, 小数点没量到";
+                res.Reason = $"负号宽比 {res.BarWidth:F4}";
             }
             return res;
         }
