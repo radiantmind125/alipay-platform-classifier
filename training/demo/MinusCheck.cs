@@ -24,6 +24,8 @@ namespace Ssp
         public double DotArea;       // 小数点的前景像素数; 0 表示没量到
         public double DotRatio;      // DotArea / (数字中位高)^2, 只输出不判定
         public double DotFill;       // DotArea / 小数点外接框面积。实心方点 = 1.0, 圆点 = 0.785
+        public bool MerchantPage;    // 左上角是 X 关闭图标 = 商家账单页, 字体不一样, 不判
+        public bool Rephotograph;    // 疑似翻拍(相机分辨率或长宽比不像手机屏), 小数点那条不判
         public bool Measured;        // 为 false 时上面几项无意义
         public string Reason = "";
     }
@@ -105,6 +107,59 @@ namespace Ssp
             public int X, Y, W, H, Area;
         }
 
+        /// <summary>
+        /// 左上角的图标是不是近正方形。是的话这是**商家账单页**(左上角 X 关闭图标),
+        /// 不是账单详情页(左上角 &lt; 返回箭头, 高宽比约 1.7)。
+        ///
+        /// ★ 这两种页用的金额字体不一样, 商家账单页的负号明显更宽。
+        ///   服务器 40,738 张实测:
+        ///       商家账单页  215 张(占 0.53%)  负号 >= 0.78 的 93 张 = 4325.6/万, 也就是 43%
+        ///       账单详情页  40,178 张         负号 >= 0.78 的 34 张 = 8.5/万
+        ///   **线上这条一共报出 133 张, 其中 93 张(70%)是商家账单页。**
+        ///   跳过这个页型, 报出率从 32.7/万 降到 8.5/万, 代价是少判 0.53% 的图。
+        /// </summary>
+        static bool IsMerchantPage(Mat gray)
+        {
+            int W = gray.Width, H = gray.Height;
+            int cw = (int)(W * 0.13), ch = (int)(H * 0.12);
+            if (cw < 16 || ch < 16) return false;
+            using var corner = new Mat(gray, new Rect(0, 0, cw, ch));
+            using var dark = new Mat();
+            Cv2.Threshold(corner, dark, 169, 255, ThresholdTypes.BinaryInv);
+            using var labels = new Mat();
+            using var stats = new Mat();
+            using var cent = new Mat();
+            int n = Cv2.ConnectedComponentsWithStats(dark, labels, stats, cent,
+                                                     PixelConnectivity.Connectivity8, MatType.CV_32S);
+            int bestY = -1, bw = 0, bh = 0;
+            for (int i = 1; i < n; i++)
+            {
+                int a = stats.At<int>(i, (int)ConnectedComponentsTypes.Area);
+                int w = stats.At<int>(i, (int)ConnectedComponentsTypes.Width);
+                int h = stats.At<int>(i, (int)ConnectedComponentsTypes.Height);
+                if (a < 100 || h < 25 || h > 80 || w < 15 || w > 80) continue;
+                int y = stats.At<int>(i, (int)ConnectedComponentsTypes.Top);
+                if (y > bestY) { bestY = y; bw = w; bh = h; }   // 取最靠下的
+            }
+            if (bestY < 0 || bw == 0) return false;
+            double ar = bh / (double)bw;
+            return ar >= 0.85 && ar <= 1.15;      // 近正方形 = X 关闭图标
+        }
+
+        /// <summary>
+        /// 疑似翻拍(拿相机拍屏幕)。翻拍会把方点的角拍糊, 填充率跟着掉,
+        /// 所以小数点形状那条在翻拍图上不能用。
+        ///
+        /// 服务器实测: 翻拍占 0.80%, 其中 29.0% 的小数点填充率低于 0.90;
+        /// 非翻拍只有 0.14%。**翻拍出现"圆点"的概率是干净图的 200 倍。**
+        /// </summary>
+        static bool IsRephotograph(int w, int h)
+        {
+            long px = (long)w * h;
+            double ar = Math.Max(w, h) / (double)Math.Min(w, h);
+            return px >= 6_000_000 || ar < 1.7;
+        }
+
         /// <param name="image">
         /// 8 位图, 1 / 3 / 4 通道均可; 多通道按 OpenCV 惯例视为 BGR(A)。
         /// 传进来的 Mat 不会被修改, 也不会被释放。
@@ -143,6 +198,13 @@ namespace Ssp
                     Cv2.CvtColor(image, owned,
                         cn == 4 ? ColorConversionCodes.BGRA2GRAY : ColorConversionCodes.BGR2GRAY);
                     gray = owned;
+                }
+                res.Rephotograph = IsRephotograph(W, H);
+                if (IsMerchantPage(gray))
+                {
+                    res.MerchantPage = true;
+                    res.Reason = "商家账单页(左上角是关闭图标), 金额字体和详情页不一样, 不判";
+                    return res;
                 }
                 return Check(gray, res, lossless);
             }
@@ -236,7 +298,9 @@ namespace Ssp
             // 负号: 保持已上线的高侧阈值 0.78 不动, 只补一个低侧 —— 纯增量, 不会丢掉现在能抓的。
             bool barBad = res.BarWidth >= Threshold || res.BarWidth < ThresholdLow;
             // 形状那条只在无损图上判 —— JPEG 会把方点的角压圆
-            bool dotBad = dotOk && lossless && res.DotFill > 0 && res.DotFill < DotFillLow;
+            // 形状那条: 只在无损图上判, 且翻拍图不判(翻拍会把方点的角拍糊)
+            bool dotBad = dotOk && lossless && !res.Rephotograph
+                       && res.DotFill > 0 && res.DotFill < DotFillLow;
             if (barBad || dotBad)
             {
                 res.Verdict = MinusVerdict.Suspicious;
