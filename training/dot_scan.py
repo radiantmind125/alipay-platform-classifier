@@ -78,7 +78,10 @@ _TS = re.compile(r"_(\d{8})\d{6}")
 GRAY_DARK = 140
 BAR_HIGH = 0.78          # MinusCheck.Threshold, 已上线
 BAR_LOW = 0.0            # MinusCheck.ThresholdLow, 默认关闭(实测代价单边压在安卓上)
-DOT_LOW, DOT_HIGH = 0.0200, 0.0365
+DOT_LOW, DOT_HIGH = 0.0200, 0.0365   # 面积那条, 已降级成只输出
+DOT_FILL_LOW = 0.90                  # ★ 形状那条: 填充率低于此判可疑
+                                     #   实心方点 1.000, 圆点 pi/4 = 0.785
+                                     #   两侧实测: 圆点假图最大 0.8947, 真图 png 最小 0.9121
 MIN_DIGIT_HEIGHT = 60
 
 
@@ -379,15 +382,32 @@ def _analyse(args, rows):
                 cells.append(f"{np.median(d):.4f}({len(d)})" if d else "-")
             print(f"  {f:<8} " + " ".join(f"{c:>12}" for c in cells))
 
-    dot_hits = [r for r in ok if r["n_dot"] == 1 and not (DOT_LOW <= r["dot_ratio"] <= DOT_HIGH)]
+    # ★ 判据换成形状(填充率), 不再用面积。面积那条对真实圆点假图只抓到 10%。
+    dot_hits = [r for r in ok if r["n_dot"] == 1 and 0 < r.get("dot_fill", 0) < DOT_FILL_LOW]
     bar_hits = [r for r in ok if r["bar_ratio"] >= BAR_HIGH]
-    for r in dot_hits: r["_why"] = f"dot={r['dot_ratio']:.4f}"
+    for r in dot_hits: r["_why"] = f"fill={r['dot_fill']:.4f}"
     for r in bar_hits: r["_why"] = f"BAR={r['bar_ratio']:.4f}"
 
-    print(f"\n小数点报出的 {len(dot_hits)} 张(★ 一定要人工看一眼再下结论):")
-    for r in sorted(dot_hits, key=lambda r: r["dot_ratio"])[:30]:
-        print(f"    面积比 {r['dot_ratio']:.4f}  面积 {r['dot_area']:.0f}  字高 {r['mh']:.0f}  "
-              f"{r['fmt']}  {r['name'][:52]}")
+    # ★★ 这才是最要紧的一个数: 圆点里有多少是负号那条**抓不到**的
+    dot_only = [r for r in dot_hits if r["bar_ratio"] < BAR_HIGH]
+    print(f"\n★★ 圆点(填充率 < {DOT_FILL_LOW})报出 {len(dot_hits)} 张:")
+    for f in ("png", "jpg"):
+        v = [r for r in ok if r["fmt"] == f]
+        h = [r for r in dot_hits if r["fmt"] == f]
+        o = [r for r in dot_only if r["fmt"] == f]
+        if not v:
+            continue
+        print(f"    {f}  {len(h):>4}/{len(v):<7,} = {10000.0*len(h)/len(v):>7.2f}/万"
+              f"   其中负号抓不到的 {len(o):>4} = {10000.0*len(o)/len(v):>7.2f}/万")
+    print(f"  ★ 「负号抓不到的」那一栏就是这条判据的**净增价值**。"
+          f"接近 0 就说明它只是印证, 不是新抓手。")
+
+    print(f"\n填充率最低的 30 张(★ 一定要人工看一眼再下结论):")
+    for r in sorted(dot_hits, key=lambda r: r["dot_fill"])[:30]:
+        tag = "  <- 负号抓不到" if r["bar_ratio"] < BAR_HIGH else ""
+        print(f"    填充 {r['dot_fill']:.4f}  {r.get('dot_w',0)}x{r.get('dot_h',0)}  "
+              f"页型 {r.get('page','?'):<7} {r['fmt']}  负号 {r['bar_ratio']:.4f}  "
+              f"{r['name'][:44]}{tag}")
 
     # ★ 已上线那条报出的也要看。服务器实测它报出率是小数点这条的六七倍,
     #   但没人知道那里面有多少是真欺诈 —— 这是目前最该搞清楚的一件事。
@@ -423,7 +443,7 @@ def _make_sheet(input_dir, hits, out_path):
             continue
         crop = cv2.resize(crop, (900, max(1, int(crop.shape[0] * 900.0 / crop.shape[1]))))
         bar = np.full((26, 900, 3), 240, np.uint8)
-        cv2.putText(bar, f"{r.get('_why','')} area={r['dot_area']:.0f} "
+        cv2.putText(bar, f"{r.get('_why','')} dot={r.get('dot_w',0)}x{r.get('dot_h',0)} "
                          f"mh={r['mh']:.0f} {r['fmt']} {r['name'][:44]}",
                     (6, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
         tiles.append(np.vstack([bar, crop]))
