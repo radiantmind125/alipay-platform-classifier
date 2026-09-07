@@ -219,9 +219,36 @@ def measure(path):
         ar = ic[1] / ic[0]
         page = "close" if 0.85 <= ar <= 1.15 else ("back" if ar >= 1.4 else "other")
 
+    # ★ 小数点的**形状**。经理 2026-09-05: "昨晚那个图就只有小数点是圆的了"
+    #   —— 判别的关键是形状不是大小。原来量的 面积/数字高² 把两者混在一起了:
+    #   一个圆点和一个更小的方点, 面积可以完全一样。
+    #   填充率 = 面积 / 外接框面积。实心方点 = 1.000, 圆点 = pi/4 = 0.785。
+    #   实测真图 png 中位 1.000 / p1 0.997, 阈值 0.90 在 4,302 张上零报出。
+    d_w = d_h = 0
+    d_fill = 0.0
+    if len(dots) == 1:
+        d_w, d_h = dots[0][2], dots[0][3]
+        d_fill = dots[0][4] / float(d_w * d_h) if d_w and d_h else 0.0
+
+    # ★ 金额的颜色。经理 2026-09-06: "他们需求需要把文字的颜色也要输出 /
+    #   我之前是直接二值化了 现在也得改下"。我们这条管线一样是 Otsu 二值化,
+    #   颜色全丢了。这里在二值化之前把金额笔画的原始 BGR 留下来。
+    #   实测服务器报出的图里有一批金额是绿色的, 当时当成渲染变体放过了 ——
+    #   如果颜色和字体相关, 它对 flux 那边的字体分类也是一个现成特征。
+    amt = img[cy0:cy1, cx0:cx1]
+    ink = amt[sub <= int(cv2.threshold(sub, 0, 255,
+                                       cv2.THRESH_BINARY | cv2.THRESH_OTSU)[0])]
+    if len(ink) >= 50:
+        ib, ig, ir = (float(ink[:, i].mean()) for i in range(3))
+    else:
+        ib = ig = ir = 0.0
+
     return dict(
         name=os.path.basename(path), W=W, H=H,
         page=page, icon_w=(ic[0] if ic else 0), icon_h=(ic[1] if ic else 0),
+        dot_w=d_w, dot_h=d_h, dot_fill=round(d_fill, 4),
+        ink_b=round(ib, 1), ink_g=round(ig, 1), ink_r=round(ir, 1),
+        green=int(ig > ir + 12),
         mh=mh, mw=mw, n_digit=len(digits),
         bar_ratio=bar[2] / mw,
         bar_ratio_noyen=bar[2] / mw_noyen,
@@ -282,6 +309,32 @@ def _analyse(args, rows):
             cells.append(f"{h:>4}={rate:>7.2f}/万")
         ratio = f"{rates['jpg']/rates['png']:.1f}x" if rates.get("png") else "-"
         print(f"{lbl:<26} {cells[0]:>16} {cells[1]:>16} {ratio:>9}")
+
+    # ★★ 小数点的形状 —— 这才是经理指的那个判别点
+    print(f"\n★ 小数点填充率(面积/外接框): 实心方点=1.000, 圆点=pi/4=0.785")
+    print(f"{'':<10} {'张数':>8} {'中位':>8} {'p1':>8} {'<0.90':>14} {'<0.85':>14}")
+    for f in ("png", "jpg"):
+        v = [r for r in ok if r["fmt"] == f and r["n_dot"] == 1 and r.get("dot_fill", 0) > 0]
+        if not v:
+            continue
+        a = np.array([r["dot_fill"] for r in v])
+        n90 = sum(1 for x in a if x < 0.90); n85 = sum(1 for x in a if x < 0.85)
+        print(f"  {f:<8} {len(v):>8,} {np.median(a):>8.4f} {np.percentile(a,1):>8.4f} "
+              f"{n90:>5}={10000.0*n90/len(v):>7.2f}/万 {n85:>5}={10000.0*n85/len(v):>7.2f}/万")
+    print("  ★ jpg 那一侧会被压缩把方点的角磨圆, 所以只在 png 上用这条")
+
+    # ★ 颜色 —— 经理说下游要输出文字颜色
+    grn = [r for r in ok if r.get("green")]
+    print(f"\n★ 金额笔画颜色: 绿色 {len(grn):,} 张 = {100.0*len(grn)/len(ok):.2f}%")
+    if grn:
+        for lbl, v in (("绿色金额", grn), ("其它", [r for r in ok if not r.get("green")])):
+            d = [r["dot_fill"] for r in v if r["n_dot"] == 1 and r.get("dot_fill", 0) > 0]
+            b = [r["bar_ratio"] for r in v]
+            if not d:
+                continue
+            print(f"  {lbl:<8} n={len(v):>6,}  小数点填充率中位 {np.median(d):.4f}  "
+                  f"负号宽比中位 {np.median(b):.4f}")
+        print("  ★ 两行差得大, 就说明颜色和字体是绑在一起的, 那颜色能直接当字体分类的特征")
 
     # ★★ 按页型拆开 —— 这是 2026-09-05 查出来的关键混杂
     #   商家账单页(左上角是 X 关闭图标)和账单详情页(左上角是 < 返回箭头)
@@ -409,9 +462,15 @@ def main():
         for r in rows:
             r.setdefault("page", "unknown")
             r.setdefault("icon_w", 0); r.setdefault("icon_h", 0)
-            for k in ("W", "H", "n_digit", "n_dot", "yen", "icon_w", "icon_h"):
+            for k in ("dot_w", "dot_h", "green"):
+                r.setdefault(k, 0)
+            for k in ("dot_fill", "ink_b", "ink_g", "ink_r"):
+                r.setdefault(k, 0.0)
+            for k in ("W", "H", "n_digit", "n_dot", "yen", "icon_w", "icon_h",
+                      "dot_w", "dot_h", "green"):
                 r[k] = int(float(r[k]))
-            for k in ("mh", "mw", "bar_ratio", "bar_ratio_noyen", "dot_area", "dot_ratio"):
+            for k in ("mh", "mw", "bar_ratio", "bar_ratio_noyen", "dot_area",
+                      "dot_ratio", "dot_fill", "ink_b", "ink_g", "ink_r"):
                 r[k] = float(r[k])
         print(f"从 {args.replay} 读回 {len(rows):,} 张, 不重新扫图")
         if args.since or args.until:
