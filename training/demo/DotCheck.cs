@@ -71,7 +71,8 @@ namespace Ssp
 
         /// <param name="image">
         /// 8 位或 16 位图, 1 / 3 / 4 通道均可。
-        /// 16 位会先按 1/256 降成 8 位, 和标定时的 cv2.IMREAD_COLOR 一致。
+        /// 16 位会先按 1/256 降成 8 位(标定时用的 cv2.IMREAD_COLOR 也降位, 但取整方式差 1 个灰阶,
+        /// 996 张实测端到端判定不同 2 张)。
         /// 位深或通道数不支持时返回 CannotDetermine, **不抛异常**。
         /// ★ 多通道必须是 **BGR(A)** 序, 也就是 OpenCV 自己的惯例(Cv2.ImRead / ImDecode 都是)。
         /// Mat 不携带通道序信息, 传成 RGB 不会报错也不会抛异常, 只会让结果**悄悄漂**:
@@ -114,8 +115,11 @@ namespace Ssp
             Mat? owned = null;
             try
             {
-                // ★ 16 位按 1/256 降到 8 位 —— 和标定时用的 cv2.IMREAD_COLOR 完全一致
-                //   (实测逐像素零差异)。真实图池里 3.32% 是 16 位 PNG, 当初就在标定集里。
+                // ★ 16 位按 1/256 降到 8 位。真实图池里 3.32% 是 16 位 PNG, 当初就在标定集里
+                //   (标定用的 cv2.imread(IMREAD_COLOR) 本身就降位)。
+                //   注意和 IMREAD_COLOR **不是逐像素相同**: ConvertTo 四舍五入, IMREAD_COLOR 截断,
+                //   余数 >=128 时差 1 个灰阶。996 张实测 589 张有差异, 端到端判定不同 2 张。
+                //   详见 MinusCheck.cs 里同一处的说明。
                 Mat src = image;
                 if (!is8)
                 {
