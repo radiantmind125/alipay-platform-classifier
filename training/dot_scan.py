@@ -246,6 +246,48 @@ def measure(path):
     else:
         ib = ig = ir = 0.0
 
+    # ---- 与数字内容无关的字体不变量 ----
+    # 数字本身**不是恒定字形**("1" 比 "0" 窄得多), 所以凡是由数字宽度推出来的量
+    # 都会被金额内容污染: 实测 mw/mh 分布很紧(11.4%)但大额富集只有 3.59 倍,
+    # 远不如负号(12.2~16.0)和圆点(14.4)。下面这些量都不挑数字内容。
+    top = float(np.median([k[1] for k in digits]))
+    bar_vpos = ((bar[1] + bar[3] / 2.0) - top) / mh          # 负号坐得多高
+    right_of_bar = [k for k in ds if k[0] >= bar[0] + bar[2]]
+    bar_gap = ((right_of_bar[0][0] - (bar[0] + bar[2])) / mh
+               if right_of_bar else 0.0)
+
+    # 字距: 只取相邻且间隔在一个字宽上下的一对, 跨小数点那一跳要排除,
+    # 否则变异系数会被那个不规则间隔顶高(实测从 0.05 顶到 0.19)。
+    gaps = [b[0] - a[0] for a, b in zip(ds, ds[1:])
+            if 0.5 * mw < b[0] - a[0] < 1.8 * mw]
+    if len(gaps) >= 3:
+        ga = np.array(gaps, float)
+        pitch = float(np.median(ga)) / mh
+        pitch_cv = float(ga.std() / ga.mean()) if ga.mean() else 0.0
+    else:
+        pitch = pitch_cv = 0.0
+
+    # 笔画粗细: 距离变换在字形内部的最大值约等于半个笔宽
+    st = []
+    for k in digits:
+        m = fg[k[1]:k[1] + k[3], k[0]:k[0] + k[2]]
+        if m.size == 0:
+            continue
+        dt = cv2.distanceTransform(
+            cv2.copyMakeBorder(m, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0),
+            cv2.DIST_L2, 5)
+        if dt.max() > 0:
+            st.append(float(dt.max()) * 2.0)
+    stroke = (float(np.median(st)) / mh) if len(st) >= 3 else 0.0
+    height_cv = float(dh.std() / dh.mean()) if dh.mean() else 0.0
+
+    # 小数点竖直位置。★ 这里要用**没被基线过滤**的候选, 上面的 dots 是按
+    # abs(下缘-基线) <= 0.06*mh 挑的, 拿它算就是循环论证。
+    dots_free = [k for k in glyphs if k not in digits and k not in bars
+                 and k[3] <= 0.30 * mh and k[2] <= 0.60 * mw]
+    dot_vpos = (((dots_free[0][1] + dots_free[0][3]) - baseline) / mh
+                if len(dots_free) == 1 else 0.0)
+
     return dict(
         name=os.path.basename(path), W=W, H=H,
         page=page, icon_w=(ic[0] if ic else 0), icon_h=(ic[1] if ic else 0),
@@ -258,6 +300,10 @@ def measure(path):
         dot_area=float(dots[0][4]) if len(dots) == 1 else 0.0,
         dot_ratio=(dots[0][4] / (mh * mh)) if len(dots) == 1 else 0.0,
         n_dot=len(dots), yen=int(yen),
+        bar_vpos=round(bar_vpos, 5), bar_gap=round(bar_gap, 5),
+        pitch=round(pitch, 5), pitch_cv=round(pitch_cv, 5),
+        stroke=round(stroke, 5), height_cv=round(height_cv, 5),
+        dot_vpos=round(dot_vpos, 5),
         fmt="png" if path.lower().endswith(".png") else "jpg",
         month=(_TS.search(os.path.basename(path)).group(1)[:6]
                if _TS.search(os.path.basename(path)) else ""),
