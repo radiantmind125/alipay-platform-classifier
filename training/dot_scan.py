@@ -149,6 +149,22 @@ def corner_icon(img):
     return (best[2], best[3]) if best else None
 
 
+def _worker_init():
+    """每个子进程里把 OpenCV 的内部线程关掉 —— 否则它会和进程池抢核心, 越并行越慢。"""
+    try:
+        cv2.setNumThreads(1)
+    except Exception:
+        pass
+
+
+def _measure_safe(path):
+    """给进程池用的包装: 单张图出错不能把整批带崩。"""
+    try:
+        return measure(path)
+    except Exception:
+        return None
+
+
 def measure(path):
     """逐条对应 MinusCheck.cs 的判定链。返回 dict 或 None(判不了)。"""
     img = cv2.imread(path, cv2.IMREAD_COLOR)
@@ -549,6 +565,8 @@ def main():
     ap.add_argument("--since", type=str, default=None, help="只看这个日期(含)之后的, YYYYMMDD")
     ap.add_argument("--until", type=str, default=None, help="只看这个日期(含)之前的, YYYYMMDD")
     ap.add_argument("--seed", type=int, default=20260905)
+    ap.add_argument("--workers", type=int, default=0,
+                    help="并行进程数, 0 = 自动(核数减一), 1 = 不并行")
     args = ap.parse_args()
 
     for k, v in (("--since", args.since), ("--until", args.until)):
@@ -613,14 +631,22 @@ def main():
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         fh = open(args.out, "w", newline="", encoding="utf-8-sig")
+    n_work = args.workers if args.workers > 0 else max(1, (os.cpu_count() or 2) - 1)
+    pool = None
     try:
-        for i, p in enumerate(files, 1):
+        if n_work > 1 and len(files) > 200:
+            import multiprocessing as mp
+            print(f"并行 {n_work} 个进程", flush=True)
+            pool = mp.Pool(n_work, initializer=_worker_init)
+            it = pool.imap_unordered(_measure_safe, [str(p) for p in files],
+                                     chunksize=64)
+        else:
+            _worker_init()
+            it = (_measure_safe(str(p)) for p in files)
+
+        for i, r in enumerate(it, 1):
             if i % 5000 == 0:
                 print(f"  ...{i:,}/{len(files):,}, 量到 {len(rows):,}", flush=True)
-            try:
-                r = measure(str(p))
-            except Exception:
-                r = None
             if not r:
                 skipped += 1
                 continue
@@ -634,7 +660,12 @@ def main():
                     fh.flush()
     except KeyboardInterrupt:
         print(f"\n收到中断, 已量到的 {len(rows):,} 张照常分析。")
+        if pool is not None:
+            pool.terminate()
     finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
         if fh is not None:
             fh.flush(); fh.close()
 
