@@ -190,6 +190,46 @@ def measure(path):
     bars = [k for k in glyphs if k[2] >= 1.5 * k[3] and k[3] <= 0.45 * med_h]
     if len(digits) < 4 or not bars:
         return None
+
+    # ★ 1. 贴着切块左右边缘的块是**被切断的**, 尺寸不可信, 先剔掉。
+    #   实测三张 -499.99 的首块 x=0、高只有其余的 0.857, 旧版据此误判成 ¥。
+    #   真正的 ¥ 和真图首字都离边缘很远(x 77~139)。
+    sub_w = fg.shape[1]
+    digits = [k for k in digits if k[0] > 0 and k[0] + k[2] < sub_w]
+    if len(digits) < 4:
+        return None
+
+    # ★ 2. 把 ¥ 从数字里剔出去。不剔的后果: n_digit 多算 1,
+    #   而 n_digit>=6 正是"大额(>=1000元)"的代用指标 ——
+    #   ¥300.00 这种 300 元的图会被算成大额, 富集数字全部虚高。
+    #
+    #   ¥ 不止一种字形, 单一判据抓不全, 实测要三选一(参照是**其余**数字):
+    #     a) 又宽又稀  宽 1.41~1.62 倍且笔画疏     -> 宽版 ¥
+    #     b) 明显偏矮  高 0.901 倍                 -> ¥300.30 那种
+    #     c) 后面留大空 间隔 1.021 倍中位宽         -> ¥-999.92 那种
+    #   对照真图首字: 宽比 0.55~1.00, 高比 0.98~1.00, 间隔 0.23~0.57, 三条都不沾。
+    digits.sort(key=lambda k: k[0])
+    yen = False
+    if len(digits) >= 5:
+        rest = digits[1:]
+        rest_w = float(np.median([k[2] for k in rest]))
+        rest_h = float(np.median([k[3] for k in rest]))
+        rest_fill = float(np.median([k[4] / float(k[2] * k[3]) for k in rest]))
+        d0 = digits[0]
+        f0 = d0[4] / float(d0[2] * d0[3]) if d0[2] and d0[3] else 1.0
+        gap0 = (rest[0][0] - (d0[0] + d0[2])) / rest_w if rest_w else 0.0
+        if rest_w > 0 and rest_h > 0 and rest_fill > 0:
+            wide_sparse = d0[2] > 1.25 * rest_w and f0 < 0.85 * rest_fill
+            short = d0[3] < 0.95 * rest_h
+            # 宽度条件防误伤: 金额如 -1.50 首字后面就是小数点, 间隔天生大,
+            # 但那种情况首字是窄的 "1"
+            wide_gap = gap0 > 0.85 and d0[2] > 0.95 * rest_w
+            if wide_sparse or short or wide_gap:
+                yen = True
+                digits = rest
+    if len(digits) < 4:
+        return None
+
     dh = np.array([k[3] for k in digits], float)
     dw = np.array([k[2] for k in digits], float)
     if dh.std() / dh.mean() > 0.08 or dw.std() / dw.mean() > 0.30:
@@ -204,16 +244,9 @@ def measure(path):
             and k[3] <= 0.30 * mh and k[2] <= 0.60 * mw
             and abs((k[1] + k[3]) - baseline) <= 0.06 * mh]
 
-    # ¥ 排查: 最左边那个"数字"如果明显比其余矮, 多半是 ¥ 被当成数字算进去了。
-    # 它比数字窄, 会把 mw 拉低, 于是把 负号宽/mw 顶高 —— 给已上线那条制造误报。
-    ds = sorted(digits, key=lambda k: k[0])
-    yen = False
+    # ¥ 已经在前面剔掉了, 所以 mw 就是干净的数字中位宽
+    ds = digits
     mw_noyen = mw
-    if len(ds) >= 4:
-        rest_h = float(np.median([k[3] for k in ds[1:]]))
-        if ds[0][3] < 0.95 * rest_h:
-            yen = True
-            mw_noyen = float(np.median([k[2] for k in ds[1:]]))
 
     ic = corner_icon(img)
     if ic is None:
