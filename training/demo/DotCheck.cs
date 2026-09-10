@@ -312,7 +312,10 @@ namespace Ssp
             }
             if (bestY < 0 || bw == 0) return false;
             double ar = bh / (double)bw;
-            return ar >= 0.85 && ar <= 1.15;
+            // 带宽实测定下来的, 依据见 MinusCheck.cs 里同一处的说明:
+            // 真正的叉号页集中在 0.99~1.01(报警 87.6%, bar 中位 1.0238),
+            // 两端那批调原图看过全是普通详情页。收窄后覆盖代价 0.50% -> 0.28%。
+            return ar >= 0.97 && ar <= 1.03;
         }
 
         static bool IsBluePage(Mat bgr)
