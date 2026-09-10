@@ -181,6 +181,38 @@ namespace Ssp
             var bars = glyphs.Where(g => g.W >= 1.5 * g.H && g.H <= 0.45 * medH).ToList();
             if (digits.Count < 4) { res.Reason = "数字不够 4 个"; return res; }
 
+            // ★ 贴着切块左右边缘的块是**被切断的**, 尺寸不可信, 先剔掉。
+            //   实测三张 -499.99 的首块 X=0、高只有其余的 0.857, 会被下面的 ¥ 判据误伤;
+            //   真正的 ¥ 和真图首字都离边缘很远。不剔掉还会让 n_digit 多算一位。
+            digits = digits.Where(g => g.X > 0 && g.X + g.W < cw).ToList();
+            if (digits.Count < 4) { res.Reason = "去掉贴边的块之后数字不够"; return res; }
+
+            // ★ 把 ¥ 从数字里剔出去。留着它会把 mw 拉宽, 进而压低负号宽比 —— 造成漏判。
+            //   ¥ 和数字**一样高**, 所以按高度判会失效; 而且它不止一种字形, 要三选一:
+            //     又宽又稀(宽比 1.41~1.62) / 明显偏矮(0.901) / 后面留大空(1.021)
+            //   对照真图首字: 宽比 0.55~1.00, 高比 0.98~1.00, 间隔 0.23~0.57, 三条都不沾。
+            digits = digits.OrderBy(g => g.X).ToList();
+            if (digits.Count >= 5)
+            {
+                var rest = digits.Skip(1).ToList();
+                double restW = Median(rest.Select(g => (double)g.W));
+                double restH = Median(rest.Select(g => (double)g.H));
+                double restFill = Median(rest.Select(g => g.Area / (double)(g.W * g.H)));
+                var d0 = digits[0];
+                double f0 = d0.Area / (double)(d0.W * d0.H);
+                if (restW > 0 && restH > 0 && restFill > 0)
+                {
+                    double gap0 = (rest[0].X - (d0.X + d0.W)) / restW;
+                    bool wideSparse = d0.W > 1.25 * restW && f0 < 0.85 * restFill;
+                    bool shortGlyph = d0.H < 0.95 * restH;
+                    // 宽度条件防误伤: 金额如 -1.50 首字后面就是小数点, 间隔天生大,
+                    // 但那种情况首字是窄的 "1"
+                    bool wideGap = gap0 > 0.85 && d0.W > 0.95 * restW;
+                    if (wideSparse || shortGlyph || wideGap) digits = rest;
+                }
+            }
+            if (digits.Count < 4) { res.Reason = "去掉 ¥ 之后数字不够"; return res; }
+
             // ★ 必须有负号才判。这不是为了量负号, 是为了**把判定限制在标过阈值的那批图上** ——
             //   0.90 这个阈值和它背后的样本全部来自带负号的图, 没有负号的是收款那一类,
             //   金额字体从来没量过。去掉这道闸会多放进约 4% 没标定过的图。
