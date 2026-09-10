@@ -337,6 +337,16 @@ def measure(path):
     dot_vpos = (((dots_free[0][1] + dots_free[0][3]) - baseline) / mh
                 if len(dots_free) == 1 else 0.0)
 
+    # ★ 金额行在页面上的竖直位置 / 图高。用来分**支付宝账单详情页**和别家 App。
+    #   支付宝在金额上面有一个头像, 把金额往下顶; 银行 App 和微信没有, 金额更靠上。
+    #   本机 145 张分层实测:
+    #       支付宝账单详情页(对照组)  中位 0.2520   p10 0.2428  p90 0.2668
+    #       别家 App(BOTH 组, 30 张里 26 张是银行/微信)  中位 0.2056   p90 0.2471
+    #   为什么要分: 判据是给支付宝账单详情页设计的, 别家 App 换套字体必然报,
+    #   那不是抓到伪造。而且银行/微信转账金额天然比支付宝日常消费大,
+    #   所以"别家页面"会伪造出大额富集 —— 和 ¥ 那次是同一种混淆。
+    amt_y = ((by0 + by1) / 2.0) / H if H else 0.0
+
     return dict(
         name=os.path.basename(path), W=W, H=H,
         page=page, icon_w=(ic[0] if ic else 0), icon_h=(ic[1] if ic else 0),
@@ -349,6 +359,7 @@ def measure(path):
         dot_area=float(dots[0][4]) if len(dots) == 1 else 0.0,
         dot_ratio=(dots[0][4] / (mh * mh)) if len(dots) == 1 else 0.0,
         n_dot=len(dots), yen=int(yen),
+        amt_y=round(amt_y, 5),
         bar_vpos=round(bar_vpos, 5), bar_gap=round(bar_gap, 5),
         pitch=round(pitch, 5), pitch_cv=round(pitch_cv, 5),
         stroke=round(stroke, 5), height_cv=round(height_cv, 5),
