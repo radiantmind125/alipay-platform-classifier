@@ -57,6 +57,13 @@ namespace Ssp
         public const double ThresholdLow = 0.625;
 
         public const double MinDigitHeight = 60;   // 数字低于此高度不判定; 设为 0 可关闭
+        /// <summary>
+        /// 金额行竖直位置(中心 / 图高)的可判区间 —— 用来只保留**支付宝账单详情页**。
+        /// 银行 App 和微信的转账页金额更靠上(它们上面没有头像), 换个 App 就是换套字体,
+        /// 判据在那些页面上必然报, 但那不是伪造。经理 2026-09-09 明确"只管支付宝的"。
+        /// </summary>
+        public const double AmountYLow = 0.235, AmountYHigh = 0.280;
+
         const int GrayDark = 140;                  // 定位金额行时的深色阈值
 
         public const int MaxComponents = 20_000;   // 上限保护, 见 LocateAmount
@@ -184,6 +191,21 @@ namespace Ssp
             if (box == null) { res.Reason = "定位不到金额行"; return res; }
             int bx0 = box.Value.Left, by0 = box.Value.Top;
             int bx1 = box.Value.Right, by1 = box.Value.Bottom;
+            // ★ 页型闸: 只判**支付宝账单详情页**。
+            //   经理 2026-09-09: "微信的不算" "银行APP的我们也先不管" "只管支付宝的"。
+            //   支付宝在金额上方有个头像把金额往下顶, 银行 App 和微信没有, 金额更靠上,
+            //   所以金额行的竖直位置就能分开。左上角图标分不开 —— 这几家都是 `<` 返回箭头。
+            //   699,741 张实测各段报出率:
+            //       <0.20  2.85%   0.20~0.22 2.36%   0.22~0.235 0.30%
+            //       0.235~0.245 0.08%   0.245~0.28 0.06%   >0.28 9.64%
+            //   别家页面的报出率是支付宝页的 14 倍。取 [0.235,0.280] 覆盖 93.7%。
+            double amtY = ((by0 + by1) / 2.0) / H;
+            if (amtY < AmountYLow || amtY > AmountYHigh)
+            {
+                res.Reason = $"金额行位置 {amtY:F3} 不在支付宝账单详情页的范围内, 不判";
+                return res;
+            }
+
 
             // 行内重新取块, 不设高度下限: 定位阶段的高度过滤会把负号滤掉。
             // 左侧外扩较多, 因为定位框只覆盖数字, 负号落在框外。
