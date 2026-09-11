@@ -22,8 +22,22 @@ r"""判断截图里是不是带**拼音标注**。
 普通截图里也有小字(时间戳、说明文字), 但它们**不会系统性地压在大字正上方**。
 实测三张对照真图, 这种"小压大"的配对数是 0。
 
-判据: 统计有多少小块满足"正下方紧贴一个大块且水平重叠",
-      再除以小块总数, 得到 pinyin_ratio。
+判据: 统计有多少小块满足"正下方紧贴一个大块且水平重叠"(stacked),
+      再除以小块总数得到 pinyin_ratio。★ 但**光看比例会错**, 见 has_pinyin() 里记的两个坑,
+      要同时满足 比例 >= 0.25、压住数 >= 15、小块数 <= 1500 三个条件。
+
+实测(全部人工核对过)
+--------------------
+  经理给的 011.jpg            0.605   判对
+  随机样本里命中的 12 张       0.54~0.73   逐张开图看过, 12/12 确实带拼音
+  两张漏判过的(已修)          0.294 / 0.299   文字少所以比例低, 靠绝对数救回来
+  145 张人工看过的真图         0 误判
+  翻拍图                      模糊把笔画碎成一地小块(3,145~9,566 个), 靠小块数上限挡掉
+
+频率: 跨 7 天随机抽 5,987 张, 命中 45 张 = 0.75%(95% 区间 0.56%~1.00%),
+      按此推算 76.8 万张里约 5,800 张。
+★ 注意不要拿"排序后的前 N 张"来估频率 —— 文件名带时间戳, 那样只会取到一天,
+  我第一次就是这么算的, 得出 0.93%, 实际随机抽是 0.75%。
 """
 from __future__ import annotations
 
@@ -91,6 +105,26 @@ def measure(path: str) -> dict | None:
             "pinyin_ratio": round(stacked / len(small), 4)}
 
 
+def has_pinyin(d, min_ratio=0.25, min_stacked=15, max_small=1500):
+    """由 measure() 的结果判断是不是带拼音。
+
+    ★ 光看比例不够, 实测踩到两种坑:
+
+    1. **翻拍图会把比例顶高。** 拿相机拍屏幕, 模糊把笔画碎成一地小块,
+       这些碎块凑巧也会"压在"别的块上方。实测翻拍的小块数是 3,145~9,566,
+       而正常截图只有 39~543。所以小块太多的直接判成量不了。
+
+    2. **文字少的图比例不稳。** 两张确实带拼音的图只拿到 0.294 和 0.299,
+       因为整页文字本来就少(小块只有 68 和 264 个), 分母小比例就抖。
+       而不带拼音的红包弹窗页是 0.256 —— 光靠比例这两类分不开。
+       但绝对数差得很清楚: 那两张带拼音的压住了 20 和 79 个,
+       红包弹窗只压住 10 个。所以比例和绝对数**两个都要过**。
+    """
+    if not d or d["n_small"] > max_small:
+        return False
+    return d["pinyin_ratio"] >= min_ratio and d["stacked"] >= min_stacked
+
+
 def main() -> None:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
@@ -100,8 +134,8 @@ def main() -> None:
     ap.add_argument("input", type=Path, help="单张图或一个目录")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--out", type=Path, default=None)
-    ap.add_argument("--min-ratio", type=float, default=0.30,
-                    help="超过这个比例判为带拼音")
+    ap.add_argument("--min-ratio", type=float, default=0.25,
+                    help="比例下界; 还要同时满足压住数 >= 15 且小块数 <= 1500")
     args = ap.parse_args()
 
     files = [args.input] if args.input.is_file() else [
@@ -122,7 +156,7 @@ def main() -> None:
             d["name"] = p.name
             rows.append(d)
 
-    hits = [r for r in rows if r["pinyin_ratio"] >= args.min_ratio]
+    hits = [r for r in rows if has_pinyin(r, args.min_ratio)]
     print(f"量到 {len(rows):,} 张, 判为带拼音 {len(hits)} 张 "
           f"({len(hits) / max(1, len(rows)) * 100:.3f}%)")
     if rows:
