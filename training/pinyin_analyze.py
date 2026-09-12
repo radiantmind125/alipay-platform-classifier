@@ -57,7 +57,7 @@ def main():
                 continue
             rows.append(r)
 
-    def hit(r, mr=0.25):
+    def hit(r, mr=0.35):
         return r['pinyin_ratio'] >= mr and r['stacked'] >= 15 and r['flat'] >= 0.15
 
     hits = [r for r in rows if hit(r)]
@@ -131,7 +131,7 @@ def main():
     print('3. 阈值挪动看命中数变化(希望是平缓的)')
     print(f"   {'比例线':>8}{'命中':>9}{'占比':>9}{'较上一档变化':>14}")
     prev = None
-    for mr in (0.20, 0.225, 0.25, 0.275, 0.30, 0.325, 0.35):
+    for mr in (0.25, 0.30, 0.32, 0.35, 0.38, 0.40, 0.45):
         kk = sum(1 for r in rows if hit(r, mr))
         ch = '' if prev is None else f'{(kk-prev)/max(1,prev)*100:+.1f}%'
         print(f'   {mr:>8.3f}{kk:>9,}{kk/n*100:>8.3f}%{ch:>14}')
@@ -141,15 +141,15 @@ def main():
     print()
     print('=' * 66)
     print('4. 命中里贴着线的有多少(人工要重点看这些)')
-    band = [r for r in hits if r['pinyin_ratio'] < 0.32]
-    print(f'   比例 0.25~0.32 的 {len(band):,} 张 (占命中 {len(band)/max(1,k)*100:.1f}%)')
+    band = [r for r in hits if r['pinyin_ratio'] < 0.42]
+    print(f'   比例 0.35~0.42 的 {len(band):,} 张 (占命中 {len(band)/max(1,k)*100:.1f}%)')
     fl = sorted(r['flat'] for r in hits)
     rr = sorted(r['pinyin_ratio'] for r in hits)
     if rr:
         print(f'   命中的比例: 最低 {rr[0]:.3f} 中位 {rr[len(rr)//2]:.3f} 最高 {rr[-1]:.3f}')
         print(f'   命中的平坦占比: 最低 {fl[0]:.3f} (线是 0.15)')
-    near = [r for r in rows if not hit(r) and 0.15 <= r['pinyin_ratio'] < 0.25]
-    print(f'   差一点的(0.15~0.25 没命中) {len(near):,} 张 —— 人工要抽看找漏判')
+    near = [r for r in rows if not hit(r) and 0.22 <= r['pinyin_ratio'] < 0.35]
+    print(f'   差一点的(0.22~0.35 没命中) {len(near):,} 张 —— 人工要抽看找漏判')
 
 
 if __name__ == '__main__':

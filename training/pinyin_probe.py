@@ -22,8 +22,8 @@ r"""判断截图里是不是带**拼音标注**。
 普通截图里也有小字(时间戳、说明文字), 但它们**不会系统性地压在大字正上方**。
 实测三张对照真图, 这种"小压大"的配对数是 0。
 
-★ 深色字和浅色字要**各算一遍**: 支付宝的转账成功页是蓝底白字,
-  只找深色字的话整页取不到, 那些页上的拼音会全部漏掉。
+★ 取字看的是"和局部底色差多少", 不是"够不够暗" —— 支付宝的转账成功页是
+  蓝底白字, 用全局阈值的话背景会被当成前景碎成一堆块(误判), 白字又取不到(漏判)。
 
 判据: 统计有多少小块满足"正下方紧贴一个大块且水平重叠"(stacked),
       再除以小块总数得到 pinyin_ratio。★ 但**光看比例会错**, 见 has_pinyin() 里记的两个坑,
@@ -55,6 +55,28 @@ import cv2
 import numpy as np
 
 _EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+
+def _text_mask(gray, diff_thr: int = 28):
+    """取文字掩膜: 看每个像素**和周围底色差多少**, 不看它本身够不够暗。
+
+    ★ 原来用的是全局阈值(比 169 暗的算前景), 同一个页面上有蓝底也有白卡片,
+      一个阈值不可能同时对:
+          蓝底灰度 120 比 169 暗 -> **背景**被当成前景, 白字把它碎成一堆块,
+                                     这些碎片凑出假的"小压大" -> 误判
+          白字灰度 255 比 169 亮 -> 字取不到 -> 漏判
+      两个相反的错来自同一个原因, 所以只补一头是补不好的。
+
+    改成看和局部底色的差以后:
+        文字   深底浅字也好浅底深字也好, 和底色的差都大  -> 取得到
+        平背景 和自己的底色差约等于 0                    -> 不进掩膜
+    """
+    H, W = gray.shape
+    # 缩到 1/4 再取中值当底色 —— 中值对细笔画稳健, 缩小是为了快
+    s = cv2.resize(gray, (max(1, W // 4), max(1, H // 4)), interpolation=cv2.INTER_AREA)
+    s = cv2.medianBlur(s, 21)
+    bg = cv2.resize(s, (W, H), interpolation=cv2.INTER_LINEAR)
+    return (cv2.absdiff(gray, bg) > diff_thr).astype(np.uint8) * 255
 
 
 def _components(mask, H: int, W: int):
@@ -125,29 +147,19 @@ def measure(path: str) -> dict | None:
                        interpolation=cv2.INTER_NEAREST)
     flat = float(np.bincount(g.ravel(), minlength=256).max()) / g.size
 
-    # 两种明暗关系都量, 但**只有深色字那一边参与判定**。
-    #   浅色字(蓝底白字页)那边量出来只写进 CSV 当诊断:
-    #   拿它判会把误判带上来(见 has_pinyin 第 4 条)。
-    dark = _components(cv2.threshold(gray, 169, 255, cv2.THRESH_BINARY_INV)[1], H, W)
-    light = _components(cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)[1], H, W)
-    if len(dark) < 60:
+    cs = _components(_text_mask(gray), H, W)
+    if len(cs) < 60:
         return None
-
-    rd, sd, kd, bd = _stacking(dark)
-    rl, sl, kl, bl = _stacking(light)
-    # ★ 判定**只用深色字那一边**。亮字那边照样量, 但只写进 CSV 当诊断, 不参与判定。
-    #   原因见 has_pinyin() 的第 4 条: 拿亮字判会带来约 83% 的误判。
-    ratio, n_small, stacked, big_h = rd, sd, kd, bd
+    ratio, n_small, stacked, big_h = _stacking(cs)
     if n_small == 0:
         return None
 
-    return {"n_comp": len(dark) + len(light), "big_h": round(big_h, 1),
+    return {"n_comp": len(cs), "big_h": round(big_h, 1),
             "n_small": n_small, "n_big": 0, "stacked": stacked,
-            "pinyin_ratio": round(ratio, 4), "flat": round(flat, 4),
-            "dark_r": round(rd, 4), "light_r": round(rl, 4)}
+            "pinyin_ratio": round(ratio, 4), "flat": round(flat, 4)}
 
 
-def has_pinyin(d, min_ratio=0.25, min_stacked=15, min_flat=0.15):
+def has_pinyin(d, min_ratio=0.35, min_stacked=15, min_flat=0.15):
     """由 measure() 的结果判断是不是带拼音。三条要同时过。
 
     ★ 光看比例不够, 实测踩到三种坑:
@@ -171,20 +183,16 @@ def has_pinyin(d, min_ratio=0.25, min_stacked=15, min_flat=0.15):
        实测一张身份证照片是 0.236, 在线下面; 而且它不是账单截图,
        平坦占比 0.03 也会被第 1 条挡掉。
 
-    4. ★★ **判不了蓝底白字页 —— 这是已知的漏判, 不是没发现。**
-       二值化取的是"比 169 暗"的像素, 也就是浅底上的深色字。
-       支付宝的转账成功页是蓝底白字, 白字取不到, 那些页上的拼音**判不出来**。
-       人工抽看 48 张"差一点"的图, 里面约 16 张确实带拼音, 大多是这种蓝色页。
-       按此估计召回率约 3/4。
+    4. ★ **蓝底白字页曾经两头都错, 现在从取字那一层治好了。**
+       原来用全局阈值(比 169 暗的算前景), 同一页上蓝底和白卡片没法用一个阈值:
+           蓝底(120)比阈值暗 -> 背景被当成前景, 碎成一堆块 -> 误判
+           白字(255)比阈值亮 -> 字取不到                   -> 漏判
+       现在改成看"和局部底色差多少"(见 _text_mask), 两头一起解决:
+           2 张人工确认没拼音的  0.250 -> 0.116 / 0.074
+           4 张人工确认有拼音的  0.250 -> 0.375 ~ 0.531
+           经理给的 011 / 012    0.605 / 0.449 -> 0.773 / 0.728
+       误判和真命中中间空了 3 倍, 原来那条线是贴着走的。
 
-       ★ 试过加一条"找亮字"的掩膜来补, **不能用**:
-         补回来的 510 张里人工看了 24 张, 20 张根本没拼音(误判率约 83%)。
-         蓝色页上"找亮字"取到的块很少, 而金额数字特别大, 把 big_h 顶高,
-         零碎小块都被归成"小块", 再叠上"标题正好在金额上方"的天然版面,
-         就凑出假的"小压大"。
-         间距、小高占比、压住的行数三个量在真假两组上**完全重叠**, 分不开。
-         真要补蓝色页, 得按区域分别定阈值, 是另一件事。
-         亮字那边的比例仍然写进 CSV(light_r 列), 留给以后做。
     """
     if not d or d.get("flat", 1.0) < min_flat:
         return False
@@ -222,7 +230,7 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=20260912)
     ap.add_argument("--workers", type=int, default=0,
                     help="并行进程数, 0 = 自动(核数减一), 1 = 不并行")
-    ap.add_argument("--min-ratio", type=float, default=0.25,
+    ap.add_argument("--min-ratio", type=float, default=0.35,
                     help="比例下界; 还要同时满足压住数 >= 15 且平坦占比 >= 0.15")
     args = ap.parse_args()
 
@@ -289,7 +297,7 @@ def main() -> None:
     if args.out and rows:
         import csv
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        cols = ["name", "pinyin_ratio", "stacked", "flat", "dark_r", "light_r",
+        cols = ["name", "pinyin_ratio", "stacked", "flat",
                 "n_small", "n_big", "big_h", "n_comp"]
         with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=cols)

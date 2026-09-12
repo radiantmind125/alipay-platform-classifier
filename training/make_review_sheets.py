@@ -13,9 +13,9 @@
     贴线的那些才是真正要看的。
 所以分三组:
 
-  A 贴线的命中   比例 0.25~0.32 全看        -> 最容易出错的一段
+  A 贴线的命中   比例 0.35~0.42 全看        -> 最容易出错的一段
   B 随机命中     从全部命中里随机抽         -> 用来估准确率(无偏)
-  C 差一点的     比例 0.15~0.25 随机抽      -> 用来找漏判
+  C 差一点的     比例 0.22~0.35 随机抽      -> 用来找漏判
 
 ★ B 和 C 必须**随机**抽, 不能取前 N 张 —— 文件名带时间戳, 取头部只会取到一天。
 
@@ -115,16 +115,16 @@ def main():
     print(f'CSV 里 {len(rows):,} 行')
 
     def hit(r):
-        return r['pinyin_ratio'] >= 0.25 and r['stacked'] >= 15 and r['flat'] >= 0.15
+        return r['pinyin_ratio'] >= 0.35 and r['stacked'] >= 15 and r['flat'] >= 0.15
 
     hits = [r for r in rows if hit(r)]
-    near = [r for r in rows if not hit(r) and 0.15 <= r['pinyin_ratio'] < 0.25]
+    near = [r for r in rows if not hit(r) and 0.22 <= r['pinyin_ratio'] < 0.35]
     print(f'命中 {len(hits):,} 张, 差一点的 {len(near):,} 张')
 
     rnd = random.Random(SEED)
 
     # A: 贴线的命中, 全看
-    A = sorted([r for r in hits if r['pinyin_ratio'] < 0.32],
+    A = sorted([r for r in hits if r['pinyin_ratio'] < 0.42],
                key=lambda r: r['pinyin_ratio'])
     # B: 从全部命中里随机抽 120 张估准确率
     B = hits[:]
