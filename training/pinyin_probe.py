@@ -24,7 +24,7 @@ r"""判断截图里是不是带**拼音标注**。
 
 判据: 统计有多少小块满足"正下方紧贴一个大块且水平重叠"(stacked),
       再除以小块总数得到 pinyin_ratio。★ 但**光看比例会错**, 见 has_pinyin() 里记的两个坑,
-      要同时满足 比例 >= 0.25、压住数 >= 15、小块数 <= 1500 三个条件。
+      要同时满足 比例 >= 0.25、压住数 >= 15、平坦占比 >= 0.15 三个条件。
 
 实测(全部人工核对过)
 --------------------
@@ -32,7 +32,7 @@ r"""判断截图里是不是带**拼音标注**。
   随机样本里命中的 12 张       0.54~0.73   逐张开图看过, 12/12 确实带拼音
   两张漏判过的(已修)          0.294 / 0.299   文字少所以比例低, 靠绝对数救回来
   145 张人工看过的真图         0 误判
-  翻拍图                      模糊把笔画碎成一地小块(3,145~9,566 个), 靠小块数上限挡掉
+  翻拍图/别的照片             5 张, 靠平坦占比挡掉(照片 0.009~0.043 vs 截图 0.312~0.880)
 
 频率: 跨 7 天随机抽 5,987 张, 命中 45 张 = 0.75%(95% 区间 0.56%~1.00%),
       按此推算 76.8 万张里约 5,800 张。
@@ -59,6 +59,17 @@ def measure(path: str) -> dict | None:
     if H < 200 or W < 200:
         return None
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # 平坦占比 = 出现最多的那个灰度值占了多少像素。
+    # 截图有大片数值完全一样的底色; 照片因为传感器噪声做不到。
+    # 缩图必须用 INTER_NEAREST, 插值会把"完全一样"抹掉。
+    g = gray
+    if max(g.shape) > 1400:
+        sc = 1400 / max(g.shape)
+        g = cv2.resize(g, (int(g.shape[1] * sc), int(g.shape[0] * sc)),
+                       interpolation=cv2.INTER_NEAREST)
+    flat = float(np.bincount(g.ravel(), minlength=256).max()) / g.size
+
     dark = cv2.threshold(gray, 169, 255, cv2.THRESH_BINARY_INV)[1]
     n, _, st, _ = cv2.connectedComponentsWithStats(dark, connectivity=8)
     cs = [(int(st[i][0]), int(st[i][1]), int(st[i][2]), int(st[i][3]))
@@ -76,7 +87,8 @@ def measure(path: str) -> dict | None:
     big = [c for c in cs if c[3] >= 0.8 * big_h]
     if len(small) < 20 or len(big) < 20:
         return {"n_comp": len(cs), "big_h": big_h, "n_small": len(small),
-                "n_big": len(big), "stacked": 0, "pinyin_ratio": 0.0}
+                "n_big": len(big), "stacked": 0, "pinyin_ratio": 0.0,
+                "flat": round(flat, 4)}
 
     # 按 x 建桶, 免得 O(N^2)
     buckets: dict[int, list] = {}
@@ -102,25 +114,35 @@ def measure(path: str) -> dict | None:
 
     return {"n_comp": len(cs), "big_h": round(big_h, 1), "n_small": len(small),
             "n_big": len(big), "stacked": stacked,
-            "pinyin_ratio": round(stacked / len(small), 4)}
+            "pinyin_ratio": round(stacked / len(small), 4),
+            "flat": round(flat, 4)}
 
 
-def has_pinyin(d, min_ratio=0.25, min_stacked=15, max_small=1500):
-    """由 measure() 的结果判断是不是带拼音。
+def has_pinyin(d, min_ratio=0.25, min_stacked=15, min_flat=0.15):
+    """由 measure() 的结果判断是不是带拼音。三条要同时过。
 
-    ★ 光看比例不够, 实测踩到两种坑:
+    ★ 光看比例不够, 实测踩到三种坑:
 
-    1. **翻拍图会把比例顶高。** 拿相机拍屏幕, 模糊把笔画碎成一地小块,
-       这些碎块凑巧也会"压在"别的块上方。实测翻拍的小块数是 3,145~9,566,
-       而正常截图只有 39~543。所以小块太多的直接判成量不了。
+    1. **不是截图的图会把比例顶高。** 拿相机拍屏幕, 或者干脆是别的照片,
+       纹理会凑出一堆小块, 凑巧"压在"别的块上方。
+       实测 5 张这种(4 张翻拍 + 1 张床上衣服的照片)比例 0.27~0.43, 全是误判。
+       ★ 这里原来用"小块数 <= 1500"挡, **挡不住** —— 一张 4624x3468 的翻拍
+         分辨率太高, 笔画没碎, 小块只有 1462 个就钻过去了。
+         改用平坦占比: 照片 0.009~0.043, 截图 0.312~0.880, 中间空的, 差 7 倍。
+       ★ 也别拿长宽比挡: 有张真带拼音的截图是 1200x1920, 长宽比只有 1.6,
+         按长宽比会误杀, 按平坦占比(0.717)是稳的。
 
     2. **文字少的图比例不稳。** 两张确实带拼音的图只拿到 0.294 和 0.299,
        因为整页文字本来就少(小块只有 68 和 264 个), 分母小比例就抖。
        而不带拼音的红包弹窗页是 0.256 —— 光靠比例这两类分不开。
        但绝对数差得很清楚: 那两张带拼音的压住了 20 和 79 个,
        红包弹窗只压住 10 个。所以比例和绝对数**两个都要过**。
+
+    3. 少数民族双语证件(维吾尔文压在汉字上方)几何上和拼音一样。
+       实测一张身份证照片是 0.236, 在线下面; 而且它不是账单截图,
+       平坦占比 0.03 也会被第 1 条挡掉。
     """
-    if not d or d["n_small"] > max_small:
+    if not d or d.get("flat", 1.0) < min_flat:
         return False
     return d["pinyin_ratio"] >= min_ratio and d["stacked"] >= min_stacked
 
@@ -135,7 +157,7 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--min-ratio", type=float, default=0.25,
-                    help="比例下界; 还要同时满足压住数 >= 15 且小块数 <= 1500")
+                    help="比例下界; 还要同时满足压住数 >= 15 且平坦占比 >= 0.15")
     args = ap.parse_args()
 
     files = [args.input] if args.input.is_file() else [
@@ -171,7 +193,7 @@ def main() -> None:
     if args.out and rows:
         import csv
         with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=["name", "pinyin_ratio", "stacked",
+            w = csv.DictWriter(f, fieldnames=["name", "pinyin_ratio", "stacked", "flat",
                                               "n_small", "n_big", "big_h", "n_comp"])
             w.writeheader()
             for r in rows:
