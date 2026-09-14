@@ -64,14 +64,38 @@ Get-PSDrive -PSProvider FileSystem |
 # ---- 图有多少张, 大概要跑多久 ----
 Write-Output '数图片张数(大库可能要等一会)...'
 $count = (Get-ChildItem $Data -Recurse -File -Include *.jpg,*.jpeg,*.png -ErrorAction SilentlyContinue).Count
-$cores = [Environment]::ProcessorCount
-$useWorkers = if ($Workers -gt 0) { $Workers } else { [Math]::Max(1, $cores - 1) }
-$n = if ($Full) { $count } else { [Math]::Min(20000, $count) }
-$hours = $n * 0.099 / $useWorkers / 3600
 
-Write-Output ("图片 {0:N0} 张, 本机 {1} 核, 用 {2} 个进程" -f $count, $cores, $useWorkers)
-Write-Output ("这次要扫 {0:N0} 张, 按单张 99 毫秒估, 大概 {1:N1} 小时" -f $n, $hours)
+$logical = [Environment]::ProcessorCount
+try {
+    $physical = (Get-CimInstance Win32_Processor | Measure-Object NumberOfCores -Sum).Sum
+} catch {
+    $physical = $logical
+}
+if (-not $physical -or $physical -lt 1) { $physical = $logical }
+
+$useWorkers = if ($Workers -gt 0) { $Workers } else { [Math]::Max(1, $logical - 1) }
+
+# ★ 加速比**不等于**进程数。本机实测(4 物理核 8 逻辑核):
+#       2 进程 1.75 倍   4 进程 2.85 倍   8 进程 3.62 倍
+#   物理核以内效率只有 7 成左右, 超出物理核之后靠超线程只能再多两成半。
+#   所以按"0.7 x 物理核, 超线程再乘 1.25"来估, 别拿进程数直接除 ——
+#   那样会把时间少估一半, 晚上开着跑第二天发现还没完。
+$eff = 0.7 * [Math]::Min($useWorkers, $physical)
+if ($useWorkers -gt $physical) { $eff = $eff * 1.25 }
+if ($eff -lt 1) { $eff = 1 }
+
+$n = if ($Full) { $count } else { [Math]::Min(20000, $count) }
+# 单张成本 60~99 毫秒, 看图里大图(翻拍照片)占多少; 估时按偏慢的算
+$hours = $n * 0.085 / $eff / 3600
+
+Write-Output ("图片 {0:N0} 张" -f $count)
+Write-Output ("本机 {0} 物理核 / {1} 逻辑核, 用 {2} 个进程" -f $physical, $logical, $useWorkers)
+Write-Output ("实际加速比大约 {0:N1} 倍(不是 {1} 倍, 并行扩不满)" -f $eff, $useWorkers)
+Write-Output ("这次要扫 {0:N0} 张, 大概 {1:N1} 小时" -f $n, $hours)
 Write-Output ("按命中率 0.68% 估, 大概能挑出 {0:N0} 张" -f ($n * 0.0068))
+if ($useWorkers -gt $physical) {
+    Write-Output ("★ 进程数超过物理核 {0} 了, 多出来的靠超线程, 提升有限。" -f $physical)
+}
 
 if (-not $Full) {
     Write-Output ''
