@@ -244,8 +244,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="判断截图里有没有拼音标注")
     ap.add_argument("input", type=Path, nargs="+", help="一个或多个图片目录(或单张图)")
     ap.add_argument("--out", type=Path, default=None, help="把每张图的量值写成 CSV")
-    ap.add_argument("--copy-hits", type=Path, default=None,
-                    help="把判为带拼音的图拷到这个目录, 供人工核对")
+    ap.add_argument("--gather", type=Path, default=None,
+                    help="把判为带拼音的图归到这个目录(默认用硬链接, 不占额外磁盘)")
+    ap.add_argument("--gather-mode", choices=("auto", "link", "copy"), default="auto",
+                    help="auto=先试硬链接跨盘再退回拷贝; link=只用硬链接; copy=直接拷贝")
     ap.add_argument("--sample", type=int, default=0,
                     help="只随机抽这么多张来扫(0 = 全扫)")
     ap.add_argument("--seed", type=int, default=20260912)
@@ -327,16 +329,62 @@ def main() -> None:
                 w.writerow({k: r[k] for k in cols})
         print(f"  写出 {args.out}")
 
-    if args.copy_hits and hits:
-        args.copy_hits.mkdir(parents=True, exist_ok=True)
-        for r in sorted(hits, key=lambda r: r["pinyin_ratio"]):
-            # 文件名前面带上比例, 人工看的时候从最低分开始看最省事
-            dst = args.copy_hits / f"r{r['pinyin_ratio']:.3f}_f{r['flat']:.2f}_{r['name']}"
+    if args.gather and hits:
+        args.gather.mkdir(parents=True, exist_ok=True)
+        n_link = n_copy = n_skip = n_fail = 0
+        bytes_copied = 0
+        used_names: set[str] = set()
+        manifest = []
+        for r in sorted(hits, key=lambda r: -r["pinyin_ratio"]):
+            # 保留原文件名(可追溯); 重名的加后缀
+            name = r["name"]
+            if name in used_names:
+                stem, dot, ext = name.rpartition(".")
+                k = 2
+                while f"{stem}_{k}{dot}{ext}" in used_names:
+                    k += 1
+                name = f"{stem}_{k}{dot}{ext}"
+            used_names.add(name)
+            dst = args.gather / name
+            if dst.exists():
+                n_skip += 1
+                manifest.append((name, r))
+                continue
             try:
-                shutil.copy2(r["path"], dst)
+                if args.gather_mode in ("auto", "link"):
+                    try:
+                        os.link(r["path"], dst)       # ★ 硬链接: 不占额外空间
+                        n_link += 1
+                    except OSError:
+                        if args.gather_mode == "link":
+                            raise
+                        shutil.copy2(r["path"], dst)  # 跨盘就退回拷贝
+                        n_copy += 1
+                        bytes_copied += os.path.getsize(r["path"])
+                else:
+                    shutil.copy2(r["path"], dst)
+                    n_copy += 1
+                    bytes_copied += os.path.getsize(r["path"])
+                manifest.append((name, r))
             except Exception:
-                pass
-        print(f"  拷了 {len(hits):,} 张到 {args.copy_hits} (文件名前面是比例, 从低到高看)")
+                n_fail += 1
+
+        print(f"  归集到 {args.gather}")
+        print(f"    硬链接 {n_link:,} 张(不占额外空间), 拷贝 {n_copy:,} 张"
+              f"({bytes_copied / 1024 / 1024:.0f} MB), 已存在跳过 {n_skip:,}, 失败 {n_fail:,}")
+        if n_copy and args.gather_mode == "auto":
+            print("    ★ 有拷贝说明归集目录和图库**不在同一个盘** —— 硬链接不能跨盘。")
+            print("      想省空间的话, 把归集目录放到和图库同一个盘上再跑一次。")
+        # 清单: 带分数, 方便按把握程度排序取用
+        import csv as _csv
+        mpath = args.gather / "_manifest.csv"
+        with open(mpath, "w", newline="", encoding="utf-8-sig") as f:
+            w = _csv.writer(f)
+            w.writerow(["file", "pinyin_ratio", "stacked", "flat", "source"])
+            for name, r in manifest:
+                w.writerow([name, r["pinyin_ratio"], r["stacked"], r["flat"], r["path"]])
+        print(f"    清单 {mpath} (按比例从高到低, 比例越高越有把握)")
+        print("    ★ 原图一张都没动过(不移动、不删除)。")
 
 
 if __name__ == "__main__":
