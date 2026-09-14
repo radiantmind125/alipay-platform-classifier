@@ -57,7 +57,7 @@ def main():
                 continue
             rows.append(r)
 
-    def hit(r, mr=0.32):
+    def hit(r, mr=0.35):
         return r['pinyin_ratio'] >= mr and r['stacked'] >= 15 and r['flat'] >= 0.15
 
     hits = [r for r in rows if hit(r)]
@@ -141,14 +141,14 @@ def main():
     print()
     print('=' * 66)
     print('4. 命中里贴着线的有多少(人工要重点看这些)')
-    band = [r for r in hits if r['pinyin_ratio'] < 0.40]
+    band = [r for r in hits if r['pinyin_ratio'] < 0.43]
     print(f'   比例 0.32~0.40 的 {len(band):,} 张 (占命中 {len(band)/max(1,k)*100:.1f}%)')
     fl = sorted(r['flat'] for r in hits)
     rr = sorted(r['pinyin_ratio'] for r in hits)
     if rr:
         print(f'   命中的比例: 最低 {rr[0]:.3f} 中位 {rr[len(rr)//2]:.3f} 最高 {rr[-1]:.3f}')
         print(f'   命中的平坦占比: 最低 {fl[0]:.3f} (线是 0.15)')
-    near = [r for r in rows if not hit(r) and 0.20 <= r['pinyin_ratio'] < 0.32]
+    near = [r for r in rows if not hit(r) and 0.22 <= r['pinyin_ratio'] < 0.35]
     print(f'   差一点的(0.20~0.32 没命中) {len(near):,} 张 —— 人工要抽看找漏判')
 
 

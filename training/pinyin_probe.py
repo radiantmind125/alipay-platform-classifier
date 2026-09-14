@@ -110,11 +110,23 @@ def _stacking(cs):
         for k in range(b[0] // 50, (b[0] + b[2]) // 50 + 1):
             buckets.setdefault(k, []).append(b)
 
+    # ★ 分母只算**底下确实有字**的小块。
+    #   图标、奖励标签、页面下沿那些小块底下根本没有字, 永远不可能"压住",
+    #   却一直在撑大分母。文字少的页面上这类占比高, 真拼音的比例就被压下去 ——
+    #   人工核对时漏掉的那几张全是这种(压住数 24~41, 整页没什么字)。
+    #   实测: 2 万张里这么一改, 现有命中一张没丢, 多出来 3 张, 开图看过 3 张都真带拼音。
     stacked = 0
+    eligible = 0
     for x, y, w, h in small:
         hit = False
+        below = False
         for k in range(x // 50, (x + w) // 50 + 1):
             for bx, by, bw, bh in buckets.get(k, ()):
+                if by < y:
+                    continue
+                if min(x + w, bx + bw) - max(x, bx) <= 0.5 * min(w, bw):
+                    continue
+                below = True
                 gap = by - (y + h)
                 # ★ 必须**紧贴**在上方。上限原来是 0.7 倍字高, 太松 ——
                 #   那个宽度把"上下两行正常行距"也放了进来, 于是一行小字浮在
@@ -125,14 +137,16 @@ def _stacking(cs):
                 #   取 0.50: 没拼音的最高 0.310, 有拼音的最低 0.340, 中间空着。
                 if gap < -2 or gap > 0.5 * bh:
                     continue
-                ov = min(x + w, bx + bw) - max(x, bx)
-                if ov > 0.5 * min(w, bw):            # 水平要压住
-                    hit = True
-                    break
+                hit = True
+                break
             if hit:
                 break
+        if below:
+            eligible += 1
         stacked += hit
-    return stacked / len(small), len(small), stacked, big_h
+    if eligible == 0:
+        return 0.0, 0, 0, big_h
+    return stacked / eligible, eligible, stacked, big_h
 
 
 def measure(path: str) -> dict | None:
@@ -166,7 +180,7 @@ def measure(path: str) -> dict | None:
             "pinyin_ratio": round(ratio, 4), "flat": round(flat, 4)}
 
 
-def has_pinyin(d, min_ratio=0.32, min_stacked=15, min_flat=0.15):
+def has_pinyin(d, min_ratio=0.35, min_stacked=15, min_flat=0.15):
     """由 measure() 的结果判断是不是带拼音。三条要同时过。
 
     ★ 光看比例不够, 实测踩到三种坑:
@@ -237,7 +251,7 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=20260912)
     ap.add_argument("--workers", type=int, default=0,
                     help="并行进程数, 0 = 自动(核数减一), 1 = 不并行")
-    ap.add_argument("--min-ratio", type=float, default=0.32,
+    ap.add_argument("--min-ratio", type=float, default=0.35,
                     help="比例下界; 还要同时满足压住数 >= 15 且平坦占比 >= 0.15")
     args = ap.parse_args()
 

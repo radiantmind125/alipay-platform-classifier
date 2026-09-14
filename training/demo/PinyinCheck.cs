@@ -18,7 +18,7 @@ namespace Ssp
         public PinyinVerdict Verdict;
         public double Ratio;         // 压住的小块数 / 小块总数
         public int Stacked;          // 有多少小块正下方紧贴着一个大块
-        public int SmallCount;       // 小块总数
+        public int SmallCount;       // 分母: 底下有字的小块数(不是小块总数)
         public int BigCount;
         public double BigHeight;     // 正文字高(块高的 75 分位)
         public double Flat;          // 出现最多的那个灰度值占了多少像素 —— 用来分截图和照片
@@ -72,10 +72,10 @@ namespace Ssp
         /// ★ 这条线是**跟着取字方式走的** —— 换了取字方式必须重新定。
         ///   我第一次就是把旧方法的 0.25 原样搬过来, 结果贴线那段 76% 是误判。
         ///   现在配合 <see cref="GapMax"/>=0.50 取 0.32:
-        ///   198 张人工确认没拼音的最高只到 0.310, 71 张确认有拼音的最低 0.340,
-        ///   0.32 正落在中间的空档上。
+        ///   分母改成"底下有字的小块"之后分数整体上移, 线跟着从 0.32 调到 0.35 ——
+        ///   这两个也是配套的。实测 2 万张: 现有命中一张没丢, 多出 3 张真拼音。
         /// </summary>
-        public const double Threshold = 0.32;
+        public const double Threshold = 0.35;
 
         /// <summary>
         /// 小块和它下面那个大块之间的间距上限(占大块高的比例)。
@@ -265,14 +265,25 @@ namespace Ssp
                 }
             }
 
-            int stacked = 0;
+            // ★ 分母只算**底下确实有字**的小块。
+            //   图标、奖励标签、页面下沿那些小块底下根本没有字, 永远不可能"压住",
+            //   却一直在撑大分母。文字少的页面上这类占比高, 真拼音的比例就被压下去。
+            //   实测 2 万张这么一改: 现有命中一张没丢, 多出 3 张, 开图看过都真带拼音。
+            int stacked = 0, eligible = 0;
             foreach (var s in small)
             {
-                if (IsStacked(s, buckets)) stacked++;
+                if (CountSmall(s, buckets, out bool below)) stacked++;
+                if (below) eligible++;
             }
 
             res.Stacked = stacked;
-            res.Ratio = stacked / (double)small.Count;
+            res.SmallCount = eligible;
+            if (eligible == 0)
+            {
+                res.Reason = "没有小块底下有字, 判不了";
+                return res;
+            }
+            res.Ratio = stacked / (double)eligible;
             res.Measured = true;
 
             if (res.Flat < MinFlat)
@@ -350,16 +361,22 @@ namespace Ssp
         }
 
         /// <summary>
-        /// 这个小块的正下方是不是紧贴着一个大块, 并且水平方向压住了它。
+        /// 这个小块的正下方是不是紧贴着一个大块并水平压住它。
+        /// <paramref name="below"/> 返回它底下**有没有字**(不管贴不贴) —— 用来算分母。
         /// </summary>
-        static bool IsStacked(Comp s, Dictionary<int, List<Comp>> buckets)
+        static bool CountSmall(Comp s, Dictionary<int, List<Comp>> buckets, out bool below)
         {
+            below = false;
             int k0 = s.X / BucketWidth, k1 = (s.X + s.W) / BucketWidth;
             for (int k = k0; k <= k1; k++)
             {
                 if (!buckets.TryGetValue(k, out var list)) continue;
                 foreach (var b in list)
                 {
+                    if (b.Y < s.Y) continue;
+                    if (Math.Min(s.X + s.W, b.X + b.W) - Math.Max(s.X, b.X) <= 0.5 * Math.Min(s.W, b.W))
+                        continue;
+                    below = true;
                     int gap = b.Y - (s.Y + s.H);
                     // ★ 必须**紧贴**在上方。上限原来是 0.7 倍字高, 太松 ——
                     //   那个宽度把"上下两行的正常行距"也放了进来, 于是一行小字浮在
@@ -369,8 +386,7 @@ namespace Ssp
                     //       0.70 两组重叠  0.60 差 0.015  0.50 差 0.030  0.45 又重叠
                     //   取 0.50: 没拼音的最高 0.310, 有拼音的最低 0.340, 中间空着。
                     if (gap < -2 || gap > GapMax * b.H) continue;
-                    int ov = Math.Min(s.X + s.W, b.X + b.W) - Math.Max(s.X, b.X);
-                    if (ov > 0.5 * Math.Min(s.W, b.W)) return true; // 水平要压住
+                    return true;
                 }
             }
             return false;
