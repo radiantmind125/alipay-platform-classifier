@@ -37,11 +37,14 @@ namespace Ssp
     public static class TextRegion
     {
         /// <summary>
-        /// 行高低于"正文行高 × 这个比例"的行会被当成注音/装饰行滤掉。
-        /// 实测拼音行大约是正文行高的 0.4 倍, 取 0.6 留了余量。
-        /// 传 0 表示不滤, 什么行都要。
+        /// 判注音行时, 它相对下面那一行的高度上限。实测拼音行大约是 0.44 倍, 取 0.6 留余量。
         /// </summary>
-        public const double DefaultMinRowHeightRatio = 0.6;
+        public const double AnnotationHeightRatio = 0.6;
+
+        /// <summary>
+        /// 判注音行时, 它和下面那一行的间距上限(相对下面那行的高)。
+        /// </summary>
+        public const double AnnotationGapRatio = 0.5;
 
         const int DiffThreshold = 28;    // 和局部底色差多少才算文字, 和 PinyinCheck 一致
 
@@ -88,9 +91,9 @@ namespace Ssp
         /// <paramref name="yOffsetRel"/> 在找行之前先把线上下挪一挪。
         /// </summary>
         public static Rect? RowAt(Mat image, double yRel, double yOffsetRel = 0,
-                                  double minRowHeightRatio = DefaultMinRowHeightRatio)
+                                  bool dropAnnotationRows = false)
         {
-            var rows = FindTextRows(image, minRowHeightRatio);
+            var rows = FindTextRows(image, dropAnnotationRows);
             if (rows.Count == 0) return null;
             int y = (int)Math.Round((yRel + yOffsetRel) * image.Height);
 
@@ -127,16 +130,33 @@ namespace Ssp
 
         /// <summary>
         /// 自己做水平投影切出所有文字行, 从上到下。
+        /// **不用 OCR 的行切分**, 所以拼音多插的那些细行不会把真文字行的位置搅乱。
         ///
-        /// ★ 这是这个类的关键: **不用 OCR 的行切分**, 所以拼音多插的那些细行
-        ///   不会把真文字行搅乱。切完之后按行高把细行滤掉(见
-        ///   <see cref="DefaultMinRowHeightRatio"/>), 剩下的就是正文行。
+        /// <paramref name="dropAnnotationRows"/> ——
+        /// ★★ **默认 false, 不要随便打开。**
+        ///   只有在**已经确认这一页带拼音**(用 <see cref="PinyinCheck.Check"/> 判过)
+        ///   的时候才传 true。
+        ///
+        ///   为什么: "一行矮的压在一行高的上方, 而且贴着它"这个形状,
+        ///   **拼音和正常版面是一样的** —— 标题压在金额上、字段名压在值上, 都是这个形状。
+        ///   实测拿 61 个真注音配对和 74 个非注音配对比:
+        ///       间距/自身高   真注音 中位 1.12   非注音 中位 1.59
+        ///       高度比        真注音 0.44        非注音 0.43   ← 几乎一模一样
+        ///   两组**完全重叠**, 单看一行根本分不开。卡任何一条线都是
+        ///   "留住 43% 的注音, 同时误伤 3% 的正文"这种赔本买卖。
+        ///
+        ///   ★ <see cref="PinyinCheck"/> 之所以判得准, 是因为它在**整页**上数
+        ///     "小块压在大块上方"的比例 —— 是**通篇每一行都这样**才叫拼音,
+        ///     单独一处这样只是普通版面。所以该不该滤, 得先由整页判定说了算。
+        ///
+        ///   这一页确实带拼音时, 这个开关很有用: 实测 011.jpg 切出 30 行,
+        ///   滤掉的 11 行全是拼音行, 正文行位置一点没动。
         ///
         /// 取字用的是"和局部底色差多少", 不是"够不够暗" —— 和 <see cref="PinyinCheck"/>
         /// 一致, 这样蓝底白字页(转账成功页)也切得出来。
         /// </summary>
         public static IReadOnlyList<Rect> FindTextRows(
-            Mat image, double minRowHeightRatio = DefaultMinRowHeightRatio)
+            Mat image, bool dropAnnotationRows = false)
         {
             var empty = Array.Empty<Rect>();
             if (image == null || image.Empty()) return empty;
@@ -201,7 +221,7 @@ namespace Ssp
                 while (y < H && ink[y] > minInk) y++;
                 raw.Add(new Rect(0, y0, W, y - y0));
             }
-            if (raw.Count == 0 || minRowHeightRatio <= 0) return raw;
+            if (raw.Count == 0 || !dropAnnotationRows) return raw;
 
             // ★★ 判一行是不是注音行, 只看它**和紧挨着的下一行**的关系, 不看整页。
             //
@@ -224,8 +244,8 @@ namespace Ssp
                     var next = raw[i + 1];
                     int gap = next.Y - (cur.Y + cur.Height);
                     // 比下面那行矮得多, 而且紧贴着它
-                    if (cur.Height <= minRowHeightRatio * next.Height &&
-                        gap >= 0 && gap <= 0.5 * next.Height)
+                    if (cur.Height <= AnnotationHeightRatio * next.Height &&
+                        gap >= 0 && gap <= AnnotationGapRatio * next.Height)
                     {
                         annotation = true;
                     }
