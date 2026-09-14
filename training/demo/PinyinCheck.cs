@@ -130,11 +130,17 @@ namespace Ssp
             using var gray = new Mat();
             using var tmp = new Mat();
             Mat src = image;
-            if (image.Depth() != MatType.CV_8U)
+            if (image.Depth() == MatType.CV_16U || image.Depth() == MatType.CV_16S)
             {
-                double scale = image.Depth() == MatType.CV_16U ? 1.0 / 256.0 : 1.0;
-                image.ConvertTo(tmp, MatType.CV_8U, scale);
+                image.ConvertTo(tmp, MatType.CV_8U, 1.0 / 256.0);
                 src = tmp;
+            }
+            else if (image.Depth() != MatType.CV_8U)
+            {
+                // ★ 浮点图**不猜**。浮点可能是 0~1 也可能是 0~255, 猜错了会整幅变黑,
+                //   然后一本正经地给出一个错结论 —— 那比直接说"判不了"糟糕得多。
+                res.Reason = $"位深 {image.Depth()} 不支持(只收 8 位和 16 位)";
+                return res;
             }
             if (src.Channels() == 1)
             {
