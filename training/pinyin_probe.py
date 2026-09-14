@@ -116,7 +116,14 @@ def _stacking(cs):
         for k in range(x // 50, (x + w) // 50 + 1):
             for bx, by, bw, bh in buckets.get(k, ()):
                 gap = by - (y + h)
-                if gap < -2 or gap > 0.7 * bh:       # 必须紧贴在上方
+                # ★ 必须**紧贴**在上方。上限原来是 0.7 倍字高, 太松 ——
+                #   那个宽度把"上下两行正常行距"也放了进来, 于是一行小字浮在
+                #   一行大字上方就被当成拼音。实测拼音的间距中位只有 0.111 倍字高,
+                #   而误判那张是 0.266 倍(那是行距, 不是标注)。
+                #   拿 198 张人工确认没拼音的 + 71 张确认有拼音的扫了一遍上限:
+                #       0.70 两组重叠   0.60 差 0.015   0.50 差 0.030   0.45 又重叠
+                #   取 0.50: 没拼音的最高 0.310, 有拼音的最低 0.340, 中间空着。
+                if gap < -2 or gap > 0.5 * bh:
                     continue
                 ov = min(x + w, bx + bw) - max(x, bx)
                 if ov > 0.5 * min(w, bw):            # 水平要压住
@@ -159,7 +166,7 @@ def measure(path: str) -> dict | None:
             "pinyin_ratio": round(ratio, 4), "flat": round(flat, 4)}
 
 
-def has_pinyin(d, min_ratio=0.35, min_stacked=15, min_flat=0.15):
+def has_pinyin(d, min_ratio=0.32, min_stacked=15, min_flat=0.15):
     """由 measure() 的结果判断是不是带拼音。三条要同时过。
 
     ★ 光看比例不够, 实测踩到三种坑:
@@ -230,7 +237,7 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=20260912)
     ap.add_argument("--workers", type=int, default=0,
                     help="并行进程数, 0 = 自动(核数减一), 1 = 不并行")
-    ap.add_argument("--min-ratio", type=float, default=0.35,
+    ap.add_argument("--min-ratio", type=float, default=0.32,
                     help="比例下界; 还要同时满足压住数 >= 15 且平坦占比 >= 0.15")
     args = ap.parse_args()
 
