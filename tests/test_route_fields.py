@@ -100,3 +100,38 @@ def test_只给一条路要拒绝(tmp_path: Path) -> None:
     A = _mk(tmp_path, "A", {"i": {"f": "x"}})
     txt = _run("--run", f"擦={A}", "--out", str(tmp_path / "o"))
     assert "至少要两条路" in txt
+
+
+def test_两路文件名后缀不同也要能对上(tmp_path: Path) -> None:
+    """★ 实测踩到的坑, 而且很隐蔽。
+
+    擦图输出 `xxx_clean.png`, 切片合并后是 `xxx` —— 两边的键永远配不上,
+    于是取了并集(100+100=200 张), 每个字段只有一半的图有值,
+    分流成绩整整低一倍(56% 报成 28%, 100% 报成 50%)。
+    """
+    A = _mk(tmp_path, "A", {
+        "img1_clean": {"f1": "A1", "f2": None},
+        "img2_clean": {"f1": "A2", "f2": None},
+    })
+    B = _mk(tmp_path, "B", {
+        "img1": {"f1": None, "f2": "B1"},
+        "img2": {"f1": None, "f2": "B2"},
+    })
+    out = tmp_path / "out"
+    txt = _run("--run", f"擦={A}", "--run", f"切={B}", "--out", str(out))
+
+    assert "两路都有的: 2" in txt, f"后缀没剥干净, 两路没对上:\n{txt}"
+    assert "一张都对不上" not in txt
+    # 两个字段都该是 100%, 不是 50%
+    assert "查一下" not in txt, f"分流成绩和单路最好值对不上:\n{txt}"
+    m = json.loads((out / "img1.json").read_text(encoding="utf-8"))
+    assert m["f1"] == "A1" and m["f2"] == "B1"
+
+
+def test_两路完全对不上时要叫停(tmp_path: Path) -> None:
+    """键完全不重合时不能硬算, 算出来的数是假的。"""
+    A = _mk(tmp_path, "A", {"aaa": {"f": "x"}})
+    B = _mk(tmp_path, "B", {"bbb": {"f": "y"}})
+    txt = _run("--run", f"擦={A}", "--run", f"切={B}", "--out", str(tmp_path / "o"))
+    assert "一张都对不上" in txt
+    assert "分流之后" not in txt, "对不上就不该往下算"

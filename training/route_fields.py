@@ -39,6 +39,26 @@ SOURCE_KEYS = ("_source_image", "input_image", "source", "image", "image_path")
 META_PREFIX = ("_",)
 
 
+# ★★ 各条路给文件加的后缀。要**剥掉**才能把两路的同一张图对上。
+#   实测踩过: 擦图输出 `xxx_clean.png`, 切片合并后是 `xxx` ——
+#   两边的键永远配不上, 于是取了并集(100+100=200 张), 每个字段只剩一半的值,
+#   分流成绩整整低一倍。
+SUFFIXES = ("_clean", "_erased", "_merged")
+
+
+def norm_key(name: str) -> str:
+    """把各条路加的后缀剥掉, 让同一张原图在两路里得到同一个键。"""
+    k = Path(str(name)).stem
+    changed = True
+    while changed:                    # 后缀可能叠加
+        changed = False
+        for s in SUFFIXES:
+            if k.endswith(s):
+                k = k[: -len(s)]
+                changed = True
+    return k
+
+
 def load_dir(d: Path) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for p in sorted(d.rglob("*.json")):
@@ -51,8 +71,7 @@ def load_dir(d: Path) -> dict[str, dict]:
         if not isinstance(o, dict):
             continue
         src = next((o[k] for k in SOURCE_KEYS if o.get(k)), None)
-        key = Path(str(src)).stem if src else p.stem
-        out[key] = o
+        out[norm_key(src if src else p.stem)] = o
     return out
 
 
@@ -103,6 +122,27 @@ def main() -> None:
         print("至少要两条路才有得挑")
         return
 
+    # ★★★ 先核两路的键对不对得上。对不上就没得合, 算出来的数是假的。
+    keysets = [set(objs) for _, objs in runs]
+    common = set.intersection(*keysets)
+    union = set.union(*keysets)
+    print("=" * 72)
+    print(f"两路各自的图数: " + ",  ".join(f"{n} {len(s)}" for (n, _), s in zip(runs, keysets)))
+    print(f"两路都有的: {len(common)}    合起来: {len(union)}")
+    if not common:
+        print()
+        print("★★★ 两路**一张都对不上** —— 键的命名不一致, 没法合。")
+        for (n, _), s in zip(runs, keysets):
+            print(f"    {n} 的键例如: {sorted(s)[:2]}")
+        print("    (各条路给文件加的后缀要在 SUFFIXES 里列出来才能剥掉)")
+        return
+    if len(common) < 0.8 * len(union):
+        print(f"★★ 只有 {len(common)/len(union):.0%} 的图两路都有 —— 差得有点多, 结果要打折看。")
+    print("=" * 72)
+    print()
+
+    # 只在两路都有的图上比, 否则一路缺的会被算成"没读出来"
+    runs = [(n, {k: v for k, v in objs.items() if k in common}) for n, objs in runs]
     rates = {name: fill_rates(objs) for name, objs in runs}
     all_fields = sorted({k for r in rates.values() for k in r})
 
