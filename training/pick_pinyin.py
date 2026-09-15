@@ -225,6 +225,64 @@ def report(out: Path, threshold: float) -> None:
     print("=" * 66)
 
 
+def make_band_sheet(out: Path, sheet: Path, lo: float, hi: float,
+                    n: int = 12, crop: tuple[float, float] = (0.25, 0.55)) -> None:
+    """只贴**某个分数区间**的图, 用来找"拼音到底从几分开始出现"。
+
+    ★★★★★ 为什么必须有这个: `make_sheet` 贴的是分数最高的那些, 那些**当然**有拼音。
+       拿它去确认阈值定得对不对, 是自己骗自己 —— 阈值附近那一段根本没看到。
+
+    2026-09-16 实测栽在这上面: 蓝图库按 0.06 挑出 8160 张, 贴出来的 12 张里
+    只有 3 张真有拼音, 0.069 到 0.150 那一段**一张都没有**。
+    阈值 0.06 是拿**白图**标定的, 蓝图上那些小徽章(充值金+15 / 学分+50 / 里程币+20)
+    和促销卡片, 形状上同样是"小字压在大字上面一排", 判据分不开。
+
+    crop 是裁哪一段页面。蓝图和白图版面不一样, 默认那个窗口是按白图调的。
+    """
+    rows = [r for r in read_all(out)
+            if r.get("score") is not None and lo <= r["score"] < hi]
+    if not rows:
+        print(f"{lo:.3f} 到 {hi:.3f} 这一段里没有图")
+        return
+    rows.sort(key=lambda r: -r["score"])
+    step = max(1, len(rows) // n)
+    picked = rows[::step][:n]
+
+    cells = []
+    for r in picked:
+        src = Path(r["path"])
+        if not src.exists():
+            continue
+        img = cv2.imdecode(np.fromfile(str(src), np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            continue
+        h = img.shape[0]
+        c = img[int(h * crop[0]): int(h * crop[1]), :]
+        if c.size == 0:
+            continue
+        c = cv2.resize(c, (520, max(1, int(520 * c.shape[0] / c.shape[1]))))
+        cv2.putText(c, f"{r['score']:.3f}", (8, 26),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        cells.append(c)
+    if not cells:
+        print("图都读不出来(路径可能变了)")
+        return
+
+    hh = max(x.shape[0] for x in cells)
+    cells = [cv2.copyMakeBorder(x, 0, hh - x.shape[0], 0, 0,
+                                cv2.BORDER_CONSTANT, value=(255, 255, 255))
+             for x in cells]
+    per = 3
+    usable = len(cells) - len(cells) % per
+    if usable == 0:
+        usable, per = len(cells), len(cells)
+    grid = np.vstack([np.hstack(cells[i:i + per]) for i in range(0, usable, per)])
+    sheet.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imencode(".png", grid)[1].tofile(str(sheet))
+    print(f"{lo:.3f} 到 {hi:.3f} 这一段共 {len(rows)} 张, 抽了 {usable} 张 -> {sheet}")
+    print("★★ 打开看: 这一段里**有几张真有拼音**。一张都没有就说明阈值还得往上抬。")
+
+
 def make_sheet(out: Path, sheet: Path, threshold: float, n: int = 12) -> None:
     """把分数**跨着挡次**抽几张贴成一张图, 好让人肉眼核。
 
@@ -298,6 +356,11 @@ def main() -> None:
     ap.add_argument("--report", action="store_true", help="只看已有名单, 不重扫")
     ap.add_argument("--sheet", type=Path, default=None,
                     help="★ 抽几张贴成一张图肉眼核 —— 光看数字发现不了误判")
+    ap.add_argument("--band", type=str, default=None,
+                    help="★★ 只贴某个分数区间, 例 --band 0.06,0.10。"
+                         "找阈值必须用这个 —— 只贴最高分那些是自己骗自己")
+    ap.add_argument("--crop", type=str, default="0.25,0.55",
+                    help="贴图时裁页面的哪一段(蓝图白图版面不一样)")
     ap.add_argument("--copy-to", type=Path, default=None, help="把挑出来的复制到这里")
     ap.add_argument("--limit", type=int, default=0, help="最多复制多少张(0 = 不限)")
     ap.add_argument("--copy-clean", action="store_true",
@@ -339,9 +402,22 @@ def main() -> None:
         return
 
     if a.sheet:
-        report(a.out, a.threshold)
-        print()
-        make_sheet(a.out, a.sheet, a.threshold)
+        try:
+            c1, c2 = (float(x) for x in a.crop.split(","))
+        except Exception:                        # noqa: BLE001
+            print("--crop 格式应当是 0.25,0.55")
+            return
+        if a.band:
+            try:
+                lo, hi = (float(x) for x in a.band.split(","))
+            except Exception:                    # noqa: BLE001
+                print("--band 格式应当是 0.06,0.10")
+                return
+            make_band_sheet(a.out, a.sheet, lo, hi, crop=(c1, c2))
+        else:
+            report(a.out, a.threshold)
+            print()
+            make_sheet(a.out, a.sheet, a.threshold)
         return
 
     if a.report:

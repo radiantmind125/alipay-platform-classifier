@@ -174,6 +174,50 @@ def test_图找不着了不能崩(tmp_path: Path) -> None:
     make_sheet(m, tmp_path / "s.png", DEFAULT_THRESHOLD)   # 不该抛
 
 
+def test_分段抽样只取该段的图(tmp_path: Path) -> None:
+    """★★★★★ 找阈值必须能**只看某一段**。
+
+    2026-09-16 栽过一次: 蓝图库按 0.06 挑出 8160 张, 贴出来的 12 张
+    是分数**最高**的那些 —— 当然全有拼音, 于是我说"确认了"。
+    Daniel 让我一张张看, 12 张里只有 3 张真有拼音,
+    0.069 到 0.150 那一段**一张都没有**。
+
+    只贴最高分那些去验阈值, 是自己骗自己: 阈值附近那一段根本没看到。
+    """
+    from pick_pinyin import make_band_sheet
+
+    imgs = tmp_path / "imgs"
+    imgs.mkdir()
+    rows = []
+    for i, s in enumerate([0.40, 0.30, 0.20, 0.12, 0.09, 0.07, 0.03]):
+        f = imgs / f"{i}.png"
+        _fake_img(f)
+        rows.append({"path": str(f), "score": s})
+    m = tmp_path / "m.jsonl"
+    m.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+
+    sheet = tmp_path / "band.png"
+    make_band_sheet(m, sheet, 0.06, 0.15, n=12)
+    assert sheet.exists(), "分段抽样没出图"
+
+    import cv2
+    import numpy as np
+    got = cv2.imdecode(np.fromfile(str(sheet), np.uint8), cv2.IMREAD_COLOR)
+    # 这一段里只有三张(0.12 / 0.09 / 0.07), 不该把 0.40 那几张也贴进来
+    assert got is not None
+    assert got.shape[1] <= 520 * 3 + 20, "贴进了区间外的图"
+
+
+def test_空区间不能崩(tmp_path: Path) -> None:
+    """要找的那一段可能一张都没有, 得好好说一句, 不能抛。"""
+    from pick_pinyin import make_band_sheet
+
+    m = tmp_path / "m.jsonl"
+    m.write_text(json.dumps({"path": str(tmp_path / "x.png"), "score": 0.1}),
+                 encoding="utf-8")
+    make_band_sheet(m, tmp_path / "s.png", 0.90, 1.00)   # 不该抛
+
+
 def test_扫库要给根目录(tmp_path: Path) -> None:
     txt = _run("--out", str(tmp_path / "n.jsonl"))
     assert "--root" in txt
