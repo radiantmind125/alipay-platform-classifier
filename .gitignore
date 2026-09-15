@@ -28,6 +28,10 @@ gold/*.json
 # 私有协作笔记（含同事名与内部策略）
 COORDINATION.md
 
+# .NET 编译产物
+bin/
+obj/
+
 # 系统
 .DS_Store
 Thumbs.db

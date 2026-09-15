@@ -7,7 +7,13 @@ using OpenCvSharp;
 namespace Ssp
 {
     /// <summary>
-    /// 按**位置**取图上的文字区域 —— 按矩形取, 或者按一条水平线取那一行。
+    /// 按**位置**处理图上的文字区域, 两件事:
+    ///   **判断** —— <see cref="InRect"/> / <see cref="OnSegment"/>, 给一个文字框, 返回在不在(bool)
+    ///   **取值** —— <see cref="ByRect(Mat, Rect, int)"/> / <see cref="ByLine"/> / <see cref="RowAt"/>,
+    ///               按矩形或线段把那一块图取出来
+    ///
+    /// ★ 判和取用的是**同一套偏移口径**(yOffset 都是像素, 向上为负, 动的都是矩形/线段而不是文字),
+    ///   所以"判为真"就等于"同样参数去取, 能把这块文字取进来"。两边不会打架。
     ///
     /// 为什么要这个
     /// ------------
@@ -102,7 +108,7 @@ namespace Ssp
             foreach (var r in rows)
             {
                 // 线在行内 -> 距离 0; 否则算到行边的距离
-                int d = y < r.Y ? r.Y - y : (y > r.Y + r.Height ? y - (r.Y + r.Height) : 0);
+                int d = SpanDistance(y, r.Y, r.Height);
                 if (d < bestDist) { bestDist = d; best = r; }
                 if (d == 0) break;
             }
@@ -126,6 +132,95 @@ namespace Ssp
             var r = Clamp(new Rect(x0, y0, x1 - x0, y1 - y0), image.Width, image.Height);
             if (r.Width <= 0 || r.Height <= 0) return null;
             return new Mat(image, r);
+        }
+
+        /// <summary>
+        /// 判"文字在矩形内"时, 文字框至少要有多大比例落在矩形里。
+        /// 兄弟类里同形状的判据都取 0.5(PinyinCheck 判水平压住、MinusCheck 按纵向重叠聚行),
+        /// 这里是按字段格子定位, 该比那两处紧一点, 先取 0.6。
+        /// ★ 这个数**还没拿真图标过**, 只是照兄弟类的量级开的口, 标完必须重定。
+        ///   标法: 拿已经挑出来的 7205 张拼音图, 用真实字段矩形扫 0.3~0.9, 看订单号命中率的拐点。
+        /// </summary>
+        public const double CoverRatio = 0.6;
+
+        /// <summary>
+        /// 判断一块**文字**是不是落在给定的矩形里。
+        ///
+        /// <paramref name="text"/> 传文字的**外接框**: OCR 的 det 框(四点框先
+        /// <c>Cv2.BoundingRect</c> 一下)、连通块框, 或 <see cref="FindTextRows"/> 切出来的行框。
+        /// 不收单个点 —— 要对付的正是"框被切坏", 只给一个点就没有范围可判了。
+        ///
+        /// <paramref name="yOffset"/> 偏移的是**矩形**, 单位像素, 可正可负, **向上是负数**,
+        /// 和 <see cref="ByRect(Mat, Rect, int)"/> 的同名参数逐字一致。
+        /// 所以这条判为真, 就等于同样参数的 ByRect 会把这块文字裁进去 —— 判和取不会打架。
+        ///
+        /// 判据是"**框有多少落在里面**": 交集面积 / 文字框面积 >= <paramref name="coverRatio"/>。
+        /// ★ 不用"整个框都在内": 带拼音的图上, 框被劈成两段、或者和上面那行拼在一起本来就是常态;
+        ///   卡"完全在内"的话, 最该捞回来的那几个恰好全判否。
+        /// ★ 不用"中心在内": 中心对**竖直方向**最敏感, 而竖直正是拼音搞坏的那个方向。
+        ///   011.jpg 实测拼音行 453-467、正文行 468-496(见类注释); 两行一旦被并成一个框,
+        ///   中心就往上跑 7 像素 —— 分界线只要落在这 7 像素里, 中心法就**判到上一个字段去了**,
+        ///   而且是**言之凿凿地判错**, 不是判不出。
+        ///
+        /// ★★ **但要说清楚: 面积法并不能把并行的情况救回来。**
+        ///   实测(见 trtest D 组): 拼音行并进正文行之后, 框从 29 像素长到 44 像素,
+        ///   分母跟着变大, 落在目标格子里的比例掉到 **0.432** —— 低于默认的 0.6, 照样判否。
+        ///   面积法真正买到的只有一样: 它**不会判到错的格子上去**(上一格也是否),
+        ///   宁可答"不知道"也不答错。对误杀要赔钱的场景, 这个取舍是对的。
+        ///
+        ///   想把并行的那条认出来, **不要去放低阈值** —— 实测要放到 0.43 以下才认得出,
+        ///   那时候"半个框在别的格子里"也算中, 相邻字段就分不开了。
+        ///   **正确的办法是先把拼音行滤掉**:
+        ///     1. <c>PinyinCheck.Check</c> 判这一页带不带拼音
+        ///     2. 带的话 <see cref="FindTextRows"/> 传 <c>dropAnnotationRows: true</c>
+        ///     3. 滤完再用默认 0.6 判 —— 实测就正常了(trtest D5/D6)
+        ///
+        /// ★★ <see cref="FindTextRows"/> 返回的行框是**整幅宽**的(x=0, w=图宽),
+        ///   拿它判"在不在某个字段的小矩形里"永远过不了。行框要么先按 x 收窄,
+        ///   要么改用 <see cref="OnSegment"/> —— 按行判是那个方法的活。
+        ///
+        /// 纯几何, 不看图, 不分配内存, 可多线程调用。
+        /// </summary>
+        public static bool InRect(Rect text, Rect region, int yOffset = 0,
+                                  double coverRatio = CoverRatio)
+        {
+            long area = (long)text.Width * text.Height;
+            if (area <= 0) return false;                    // 空框一律判否, 不引入第三态
+            var moved = region + new Point(0, yOffset);     // 和 ByRect 一样: 动的是矩形
+            var hit = Rect.Intersect(text, moved);
+            return (long)hit.Width * hit.Height >= coverRatio * area;
+        }
+
+        /// <summary>
+        /// 判断一块**文字**是不是压在给定的**线段**上。
+        ///
+        /// <paramref name="a"/> / <paramref name="b"/> 是线段两个端点, 顺序无所谓,
+        /// 和 <see cref="ByLine"/> 收的是同一对点。
+        /// <paramref name="yOffset"/> 偏移的是**线段**(像素, **向上是负数**), 也和 <see cref="ByLine"/>
+        /// 一致 —— 判为真就等于同样参数的 ByLine 会把这块文字带出来。
+        /// <paramref name="tol"/> 是容差(像素): 差这么一点没挨上, 也算压上。
+        ///
+        /// 判据是"**线段到文字框的距离** &lt;= tol"(穿过去时距离为 0), 不是"框的中心离线段多远"。
+        /// ★ 为什么不按中心: 011.jpg 实测正文行高 27~28 像素, 紧贴在上面的拼音行 11~14 像素。
+        ///   想靠中心距离把相邻两行分开, 容差就得小于半个行高; 可拼音一并进来,
+        ///   框的中心自己先往上跑 7.5 像素(算式见 <see cref="InRect"/>) —— 该中的那行反倒判否。
+        ///   按"线段有没有从框里穿过去"就没这个毛病: 框长高了, 原来那条基线仍然在框内。
+        /// ★ 用的是点到**线段**的真实距离, 不假设线是水平的, 斜线竖线一样判
+        ///   (这点和 <see cref="RowAt"/> 不同, 那个收的是一条水平线的 y)。
+        ///
+        /// <paramref name="tol"/> 默认 0 = 必须真碰上, 和 <see cref="ByLine"/> 的 padY / padX
+        /// 默认 0 是同一个口径。要留容差的话, 大约取四分之一行高(实测行高 27~28, 即 7 上下)。
+        /// ★ 这个 7 同样**没标定过**。
+        ///
+        /// 纯几何, 不看图, 不分配内存, 可多线程调用。
+        /// </summary>
+        public static bool OnSegment(Rect text, Point a, Point b, int yOffset = 0, int tol = 0)
+        {
+            if (text.Width <= 0 || text.Height <= 0) return false;
+            var box = Rect.Inflate(text, tol, tol);         // 容差做成把框放大, 全整数, 不算浮点距离
+            var p = new Point(a.X, a.Y + yOffset);          // 和 ByLine 一样: 动的是线段
+            var q = new Point(b.X, b.Y + yOffset);
+            return SegmentHitsRect(p, q, box);
         }
 
         /// <summary>
@@ -254,6 +349,43 @@ namespace Ssp
             }
             return kept.Count > 0 ? kept : raw;    // 全被滤光就退回不滤, 免得一行都取不到
         }
+
+        // 一维: 点 v 到区间 [lo, lo+len] 的距离, 在区间内为 0
+        static int SpanDistance(int v, int lo, int len)
+            => v < lo ? lo - v : (v > lo + len ? v - (lo + len) : 0);
+
+        // 线段和矩形有没有交: 端点落在框内, 或线段和四条边中任意一条相交
+        static bool SegmentHitsRect(Point p, Point q, Rect r)
+        {
+            if (r.Width <= 0 || r.Height <= 0) return false;
+            if (r.Contains(p) || r.Contains(q)) return true;    // 退化成一个点时也走这里
+            int x0 = r.X, y0 = r.Y, x1 = r.X + r.Width, y1 = r.Y + r.Height;
+            var tl = new Point(x0, y0); var tr = new Point(x1, y0);
+            var br = new Point(x1, y1); var bl = new Point(x0, y1);
+            return SegHitsSeg(p, q, tl, tr) || SegHitsSeg(p, q, tr, br)
+                || SegHitsSeg(p, q, br, bl) || SegHitsSeg(p, q, bl, tl);
+        }
+
+        // 叉积符号法, 含共线重叠。全整数, 用 long 防溢出
+        static bool SegHitsSeg(Point a, Point b, Point c, Point d)
+        {
+            long d1 = Cross(c, d, a), d2 = Cross(c, d, b);
+            long d3 = Cross(a, b, c), d4 = Cross(a, b, d);
+            if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+                ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
+            if (d1 == 0 && InSpan(c, d, a)) return true;
+            if (d2 == 0 && InSpan(c, d, b)) return true;
+            if (d3 == 0 && InSpan(a, b, c)) return true;
+            if (d4 == 0 && InSpan(a, b, d)) return true;
+            return false;
+        }
+
+        static long Cross(Point o, Point p, Point q)
+            => (long)(p.X - o.X) * (q.Y - o.Y) - (long)(p.Y - o.Y) * (q.X - o.X);
+
+        static bool InSpan(Point a, Point b, Point p)
+            => Math.Min(a.X, b.X) <= p.X && p.X <= Math.Max(a.X, b.X)
+            && Math.Min(a.Y, b.Y) <= p.Y && p.Y <= Math.Max(a.Y, b.Y);
 
         static Rect Clamp(Rect r, int w, int h)
         {
