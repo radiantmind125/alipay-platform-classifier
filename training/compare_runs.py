@@ -212,13 +212,13 @@ def main() -> None:
     print("★★★ 现在的主指标是**逐字段非空率**, 不是污染率。")
     print("  实测: 非拼音对照组 订单号 41%, 拼音组 0% —— 拼音把正文字段整个打没了,")
     print("  不是'读不全'。字段都空的时候污染率永远是 0, 判不出东西来。")
-    print("★ 参考天花板(非拼音对照组 100 张实测):")
-    print("    transfer_status 94   payment_method 91   status_bar_time 90")
-    print("    amount 46   transfer_note 44   transfer_time 42   voucher_number 41")
-    print("    voucher_type 39   recipient_name/account 12   payer_* 4   device 100")
-    print("  某个法子要是能把拼音组往这些数字上拉, 就是有效。")
-    print("★ device 和 status_bar_time 走的是状态栏模型不是 PP-OCR, 两组都高,")
-    print("  所以它们是**对照锚点** —— 它们不掉说明流程本身没坏, 坏的是正文那段。")
+    print("★★ 下面这组参考数**只对 pp-final-v4-r2 那个交付包成立**。")
+    print("   2026-09-15 查清楚: 线上跑的是 PaddleOCR, 那个包是没被接受的候选。")
+    print("   对着 receipt_inference.cli --ocr paddle 跑出来的结果, 不要跟这组数比。")
+    print("   (非拼音对照 100 张, 那个包: transfer_status 94  payment_method 91")
+    print("    amount 46  transfer_time 42  voucher_number 41  recipient_name 12)")
+    print("★ 真正该看的是**同一批图、同一条管线、只差擦没擦**这两列的差。")
+    print("  横着跟别的管线比没有意义。")
 
 
 if __name__ == "__main__":

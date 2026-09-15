@@ -196,13 +196,30 @@ def erase(img: np.ndarray, force: bool = False,
     return out, info
 
 
-def process(src: Path, out_dir: Path, force: bool, debug: bool) -> dict | None:
+def process(src: Path, out_dir: Path, force: bool, debug: bool,
+            no_erase: bool = False) -> dict | None:
     data = np.fromfile(str(src), dtype=np.uint8)
     img = cv2.imdecode(data, cv2.IMREAD_COLOR)
     if img is None:
         return None
-    meas = None if force else measure(str(src))
-    cleaned, info = erase(img, force=force, meas=meas)
+    if no_erase:
+        # ★★★★★ 对照组: **一个像素都不改**, 但走**完全一样**的解码和存盘。
+        #
+        #   为什么非要有这一组: 原图是 jpg, 擦完存的是 png。
+        #   直接拿"原图 jpg"和"擦完 png"去比, 比的是**擦拼音 + 换编码**两件事,
+        #   分不清哪件起的作用。png 无损而 jpg 有压缩痕迹, OCR 结果本来就可能不一样。
+        #
+        #   这个坑之前踩过一次: 拿 jpg 解码的图和 BGR 存成 png 再解码的图比,
+        #   报出来 40 张全被擦坏了, 其实**一张都没坏**, 差的全是编码。
+        #
+        #   有了这一组, 三列一比就分得清楚:
+        #       原图jpg -> 原图png   这一步的差 = 换编码带来的
+        #       原图png -> 擦完png   这一步的差 = **真正擦拼音带来的**
+        # acted 这个键主循环要用来计数, 不能少
+        cleaned, info = img, {"acted": False, "reason": "no_erase 对照组"}
+    else:
+        meas = None if force else measure(str(src))
+        cleaned, info = erase(img, force=force, meas=meas)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     dst = out_dir / f"{src.stem}_clean.png"
@@ -226,7 +243,13 @@ def main() -> None:
                     help="跳过整页拼音判定, 见得到注音行就擦。**慎用**")
     ap.add_argument("--debug", action="store_true", help="另存一张左右对照图")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--no-erase", action="store_true",
+                    help="★ 对照组: 一个像素都不改, 但走一样的解码和存盘。"
+                         "拿来把'换编码'和'擦拼音'两件事分开。")
     a = ap.parse_args()
+    if a.force and a.no_erase:
+        print("--force 和 --no-erase 是反的, 不能一起给")
+        return
 
     files = ([a.src] if a.src.is_file() else
              sorted(p for p in a.src.iterdir()
@@ -236,7 +259,7 @@ def main() -> None:
 
     acted = skipped = failed = 0
     for i, p in enumerate(files, 1):
-        info = process(p, a.out, a.force, a.debug)
+        info = process(p, a.out, a.force, a.debug, a.no_erase)
         if info is None:
             failed += 1
         elif info["acted"]:
