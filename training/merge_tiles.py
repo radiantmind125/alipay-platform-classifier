@@ -70,8 +70,21 @@ def load_results(results_dir: Path) -> tuple[dict[str, dict], int, set]:
     return out, unknown, keys_seen
 
 
-def merge_one(tile_objs: list[dict]) -> tuple[dict, list[str]]:
-    """合并同一张原图的几块。返回(合并结果, 冲突字段名列表)。"""
+# ★ 这些是**每块本来就不一样**的记账字段, 不参与冲突判定。
+#   input_image 记的是**块**的路径, 每块当然不同 —— 实测 100 张里 99 张
+#   都因为它报冲突, 淹没了真正该看的冲突。
+PER_TILE_META = ("input_image", "source", "image_path")
+
+
+def merge_one(tile_objs: list[dict]) -> tuple[dict, list[str], dict]:
+    """合并同一张原图的几块。
+
+    返回(合并结果, 冲突字段名列表, 冲突时"取第一个非空"会得到什么)。
+
+    ★ 第三个返回值是为了**量化保守策略的代价**: 冲突时我们置 null 不替它选,
+      但那样会把一些本来读出来了的值也丢掉。把"取第一个"的结果也算出来,
+      就知道这个保守到底花了多少 —— 实测 payment_method 有 13 张栽在这上面。
+    """
     keys = []
     for o in tile_objs:
         for k in o:
@@ -79,6 +92,7 @@ def merge_one(tile_objs: list[dict]) -> tuple[dict, list[str]]:
                 keys.append(k)                 # 保持出现顺序
 
     merged, conflicts = {}, []
+    would_be = {}                              # 冲突时取第一个非空的话
     for k in keys:
         vals = []
         for o in tile_objs:
@@ -98,11 +112,15 @@ def merge_one(tile_objs: list[dict]) -> tuple[dict, list[str]]:
                 uniq.append(v)
         if len(uniq) == 1:
             merged[k] = uniq[0]
+        elif k in PER_TILE_META:
+            # 每块本来就不一样的记账字段, 取第一个就行, 不算冲突
+            merged[k] = uniq[0]
         else:
-            merged[k] = None                   # ★ 不替它选
+            merged[k] = None                   # ★ 业务字段冲突时不替它选
             merged[f"{k}__conflict"] = [str(u) for u in uniq]
             conflicts.append(k)
-    return merged, conflicts
+            would_be[k] = uniq[0]
+    return merged, conflicts, would_be
 
 
 def main() -> None:
@@ -142,15 +160,18 @@ def main() -> None:
 
     a.out.mkdir(parents=True, exist_ok=True)
     conflict_counter: Counter = Counter()
+    suppressed: Counter = Counter()
     n_conf_imgs = 0
     for src, items in groups.items():
         items.sort(key=lambda t: t[0])
-        merged, conflicts = merge_one([o for _, o in items])
+        merged, conflicts, would_be = merge_one([o for _, o in items])
         merged["_source_image"] = src
         merged["_tiles_used"] = len(items)
         if conflicts:
             n_conf_imgs += 1
             conflict_counter.update(conflicts)
+            for k in would_be:
+                suppressed[k] += 1
         (a.out / f"{Path(src).stem}.json").write_text(
             json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -169,6 +190,11 @@ def main() -> None:
             print(f"    {k}: {n} 次")
         print("  ★ 这些字段合并结果里是 null, 另存了 字段名__conflict 列出各块的说法。")
         print("    **人工看一眼再定**, 不要直接取第一个。")
+        print()
+        print("  ★★ 保守策略的代价(这些张如果'取第一个非空'就会有值):")
+        for k, n in suppressed.most_common(10):
+            print(f"    {k}: {n} 张被置成了 null")
+        print("    —— 逐字段非空率里这些是算作'没读出来'的, 看表时要把这个记在心上。")
 
 
 if __name__ == "__main__":
