@@ -91,13 +91,17 @@ def analyse(name: str, objs: dict[str, dict]) -> dict:
     lens = []
     polluted_examples = []
     per_field_pollution: Counter = Counter()
+    per_field_filled: Counter = Counter()      # ★ 逐字段非空张数
+    per_field_seen: Counter = Counter()
 
     for stem, o in objs.items():
         for k, v in field_items(o):
             total += 1
+            per_field_seen[k] += 1
             if v is None:
                 continue
             filled += 1
+            per_field_filled[k] += 1
             lens.append(len(v))
             if TONED_RE.search(v):
                 polluted += 1
@@ -107,7 +111,42 @@ def analyse(name: str, objs: dict[str, dict]) -> dict:
 
     return {"name": name, "images": len(objs), "fields": total,
             "filled": filled, "polluted": polluted, "lens": lens,
-            "examples": polluted_examples, "per_field": per_field_pollution}
+            "examples": polluted_examples, "per_field": per_field_pollution,
+            "field_filled": per_field_filled, "field_seen": per_field_seen}
+
+
+def print_per_field(runs: list[dict]) -> None:
+    """★★★ 逐字段填充率对比 —— 这才是现在的主指标。
+
+    实测拼音图上业务字段几乎全空(订单号 0/100), 而非拼音对照组订单号 41/100。
+    也就是说**拼音把正文字段整个打没了**, 不是"读不全"。
+    这种情况下"污染率"那个判据用不了 —— 字段都是空的, 没有文本可以被污染。
+    要看的是**每个字段有多少张读出来了**, 以及有没有往对照组的水平靠。
+    """
+    fields = []
+    for r in runs:
+        for k in r["field_seen"]:
+            if k not in fields:
+                fields.append(k)
+    if not fields:
+        return
+    print("=" * 66)
+    print("逐字段非空率(这是主指标)")
+    print("=" * 66)
+    head = f"{'字段':<22}" + "".join(f"{r['name']:>11}" for r in runs)
+    print(head)
+    print("-" * len(head))
+    # 按第一组的填充率排, 空的排最后
+    def rate(r, k):
+        n = r["field_seen"].get(k, 0)
+        return (r["field_filled"].get(k, 0) / n) if n else 0.0
+    for k in sorted(fields, key=lambda k: -rate(runs[0], k)):
+        row = f"{k:<22}"
+        for r in runs:
+            n = r["field_seen"].get(k, 0)
+            row += f"{rate(r, k):>10.0%} " if n else f"{'-':>11}"
+        print(row)
+    print()
 
 
 def main() -> None:
@@ -143,6 +182,8 @@ def main() -> None:
               f"{fr:>7.1%}{r['polluted']:>9}{pr:>8.1%}")
     print()
 
+    print_per_field(runs)
+
     base = runs[0]
     b_pr = base["polluted"] / base["filled"] if base["filled"] else 0
     for r in runs[1:]:
@@ -168,11 +209,16 @@ def main() -> None:
                 print(f"    最常中招的字段: {top}")
             print()
 
-    print("★ 判据说明: 带声调的元音在正常回单里不可能出现(金额/姓名/账号/邮箱"
-          "/订单号都不带声调),")
-    print("  所以输出里出现它们**一定**是拼音漏进来了 —— 这个判据不需要真值, 也不会误判。")
-    print("★ 但它只抓得到**漏进来的**拼音。检测把整行丢掉那种(字段变 null),")
-    print("  要看**非空率**那一列。两个指标要一起看。")
+    print("★★★ 现在的主指标是**逐字段非空率**, 不是污染率。")
+    print("  实测: 非拼音对照组 订单号 41%, 拼音组 0% —— 拼音把正文字段整个打没了,")
+    print("  不是'读不全'。字段都空的时候污染率永远是 0, 判不出东西来。")
+    print("★ 参考天花板(非拼音对照组 100 张实测):")
+    print("    transfer_status 94   payment_method 91   status_bar_time 90")
+    print("    amount 46   transfer_note 44   transfer_time 42   voucher_number 41")
+    print("    voucher_type 39   recipient_name/account 12   payer_* 4   device 100")
+    print("  某个法子要是能把拼音组往这些数字上拉, 就是有效。")
+    print("★ device 和 status_bar_time 走的是状态栏模型不是 PP-OCR, 两组都高,")
+    print("  所以它们是**对照锚点** —— 它们不掉说明流程本身没坏, 坏的是正文那段。")
 
 
 if __name__ == "__main__":
