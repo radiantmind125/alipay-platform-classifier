@@ -54,7 +54,24 @@ function Find-Runner {
 }
 
 function Invoke-Ocr ($runner, $inDir, $outDir, $tag) {
-    New-Item -ItemType Directory -Force $outDir | Out-Null
+    # ★★ 批跑脚本要求输出目录**必须是全新的**, 已存在就直接拒跑:
+    #      "OutputDirectory must be fresh; refusing to reuse"
+    #    所以这里**不能**预先建目录 —— 只保证**父目录**在, 目录本身留给它自己建。
+    $parent = Split-Path -Parent $outDir
+    if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Force $parent | Out-Null
+    }
+    if (Test-Path -LiteralPath $outDir) {
+        # 只删我们自己在 $Work 底下建的, 传错路径时不动别人的东西
+        $full  = (Resolve-Path -LiteralPath $outDir).Path
+        $wfull = (Resolve-Path -LiteralPath $Work).Path
+        if ($full.StartsWith($wfull, [StringComparison]::OrdinalIgnoreCase) -and $full -ne $wfull) {
+            Note "$outDir 已存在, 删掉重来(批跑脚本不接受已存在的输出目录)"
+            Remove-Item -LiteralPath $outDir -Recurse -Force
+        } else {
+            Die "$outDir 已存在, 而且不在 -Work 底下, 我不敢删。请手动清掉或换一个 -Work。"
+        }
+    }
     $n = (Get-ChildItem -LiteralPath $inDir -File).Count
     Say "  跑 $tag  ($n 张)"
     $t0 = Get-Date
