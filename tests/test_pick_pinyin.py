@@ -75,11 +75,21 @@ def test_一张都没挑出来时要给上界不能说库里没有(tmp_path: Pat
     assert "库里没有" not in txt
 
 
-def test_对着筛过的目录跑要说推算不作数(tmp_path: Path) -> None:
-    """★ 实测踩到: 97.3% / 0.75 = 129.8%, 印出来是个笑话。"""
+def test_对着筛过的目录跑要报还差多少张(tmp_path: Path) -> None:
+    """★ 实测踩到两次。
+
+    第一次: 97.3% / 0.75 = 129.8%, 印出来是个笑话。
+    第二次: 夹到 100% 之后变成 10000/1.0 = 10000 ——
+            "要凑一万张得有大约 10,000 张原图", 等于把目标数原样念一遍, 没有信息。
+
+    ★★ 对着已经筛过的目录跑, 唯一有用的数是**还差多少张**。
+    """
     m = _manifest(tmp_path, [0.2] * 97 + [0.0] * 3)
     txt = _run("--out", str(m), "--report")
-    assert "129" not in txt and "不作数" in txt, f"超过 100% 的推算没拦住:\n{txt}"
+    assert "129" not in txt, f"超过 100% 的推算没拦住:\n{txt}"
+    assert "还差" in txt, f"没报还差多少张:\n{txt}"
+    assert "9,903" in txt, f"还差的张数算错了(97 张挑出来, 应当还差 9903):\n{txt}"
+    assert "得有大约 10,000 张原图" not in txt, f"又把目标数念了一遍:\n{txt}"
 
 
 def test_分档边界要带上阈值(tmp_path: Path) -> None:
