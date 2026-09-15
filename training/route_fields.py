@@ -1,0 +1,173 @@
+"""把两条路的结果按**字段**各取更好的那个, 合成一份。
+
+为什么要这样
+------------
+实测两条路各治一簇:
+
+    字段               原图   擦完   切片   天花板
+    transfer_status      1     19     56     94     <- 切片好
+    payment_method       4     36     50     91     <- 切片好
+    transfer_note        2     10     31     44     <- 切片好
+    amount               3      8      0     46     <- 擦图好(切片归零)
+    voucher_type         1      8      1     39     <- 擦图好
+    transfer_time        0      7      0     42     <- 擦图好
+    voucher_number       0      7      0     41     <- 擦图好
+
+后面那一簇要"账单分类+订单号+创建时间"三要素同时出现才启用, 而切片把整页拆了,
+没有任何一块同时有三样, 所以全归零。
+
+★ 所以同一批图跑两遍, 每个字段取各自更好的那一路。
+
+★★ 谁更好是**按实测数据自动定的**, 不写死。但这就有个问题 ——
+   在**同一批数据**上挑路线再在**同一批数据**上报成绩, 是自己考自己。
+   所以脚本会明确警告, 并支持 --route-from 用**另一批**数据定路线。
+
+    # 先在一批上定路线, 再在另一批上验
+    python route_fields.py --run 擦完=A目录 --run 切片=B目录 --out 合并目录
+    python route_fields.py --run 擦完=C目录 --run 切片=D目录 --out 目录2 --route-from 路线.json
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from collections import Counter
+from pathlib import Path
+
+SKIP_PREFIX = ("batch", "worker", "inference", "summary", "manifest",
+               "sha256sums", "_tiles")
+SOURCE_KEYS = ("_source_image", "input_image", "source", "image", "image_path")
+META_PREFIX = ("_",)
+
+
+def load_dir(d: Path) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for p in sorted(d.rglob("*.json")):
+        if p.name.lower().startswith(SKIP_PREFIX):
+            continue
+        try:
+            o = json.loads(p.read_text(encoding="utf-8-sig"))
+        except Exception:
+            continue
+        if not isinstance(o, dict):
+            continue
+        src = next((o[k] for k in SOURCE_KEYS if o.get(k)), None)
+        key = Path(str(src)).stem if src else p.stem
+        out[key] = o
+    return out
+
+
+def filled(v) -> bool:
+    return v is not None and str(v).strip() != ""
+
+
+def fill_rates(objs: dict[str, dict]) -> dict[str, float]:
+    seen: Counter = Counter()
+    hit: Counter = Counter()
+    for o in objs.values():
+        for k, v in o.items():
+            if k.startswith(META_PREFIX) or k.endswith("__conflict"):
+                continue
+            seen[k] += 1
+            if filled(v):
+                hit[k] += 1
+    return {k: (hit[k] / seen[k] if seen[k] else 0.0) for k in seen}
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--run", action="append", required=True,
+                    help="名字=目录, 至少给两个")
+    ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--route-from", type=Path, default=None,
+                    help="用另一批数据定好的路线(json), 不传就从当前数据定")
+    ap.add_argument("--save-route", type=Path, default=None,
+                    help="把定出来的路线存下来, 给下一批用")
+    a = ap.parse_args()
+
+    runs = []
+    for spec in a.run:
+        if "=" not in spec:
+            print(f"格式应当是 名字=目录: {spec}")
+            return
+        name, path = spec.split("=", 1)
+        d = Path(path)
+        if not d.exists():
+            print(f"目录不在: {d}")
+            return
+        objs = load_dir(d)
+        if not objs:
+            print(f"{d} 里没读到结果")
+            return
+        runs.append((name, objs))
+    if len(runs) < 2:
+        print("至少要两条路才有得挑")
+        return
+
+    rates = {name: fill_rates(objs) for name, objs in runs}
+    all_fields = sorted({k for r in rates.values() for k in r})
+
+    if a.route_from:
+        route = json.loads(a.route_from.read_text(encoding="utf-8"))
+        print(f"★ 路线来自 {a.route_from}(**另一批**数据定的, 这次是真验证)")
+    else:
+        route = {}
+        for k in all_fields:
+            best = max(runs, key=lambda t: rates[t[0]].get(k, 0.0))[0]
+            route[k] = best
+        print("★★ 路线是**从当前这批数据**定的 —— 在同一批上挑路线又在同一批上报成绩,")
+        print("   是自己考自己, **成绩会偏高**。")
+        print("   要真验证: 加 --save-route 存下来, 再拿**另一批**图 --route-from 跑一遍。")
+    print()
+
+    print("=" * 72)
+    print(f"{'字段':<22}" + "".join(f"{n:>11}" for n, _ in runs) + f"{'选谁':>12}")
+    print("=" * 72)
+    for k in sorted(all_fields, key=lambda k: -max(rates[n].get(k, 0) for n, _ in runs)):
+        row = f"{k:<22}"
+        for n, _ in runs:
+            row += f"{rates[n].get(k, 0):>10.0%} "
+        row += f"{route.get(k, runs[0][0]):>12}"
+        print(row)
+    print()
+
+    # 合成: 每个字段从它该走的那条路取
+    by_name = dict(runs)
+    keys = set()
+    for _, objs in runs:
+        keys |= set(objs)
+    a.out.mkdir(parents=True, exist_ok=True)
+    combined: Counter = Counter()
+    total = 0
+    for key in sorted(keys):
+        merged = {}
+        for f in all_fields:
+            src = by_name.get(route.get(f, runs[0][0]), {})
+            o = src.get(key)
+            merged[f] = o.get(f) if o else None
+        merged["_source_image"] = key
+        merged["_routed"] = {f: route.get(f) for f in all_fields}
+        (a.out / f"{key}.json").write_text(
+            json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+        total += 1
+        for f in all_fields:
+            if filled(merged[f]):
+                combined[f] += 1
+
+    print("=" * 72)
+    print(f"分流之后 ({total} 张)")
+    print("=" * 72)
+    for f in sorted(all_fields, key=lambda f: -combined[f]):
+        best_single = max(rates[n].get(f, 0) for n, _ in runs)
+        got = combined[f] / total if total else 0
+        mark = "" if abs(got - best_single) < 1e-9 else "  <- 和单路最好值不一致, 查一下"
+        print(f"  {f:<22} {got:>6.0%}{mark}")
+    print()
+    if a.save_route:
+        a.save_route.write_text(json.dumps(route, ensure_ascii=False, indent=2),
+                                encoding="utf-8")
+        print(f"路线已存 -> {a.save_route}")
+        print("★ 下一批用 --route-from 带上它, 那才是没有自己考自己的成绩。")
+
+
+if __name__ == "__main__":
+    main()
