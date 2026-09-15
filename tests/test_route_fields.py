@@ -135,3 +135,25 @@ def test_两路完全对不上时要叫停(tmp_path: Path) -> None:
     txt = _run("--run", f"擦={A}", "--run", f"切={B}", "--out", str(tmp_path / "o"))
     assert "一张都对不上" in txt
     assert "分流之后" not in txt, "对不上就不该往下算"
+
+
+def test_差距大的选择要标成稳(tmp_path: Path) -> None:
+    """A 在 20 张上有而 B 没有, 反过来 0 张 —— 这个选择应当是稳的。"""
+    rowsA = {f"i{i}": {"f": ("x" if i < 20 else None)} for i in range(40)}
+    rowsB = {f"i{i}": {"f": None} for i in range(40)}
+    A = _mk(tmp_path, "A", rowsA)
+    B = _mk(tmp_path, "B", rowsB)
+    txt = _run("--run", f"擦={A}", "--run", f"切={B}", "--out", str(tmp_path / "o"))
+    line = [l for l in txt.splitlines() if l.startswith("f ")][0]
+    assert "稳" in line and "拿不准" not in line, f"差 20 张还算不稳:\n{line}"
+
+
+def test_差距小的选择要标成拿不准(tmp_path: Path) -> None:
+    """A 多 1 张, B 多 1 张 —— 纯噪声, 必须标出来。"""
+    rowsA = {f"i{i}": {"f": ("x" if i == 0 else None)} for i in range(40)}
+    rowsB = {f"i{i}": {"f": ("y" if i == 1 else None)} for i in range(40)}
+    A = _mk(tmp_path, "A", rowsA)
+    B = _mk(tmp_path, "B", rowsB)
+    txt = _run("--run", f"擦={A}", "--run", f"切={B}", "--out", str(tmp_path / "o"))
+    assert "拿不准" in txt, f"1 比 1 居然算稳:\n{txt}"
+    assert "换一批可能反过来" in txt

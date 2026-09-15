@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
+from math import comb
 from pathlib import Path
 
 SKIP_PREFIX = ("batch", "worker", "inference", "summary", "manifest",
@@ -77,6 +78,40 @@ def load_dir(d: Path) -> dict[str, dict]:
 
 def filled(v) -> bool:
     return v is not None and str(v).strip() != ""
+
+
+def mcnemar_p(b: int, c: int) -> float:
+    """配对数据的精确检验(两条路跑的是**同一批图**, 所以必须用配对检验)。
+
+    b = 第一路读出来了而第二路没有的张数
+    c = 反过来的张数
+    两路一样好的话, 这 b+c 张里落到哪边应当是五五开。
+
+    ★ 为什么要这个: 路线是从当前这批数据挑的, 不做检验就是自己考自己。
+      差距大的字段(56% vs 19%)换一批也一样, 差距小的(86% vs 85%)纯属噪声,
+      把它们分开才知道哪些结论经得起换一批数据。
+    """
+    n = b + c
+    if n == 0:
+        return 1.0
+    k = max(b, c)
+    tail = sum(comb(n, i) for i in range(k, n + 1)) / (2 ** n)
+    return min(1.0, 2 * tail)
+
+
+def paired_counts(objs_a: dict, objs_b: dict, field: str) -> tuple[int, int]:
+    """同一批图上, A 有 B 无 / B 有 A 无 各多少张。"""
+    b = c = 0
+    for k in objs_a:
+        if k not in objs_b:
+            continue
+        fa = filled(objs_a[k].get(field))
+        fb = filled(objs_b[k].get(field))
+        if fa and not fb:
+            b += 1
+        elif fb and not fa:
+            c += 1
+    return b, c
 
 
 def fill_rates(objs: dict[str, dict]) -> dict[str, float]:
@@ -159,16 +194,36 @@ def main() -> None:
         print("   要真验证: 加 --save-route 存下来, 再拿**另一批**图 --route-from 跑一遍。")
     print()
 
-    print("=" * 72)
-    print(f"{'字段':<22}" + "".join(f"{n:>11}" for n, _ in runs) + f"{'选谁':>12}")
-    print("=" * 72)
+    print("=" * 84)
+    print(f"{'字段':<22}" + "".join(f"{n:>11}" for n, _ in runs)
+          + f"{'选谁':>10}{'这个选择稳不稳':>16}")
+    print("=" * 84)
+    shaky = []
     for k in sorted(all_fields, key=lambda k: -max(rates[n].get(k, 0) for n, _ in runs)):
         row = f"{k:<22}"
         for n, _ in runs:
             row += f"{rates[n].get(k, 0):>10.0%} "
-        row += f"{route.get(k, runs[0][0]):>12}"
+        row += f"{route.get(k, runs[0][0]):>10}"
+        if len(runs) == 2:
+            b, c = paired_counts(runs[0][1], runs[1][1], k)
+            pv = mcnemar_p(b, c)
+            if b + c == 0:
+                tag = "两路完全一样"
+            elif pv < 0.01:
+                tag = f"★ 稳 p={pv:.0e}"
+            elif pv < 0.05:
+                tag = f"较稳 p={pv:.2f}"
+            else:
+                tag = f"★★拿不准 p={pv:.2f}"
+                shaky.append(k)
+            row += f"{tag:>16}"
         print(row)
     print()
+    if shaky:
+        print(f"★★ 这几个字段两路差距在噪声范围内, 选哪路都行, 换一批可能反过来:")
+        print(f"   {', '.join(shaky)}")
+        print("   要紧的业务字段不在里面的话, 路线就是可信的。")
+        print()
 
     # 合成: 每个字段从它该走的那条路取
     by_name = dict(runs)
