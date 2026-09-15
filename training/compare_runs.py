@@ -43,6 +43,10 @@ TONED_RE = re.compile(f"[{TONED}]")
 # 内部记账字段, 不参与统计
 META_PREFIX = ("_", "input_image", "device")
 
+# 结果里记原图路径的字段可能叫什么。批跑脚本把结果写成 <sha256>.json,
+# 文件名是哈希和输入图无关, 所以**必须**从结果内部找来源。
+SOURCE_KEYS = ("_source_image", "input_image", "source", "image", "image_path")
+
 
 def load_dir(d: Path) -> dict[str, dict]:
     out = {}
@@ -61,7 +65,7 @@ def load_dir(d: Path) -> dict[str, dict]:
             #   于是好几个不同的文件塌成同一个键, 后面的把前面的覆盖掉,
             #   统计出来的图数会**少**。实测 12 张被数成 8 张。
             #   _source_image 是带扩展名的原图名, 那个才需要剥一次。
-            src = o.get("_source_image")
+            src = next((o[k] for k in SOURCE_KEYS if o.get(k)), None)
             key = Path(str(src)).stem if src else p.stem
             if key in out:
                 # 同名冲突要报出来, 不能默默覆盖

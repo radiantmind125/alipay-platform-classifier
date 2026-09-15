@@ -44,15 +44,22 @@ def tile(img: np.ndarray, limit: int, overlap: int):
     块之间**留重叠**, 免得正好把一行字从中间切断 —— 切断的那一行
     在相邻那一块里是完整的。
     """
-    H, W = img.shape[:2]
+    H0, W0 = img.shape[:2]
+    H, W = H0, W0
+    scale = 1.0
     if W > limit:
-        s = limit / W
-        img = cv2.resize(img, (limit, int(round(H * s))),
+        scale = limit / W
+        img = cv2.resize(img, (limit, int(round(H * scale))),
                          interpolation=cv2.INTER_AREA)
         H, W = img.shape[:2]
 
+    # ★ 缩放比要报**实际用了的**那个。
+    #   之前这里在 W<=limit 时硬写 1.0, 在缩过宽时又拿 limit/W 重算 ——
+    #   而 W 这时已经是缩完的值了, 算出来是 1.0。两条路都报错。
+    #   实测: 4064x3048 的图报成"缩放 1.000"(其实缩了 0.236),
+    #         720x1600 的图报成"缩放 1.333"(其实一点没缩)。
     if H <= limit:
-        return [(img, 0, H)], 1.0
+        return [(img, 0, H)], scale
 
     step = max(1, limit - overlap)
     pieces = []
@@ -63,7 +70,7 @@ def tile(img: np.ndarray, limit: int, overlap: int):
         if y2 >= H:
             break
         y += step
-    return pieces, (limit / W if W else 1.0)
+    return pieces, scale
 
 
 def main() -> None:

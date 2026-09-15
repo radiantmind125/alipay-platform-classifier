@@ -29,9 +29,31 @@ SKIP_PREFIX = ("batch", "worker", "inference", "summary", "manifest", "sha256sum
                "_tiles")
 
 
-def load_results(results_dir: Path) -> dict[str, dict]:
-    """把结果目录里每份单张 JSON 读出来, 按**文件名主干**索引。"""
-    out = {}
+# 结果 JSON 里记原图路径的字段可能叫什么。按顺序试。
+SOURCE_KEYS = ("input_image", "source", "image", "image_path", "file", "input")
+
+
+def result_key(obj: dict, path: Path) -> str:
+    """这份结果对应的是哪张输入图 —— 返回那张图的文件名主干。
+
+    ★★ **不能按结果文件的文件名来配。** 实测批跑脚本把每张结果写成
+       workers\\worker-NN\\results\\input-list\\<sha256>.json,
+       文件名是**哈希**, 和输入图的名字毫无关系。
+       按文件名配的话一个都配不上(实测 293 块全部配不上)。
+       真正的对应关系在结果内部记着原图路径的那个字段里。
+    """
+    for k in SOURCE_KEYS:
+        v = obj.get(k)
+        if v:
+            return Path(str(v)).stem
+    return path.stem                      # 实在找不到就退回文件名
+
+
+def load_results(results_dir: Path) -> tuple[dict[str, dict], int, set]:
+    """读出所有单张结果。返回(按输入图主干索引的结果, 没认出来源的份数, 见过的键)。"""
+    out: dict[str, dict] = {}
+    unknown = 0
+    keys_seen: set = set()
     for p in sorted(results_dir.rglob("*.json")):
         if p.name.lower().startswith(SKIP_PREFIX):
             continue
@@ -39,9 +61,13 @@ def load_results(results_dir: Path) -> dict[str, dict]:
             obj = json.loads(p.read_text(encoding="utf-8-sig"))
         except Exception:
             continue
-        if isinstance(obj, dict):
-            out[p.stem] = obj
-    return out
+        if not isinstance(obj, dict):
+            continue                      # 清单是个数组, 不是单张结果
+        keys_seen.update(obj.keys())
+        if not any(obj.get(k) for k in SOURCE_KEYS):
+            unknown += 1
+        out[result_key(obj, p)] = obj
+    return out, unknown, keys_seen
 
 
 def merge_one(tile_objs: list[dict]) -> tuple[dict, list[str]]:
@@ -94,7 +120,11 @@ def main() -> None:
         return
     manifest = json.loads(mf.read_text(encoding="utf-8"))
 
-    results = load_results(a.results)
+    results, unknown, keys_seen = load_results(a.results)
+    if unknown:
+        print(f'★ 有 {unknown} 份结果里找不到记原图路径的字段。')
+        print(f'  结果里实际出现过的键: {sorted(keys_seen)}')
+        print('  —— 把其中一份结果发我, 我把字段名加进 SOURCE_KEYS。')
     if not results:
         print(f"{a.results} 里没读到任何单张结果 JSON")
         return
@@ -125,6 +155,12 @@ def main() -> None:
             json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(f"清单里 {len(manifest)} 块, 找不到结果的 {missing} 块")
+    if missing == len(manifest) and manifest:
+        print("★★ 一块都没配上 —— 多半是结果里记原图路径的字段名和预期不一样。")
+        print(f"   清单里的块名例如: {Path(manifest[0]['tile']).stem}")
+        ks = sorted(results.keys())[:3]
+        print(f"   结果那边认出来的键例如: {ks}")
+        print("   两边对不上就把一份结果 JSON 发我。")
     print(f"合出 {len(groups)} 张原图 -> {a.out}")
     print(f"★ 有冲突的图: {n_conf_imgs} 张")
     if conflict_counter:
