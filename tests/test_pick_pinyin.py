@@ -107,6 +107,63 @@ def test_半行不能让续跑崩掉(tmp_path: Path) -> None:
     assert len(read_all(m)) == 1
 
 
+def _fake_img(p: Path) -> None:
+    import cv2
+    import numpy as np
+    cv2.imencode(".png", np.full((400, 200, 3), 255, np.uint8))[1].tofile(str(p))
+
+
+def test_联系表要把过阈值和没过的都贴出来(tmp_path: Path) -> None:
+    """★★ 这一步是那次踩坑的解药 —— 分数表看着正常, 打开图才发现全是误判。
+
+    所以要能贴出来给人看, 而且**阈值上下都要有**, 好看清楚边界在哪。
+    """
+    from pick_pinyin import make_sheet
+
+    imgs = tmp_path / "imgs"
+    imgs.mkdir()
+    rows = []
+    for i, s in enumerate([0.30, 0.20, 0.08, 0.03, 0.01, 0.00]):
+        f = imgs / f"{i}.png"
+        _fake_img(f)
+        rows.append({"path": str(f), "score": s})
+    m = tmp_path / "m.jsonl"
+    m.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+
+    sheet = tmp_path / "s.png"
+    make_sheet(m, sheet, DEFAULT_THRESHOLD, n=6)
+    assert sheet.exists() and sheet.stat().st_size > 0
+
+
+def test_一张都没过阈值也要贴得出来(tmp_path: Path) -> None:
+    """★ 全在阈值底下时不能崩, 也不能什么都不贴 —— 那样就没法确认是真没有。"""
+    from pick_pinyin import make_sheet
+
+    imgs = tmp_path / "imgs"
+    imgs.mkdir()
+    rows = []
+    for i in range(4):
+        f = imgs / f"{i}.png"
+        _fake_img(f)
+        rows.append({"path": str(f), "score": 0.001})
+    m = tmp_path / "m.jsonl"
+    m.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+
+    sheet = tmp_path / "s.png"
+    make_sheet(m, sheet, DEFAULT_THRESHOLD, n=6)
+    assert sheet.exists(), "一张都没过也得贴出来给人确认"
+
+
+def test_图找不着了不能崩(tmp_path: Path) -> None:
+    """名单是以前跑的, 图后来被挪走了 —— 要好好说一句, 不能抛异常。"""
+    from pick_pinyin import make_sheet
+
+    m = tmp_path / "m.jsonl"
+    m.write_text(json.dumps({"path": str(tmp_path / "没了.png"), "score": 0.2}),
+                 encoding="utf-8")
+    make_sheet(m, tmp_path / "s.png", DEFAULT_THRESHOLD)   # 不该抛
+
+
 def test_扫库要给根目录(tmp_path: Path) -> None:
     txt = _run("--out", str(tmp_path / "n.jsonl"))
     assert "--root" in txt

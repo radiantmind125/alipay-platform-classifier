@@ -223,6 +223,70 @@ def report(out: Path, threshold: float) -> None:
     print("=" * 66)
 
 
+def make_sheet(out: Path, sheet: Path, threshold: float, n: int = 12) -> None:
+    """把分数**跨着挡次**抽几张贴成一张图, 好让人肉眼核。
+
+    ★★★★★ 这一步不是可选的装饰。阈值 0.01 那次, 分数表看着完全正常
+       (挑出 2.12%, 听着很合理), **是打开图看才发现一张拼音都没有的**。
+       光看数字永远发现不了这种错, 所以把它做进工具里。
+
+    抽法是**按分数分层抽**, 不是只抽最高的 —— 要看的正是阈值附近那些。
+    """
+    rows = [r for r in read_all(out) if r.get("score") is not None]
+    if not rows:
+        print("没有可看的记录")
+        return
+    rows.sort(key=lambda r: -r["score"])
+    hits = [r for r in rows if r["score"] >= threshold]
+    picked = []
+    if hits:
+        step = max(1, len(hits) // n)
+        picked = hits[::step][:n]
+    if len(picked) < n:      # 过阈值的不够就补几张阈值底下的, 好看清楚边界在哪
+        below = [r for r in rows if r["score"] < threshold][: n - len(picked)]
+        picked += below
+    if not picked:
+        print("没有可看的记录")
+        return
+
+    cells = []
+    for r in picked:
+        src = Path(r["path"])
+        if not src.exists():
+            continue
+        img = cv2.imdecode(np.fromfile(str(src), np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            continue
+        h = img.shape[0]
+        crop = img[int(h * 0.25): int(h * 0.55), :]        # 正文字段那一段
+        if crop.size == 0:
+            continue
+        crop = cv2.resize(crop, (520, max(1, int(520 * crop.shape[0] / crop.shape[1]))))
+        col = (0, 0, 255) if r["score"] >= threshold else (128, 128, 128)
+        cv2.putText(crop, f"{r['score']:.3f}", (8, 26),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2)
+        cells.append(crop)
+    if not cells:
+        print("图都读不出来(路径可能变了)")
+        return
+
+    hh = max(c.shape[0] for c in cells)
+    cells = [cv2.copyMakeBorder(c, 0, hh - c.shape[0], 0, 0,
+                                cv2.BORDER_CONSTANT, value=(255, 255, 255))
+             for c in cells]
+    per = 3
+    usable = len(cells) - len(cells) % per
+    if usable == 0:
+        usable, per = len(cells), len(cells)
+    grid = np.vstack([np.hstack(cells[i:i + per]) for i in range(0, usable, per)])
+    sheet.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imencode(".png", grid)[1].tofile(str(sheet))
+    print(f"贴了 {usable} 张 -> {sheet}")
+    print("★ 红字是过阈值的, 灰字是没过的。")
+    print("★★ 打开看一眼: 红字那些**汉字头上到底有没有拼音**。")
+    print("   没有的话阈值就还是松的, 别拿这批去训练。")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", type=Path, default=None, help="图库根目录(递归扫)")
@@ -230,6 +294,8 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) - 1))
     ap.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     ap.add_argument("--report", action="store_true", help="只看已有名单, 不重扫")
+    ap.add_argument("--sheet", type=Path, default=None,
+                    help="★ 抽几张贴成一张图肉眼核 —— 光看数字发现不了误判")
     ap.add_argument("--copy-to", type=Path, default=None, help="把挑出来的复制到这里")
     ap.add_argument("--limit", type=int, default=0, help="最多复制多少张(0 = 不限)")
     ap.add_argument("--chunk", type=int, default=200)
@@ -255,6 +321,12 @@ def main() -> None:
             shutil.copy2(src, dst)
             n += 1
         print(f"复制了 {n} 张 -> {a.copy_to}")
+        return
+
+    if a.sheet:
+        report(a.out, a.threshold)
+        print()
+        make_sheet(a.out, a.sheet, a.threshold)
         return
 
     if a.report:
