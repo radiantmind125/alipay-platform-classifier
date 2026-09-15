@@ -98,3 +98,24 @@ def test_合并器写的元字段不参与统计(tmp_path: Path) -> None:
     line = [l for l in out.splitlines() if l.startswith("切片")][0]
     # 只有 amount 和 note 两个真字段
     assert line.split()[2] == "2", f"元字段混进统计了: {line}"
+
+
+def test_文件名带点时不能把不同的图数成同一张(tmp_path: Path) -> None:
+    """★ 实测踩到的坑: 我们的文件名里带点(r0.252_f0.69_s3_voucher_...),
+
+    对已经是主干的名字再取一次 Path.stem, 会把最后一段当扩展名剥掉:
+        "r0.252_f0.69_s3_x"  --stem-->  "r0.252_f0"
+    于是好几个不同的文件塌成同一个键, 后面的覆盖前面的, 图数被数少。
+    实测 12 张被数成 8 张。
+    """
+    d = tmp_path / "dotted"
+    d.mkdir(parents=True)
+    names = ["r0.252_f0.69_s3_voucher_AAA", "r0.253_f0.70_s3_voucher_BBB",
+             "r0.254_f0.71_s3_voucher_CCC", "r0.255_f0.72_s3_voucher_DDD"]
+    for n in names:
+        (d / f"{n}.json").write_text(json.dumps({"amount": "-1.00"}),
+                                     encoding="utf-8")
+    out = _run(f"原图={d}")
+    line = [l for l in out.splitlines() if l.startswith("原图")][0]
+    assert line.split()[1] == str(len(names)), \
+        f"{len(names)} 张被数成了 {line.split()[1]} 张: {line}"

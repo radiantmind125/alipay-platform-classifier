@@ -54,9 +54,20 @@ def load_dir(d: Path) -> dict[str, dict]:
         except Exception:
             continue
         if isinstance(o, dict):
-            # 合并器写的 _source_image 优先, 否则用文件名
-            key = str(o.get("_source_image") or p.stem)
-            out[Path(key).stem] = o
+            # ★★ 这里**不能**对 p.stem 再取一次 stem。
+            #   我们的文件名里带点(r0.252_f0.69_s3_voucher_...),
+            #   Path.stem 会把最后一段当扩展名剥掉:
+            #       "r0.252_f0.69_s3_x"  --stem-->  "r0.252_f0"
+            #   于是好几个不同的文件塌成同一个键, 后面的把前面的覆盖掉,
+            #   统计出来的图数会**少**。实测 12 张被数成 8 张。
+            #   _source_image 是带扩展名的原图名, 那个才需要剥一次。
+            src = o.get("_source_image")
+            key = Path(str(src)).stem if src else p.stem
+            if key in out:
+                # 同名冲突要报出来, 不能默默覆盖
+                out[f"{key}#{len(out)}"] = o
+            else:
+                out[key] = o
     return out
 
 
