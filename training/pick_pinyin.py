@@ -300,13 +300,23 @@ def main() -> None:
                     help="★ 抽几张贴成一张图肉眼核 —— 光看数字发现不了误判")
     ap.add_argument("--copy-to", type=Path, default=None, help="把挑出来的复制到这里")
     ap.add_argument("--limit", type=int, default=0, help="最多复制多少张(0 = 不限)")
+    ap.add_argument("--copy-clean", action="store_true",
+                    help="★ 反过来复制**没有拼音**的那些(分数最低的), 用来做对照组。"
+                         "对照组必须和拼音组来自**同一个库**, 否则比的是两批不同的图。")
     ap.add_argument("--chunk", type=int, default=200)
     a = ap.parse_args()
 
     if a.copy_to:
-        rows = [r for r in read_all(a.out)
-                if r.get("score") is not None and r["score"] >= a.threshold]
-        rows.sort(key=lambda r: -r["score"])    # 分数高的优先, 最像拼音的先要
+        if a.copy_clean:
+            # ★★ 对照组: 取分数**最低**的, 也就是最确定没有拼音的。
+            #   不是随便抽 —— 随便抽会混进阈值附近那些拿不准的。
+            rows = [r for r in read_all(a.out)
+                    if r.get("score") is not None and r["score"] < a.threshold]
+            rows.sort(key=lambda r: r["score"])
+        else:
+            rows = [r for r in read_all(a.out)
+                    if r.get("score") is not None and r["score"] >= a.threshold]
+            rows.sort(key=lambda r: -r["score"])    # 分数高的优先, 最像拼音的先要
         if a.limit:
             rows = rows[: a.limit]
         a.copy_to.mkdir(parents=True, exist_ok=True)
@@ -322,7 +332,10 @@ def main() -> None:
                 i += 1
             shutil.copy2(src, dst)
             n += 1
-        print(f"复制了 {n} 张 -> {a.copy_to}")
+        what = "**没有拼音的**(对照组)" if a.copy_clean else "挑出来的"
+        print(f"复制了 {n} 张{what} -> {a.copy_to}")
+        if rows:
+            print(f"  分数范围 {rows[0]['score']:.4f} 到 {rows[min(n, len(rows))-1]['score']:.4f}")
         return
 
     if a.sheet:
