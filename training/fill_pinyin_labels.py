@@ -34,6 +34,7 @@ import csv
 import os
 import re
 import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -74,6 +75,56 @@ def classify(text: str) -> str:
     return "可用"
 
 
+# ★★★★★ 每个子进程自己留一份 RapidOCR。模型只在第一次调用时加载(一两秒),
+#   之后这个进程里一直复用。不能在主进程建好传进来 —— onnxruntime 的 session
+#   带着本地句柄, pickle 不过去。
+_OCR = None
+
+
+def _init_worker() -> None:
+    """子进程起来时先把线程数按死成 1。
+
+    ★★ onnxruntime 默认会自己开一堆 intra-op 线程。8 个进程 x 每个开 8 条线程
+       = 64 条抢 8 个核, 抢得比单进程还慢。**并行要放在进程这一层**:
+       一个进程读一张图, 线程数按死成 1。
+    """
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    cv2.setNumThreads(1)
+
+
+def _read_one(path_str: str) -> tuple[str, str]:
+    """读一张标签裁图, 返回 (文字, 判成哪一类)。
+
+    ★ 出错在这里就地兜住 —— 13.8 万次调用, 一次没兜住就是几个小时白跑。
+      子进程里抛出去的异常会把整个进程池带塌, 比单进程更糟。
+    """
+    global _OCR
+    try:
+        p = Path(path_str)
+        if not p.exists():
+            return "", "图不在"
+        img = cv2.imdecode(np.fromfile(str(p), np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            return "", "读不了"
+        if _OCR is None:
+            from rapidocr_onnxruntime import RapidOCR
+            _OCR = RapidOCR()
+        res, _ = _OCR(img)
+        # 一行可能读出多段(左标签 + 右取值), 按 x 排好拼起来
+        parts = []
+        for box, t, _conf in (res or []):
+            s = (t or "").strip()
+            if s:
+                parts.append((min(pt[0] for pt in box), s))
+        parts.sort()
+        text = " ".join(s for _, s in parts)
+        return text, classify(text)
+    except Exception as e:                     # noqa: BLE001
+        return "", f"出错({type(e).__name__})"
+
+
 def write_out(rows: list[dict], out: Path) -> None:
     """先写临时文件再改名 —— 保证盘上那份任何时候都是完整可读的。"""
     tmp = out.with_suffix(out.suffix + ".tmp")
@@ -91,6 +142,9 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--resume", action="store_true",
                     help="接着上次跑, 已经填过的行跳过")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="几个进程一起读。★★ 默认 1 是**量出来的**, 不是图省事 —— "
+                         "onnxruntime 自己就会用多核, 多开进程反而更慢, 见下面注释")
     a = ap.parse_args()
 
     man = a.pairs / "_pairs.csv"
@@ -131,45 +185,35 @@ def main() -> None:
         return
 
     try:
-        from rapidocr_onnxruntime import RapidOCR
+        import rapidocr_onnxruntime  # noqa: F401
     except ImportError:
         print("没装 rapidocr_onnxruntime:  pip install rapidocr_onnxruntime")
         return
-    ocr = RapidOCR()
 
     label_dir = a.pairs / "label"
-    print(f"要读 {len(todo):,} 条")
+    paths = [str(label_dir / r["file"]) for r in todo]
+    w = max(1, a.workers)
+    print(f"要读 {len(todo):,} 条,  {w} 个进程")
     t0 = time.time()
 
-    for i, r in enumerate(todo, 1):
-        # ★★★ 每一行单独兜住。13.8 万次调用, 只要一次抛异常没兜住,
-        #   前面几个小时就全没了。出错就记成不可用, 接着跑。
-        try:
-            p = label_dir / r["file"]
-            if not p.exists():
-                r["text"], r["usable"], r["kind"] = "", "0", "图不在"
-            else:
-                img = cv2.imdecode(np.fromfile(str(p), np.uint8), cv2.IMREAD_COLOR)
-                if img is None:
-                    r["text"], r["usable"], r["kind"] = "", "0", "读不了"
-                else:
-                    res, _ = ocr(img)
-                    # 一行可能读出多段(左标签 + 右取值), 按 x 排好拼起来
-                    parts = []
-                    for box, t, _conf in (res or []):
-                        s = (t or "").strip()
-                        if s:
-                            parts.append((min(pt[0] for pt in box), s))
-                    parts.sort()
-                    text = " ".join(s for _, s in parts)
-                    kind = classify(text)
-                    r["text"] = text
-                    r["kind"] = kind
-                    r["usable"] = "1" if kind == "可用" else "0"
-        except Exception as e:                     # noqa: BLE001
-            r["text"], r["usable"] = "", "0"
-            r["kind"] = f"出错({type(e).__name__})"
-
+    # ★★★★★ workers=1 时**不开进程池**, 就在本进程里顺着读。
+    #   这不是图省事 —— onnxruntime 自己会把一次推理摊到多个核上,
+    #   开进程池反而要把每个进程的线程数按死成 1(不按死就 N 进程 x N 线程互相抢)。
+    #
+    #   实测 8 核机器, 同样 150 行:
+    #       workers=1  本进程跑, ORT 自己用多核     0.89 秒/行
+    #       workers=2  2 进程 x 每进程 1 线程        0.81 秒/行   (在噪声范围内)
+    #       workers=4  4 进程 x 每进程 1 线程        1.03 秒/行   <- 明显更慢
+    #   重复跑的抖动约 6%, 所以 workers=2 和 1 其实没差, 4 是真慢。
+    #
+    # ★ 我一开始以为"单进程"就是慢的原因, 加了进程池。**量完发现不是** ——
+    #   OCR 从来就没卡在单核上。要真想快, 得靠 GPU, 不是靠多开进程。
+    #   进程池留着, 但默认 1。
+    def emit(i: int, text: str, kind: str) -> None:
+        r = todo[i - 1]
+        r["text"] = text
+        r["kind"] = kind
+        r["usable"] = "1" if kind == "可用" else "0"
         if i % 500 == 0 or i == len(todo):
             el = time.time() - t0
             rate = i / max(el, 1e-6)
@@ -178,6 +222,15 @@ def main() -> None:
                   f"还要约 {left/3600:.1f} 小时", flush=True)
         if i % CHECKPOINT == 0:
             write_out(rows, out)
+
+    if w == 1:
+        for i, p in enumerate(paths, 1):
+            emit(i, *_read_one(p))
+    else:
+        # ex.map 按**送进去的顺序**把结果吐回来, 所以直接和 todo 对得上号
+        with ProcessPoolExecutor(max_workers=w, initializer=_init_worker) as ex:
+            for i, (text, kind) in enumerate(ex.map(_read_one, paths, chunksize=16), 1):
+                emit(i, text, kind)
 
     write_out(rows, out)
 
