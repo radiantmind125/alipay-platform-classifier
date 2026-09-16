@@ -1,6 +1,6 @@
 """对 label/ 里的裁图跑 OCR, 把标签文字填进 _pairs.csv。
 
-和裁图分成两步, 是因为 OCR 很慢(7159 张约 12 万行, 好几个小时),
+和裁图分成两步, 是因为 OCR 很慢(7205 张约 13.8 万行, 约 8 小时),
 分开之后重跑 OCR 不用重裁, 调 OCR 参数也不用动裁图。
 
 质量过滤
@@ -9,19 +9,31 @@
 
     空的                   什么都没读出来
     纯拉丁                 说明裁行没裁干净, 拼音漏进来了
+    混着拼音               汉字里夹着一段拼音, 同上
     太短                   一两个字符, 多半是噪声
 
-★ 剩下的才写进 text 列。`usable` 列记这一条能不能用。
+★ 剩下的才写进 text 列。`usable` 列记这一条能不能用, `kind` 列记判成了哪一类。
 
 ★★ 跑完**一定要人工核几十条**再往下走。这里量的是"读出来了没有",
    不是"读对了没有" —— 那个只有人眼能判。
+
+跑这么久, 这两件必须有
+----------------------
+1. **中途存盘**。每 2000 行落一次盘, 用临时文件改名, 保证盘上那份永远是完整的。
+   不然跑到第 7 小时断电, 8 小时白跑。
+
+2. **一行出错不许带塌整趟**。13.8 万次 OCR, 只要有一张图让 ocr() 抛异常,
+   整趟就没了。所以每一行单独兜住, 出错就记成不可用接着跑。
+
+★ 断了用 --resume 接着跑, 已经填过的行直接跳过, 不重读。
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import os
 import re
-import sys
+import time
 from pathlib import Path
 
 import cv2
@@ -43,6 +55,11 @@ LATIN_ONLY = re.compile(r"^[a-zA-ZÀ-ɏ\s'·]+$")
 LATIN_RUN = re.compile(r"[a-zA-ZÀ-ɏ]{4,}")
 MIN_LEN = 2
 
+FIELDS = ["file", "source", "row", "label_y0", "label_y1",
+          "input_y0", "input_y1", "has_pinyin", "text", "usable", "kind"]
+
+CHECKPOINT = 2000        # 每这么多行落一次盘
+
 
 def classify(text: str) -> str:
     s = (text or "").strip()
@@ -57,11 +74,23 @@ def classify(text: str) -> str:
     return "可用"
 
 
+def write_out(rows: list[dict], out: Path) -> None:
+    """先写临时文件再改名 —— 保证盘上那份任何时候都是完整可读的。"""
+    tmp = out.with_suffix(out.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+    os.replace(tmp, out)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pairs", type=Path, required=True,
                     help="make_pinyin_pairs.py 出的目录")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--resume", action="store_true",
+                    help="接着上次跑, 已经填过的行跳过")
     a = ap.parse_args()
 
     man = a.pairs / "_pairs.csv"
@@ -74,6 +103,32 @@ def main() -> None:
     if not rows:
         print("清单是空的")
         return
+    for r in rows:
+        r.setdefault("text", "")
+        r.setdefault("usable", "")
+        r.setdefault("kind", "")
+
+    out = a.pairs / "_pairs_labeled.csv"
+
+    # ---------- 接着上次跑 ----------
+    done = 0
+    if a.resume and out.exists():
+        old = {r["file"]: r for r in csv.DictReader(out.open(encoding="utf-8-sig"))}
+        for r in rows:
+            o = old.get(r["file"])
+            if o and (o.get("kind") or "").strip():
+                r["text"], r["usable"], r["kind"] = o.get("text", ""), o.get("usable", "0"), o["kind"]
+                done += 1
+        print(f"★ 接着上次跑: 已经填过 {done:,} 行, 这趟只读剩下的 {len(rows)-done:,} 行")
+    elif out.exists():
+        print(f"★★ {out.name} 已经在了。想接着上次跑就加 --resume,")
+        print("   不加的话下面会从头读一遍, 把它覆盖掉。")
+
+    todo = [r for r in rows if not (r.get("kind") or "").strip()]
+    if not todo:
+        print("没有要读的行了")
+        write_out(rows, out)
+        return
 
     try:
         from rapidocr_onnxruntime import RapidOCR
@@ -83,53 +138,60 @@ def main() -> None:
     ocr = RapidOCR()
 
     label_dir = a.pairs / "label"
-    print(f"要读 {len(rows):,} 条")
+    print(f"要读 {len(todo):,} 条")
+    t0 = time.time()
+
+    for i, r in enumerate(todo, 1):
+        # ★★★ 每一行单独兜住。13.8 万次调用, 只要一次抛异常没兜住,
+        #   前面几个小时就全没了。出错就记成不可用, 接着跑。
+        try:
+            p = label_dir / r["file"]
+            if not p.exists():
+                r["text"], r["usable"], r["kind"] = "", "0", "图不在"
+            else:
+                img = cv2.imdecode(np.fromfile(str(p), np.uint8), cv2.IMREAD_COLOR)
+                if img is None:
+                    r["text"], r["usable"], r["kind"] = "", "0", "读不了"
+                else:
+                    res, _ = ocr(img)
+                    # 一行可能读出多段(左标签 + 右取值), 按 x 排好拼起来
+                    parts = []
+                    for box, t, _conf in (res or []):
+                        s = (t or "").strip()
+                        if s:
+                            parts.append((min(pt[0] for pt in box), s))
+                    parts.sort()
+                    text = " ".join(s for _, s in parts)
+                    kind = classify(text)
+                    r["text"] = text
+                    r["kind"] = kind
+                    r["usable"] = "1" if kind == "可用" else "0"
+        except Exception as e:                     # noqa: BLE001
+            r["text"], r["usable"] = "", "0"
+            r["kind"] = f"出错({type(e).__name__})"
+
+        if i % 500 == 0 or i == len(todo):
+            el = time.time() - t0
+            rate = i / max(el, 1e-6)
+            left = (len(todo) - i) / max(rate, 1e-6)
+            print(f"  {i:,}/{len(todo):,}   {rate:.1f} 行/秒   "
+                  f"还要约 {left/3600:.1f} 小时", flush=True)
+        if i % CHECKPOINT == 0:
+            write_out(rows, out)
+
+    write_out(rows, out)
 
     tally: dict[str, int] = {}
-    for i, r in enumerate(rows, 1):
-        p = label_dir / r["file"]
-        if not p.exists():
-            r["text"], r["usable"] = "", "0"
-            tally["图不在"] = tally.get("图不在", 0) + 1
-            continue
-        img = cv2.imdecode(np.fromfile(str(p), np.uint8), cv2.IMREAD_COLOR)
-        if img is None:
-            r["text"], r["usable"] = "", "0"
-            tally["读不了"] = tally.get("读不了", 0) + 1
-            continue
-        res, _ = ocr(img)
-        # 一行可能读出多段(左标签 + 右取值), 按 x 排好拼起来
-        parts = []
-        for box, t, conf in (res or []):
-            s = (t or "").strip()
-            if s:
-                parts.append((min(pt[0] for pt in box), s))
-        parts.sort()
-        text = " ".join(s for _, s in parts)
-
-        kind = classify(text)
-        tally[kind] = tally.get(kind, 0) + 1
-        r["text"] = text
-        r["usable"] = "1" if kind == "可用" else "0"
-
-        if i % 500 == 0:
-            print(f"  {i:,}/{len(rows):,}")
-
-    out = a.pairs / "_pairs_labeled.csv"
-    fields = list(rows[0].keys())
-    if "usable" not in fields:
-        fields.append("usable")
-    with out.open("w", encoding="utf-8-sig", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
-        w.writeheader()
-        w.writerows(rows)
-
+    for r in rows:
+        k = r.get("kind") or "空"
+        tally[k] = tally.get(k, 0) + 1
     usable = sum(1 for r in rows if r.get("usable") == "1")
     py_usable = sum(1 for r in rows
                     if r.get("usable") == "1" and r.get("has_pinyin") == "1")
+
     print()
     print("=" * 60)
-    print(f"读完 {len(rows):,} 条")
+    print(f"读完 {len(rows):,} 条  (这趟读了 {len(todo):,} 条, 用时 {(time.time()-t0)/3600:.1f} 小时)")
     print("=" * 60)
     for k, v in sorted(tally.items(), key=lambda kv: -kv[1]):
         print(f"  {k:<24} {v:6,d}  ({v/len(rows):5.1%})")
