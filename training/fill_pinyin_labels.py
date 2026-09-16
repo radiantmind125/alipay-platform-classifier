@@ -79,15 +79,40 @@ def classify(text: str) -> str:
 #   之后这个进程里一直复用。不能在主进程建好传进来 —— onnxruntime 的 session
 #   带着本地句柄, pickle 不过去。
 _OCR = None
+_OCR_KW: dict = {}
+
+# ★★★★★ det 的缩放参数 —— 这两个值是这一步快慢的**关键**, 不是可调可不调的旋钮。
+#
+#   rapidocr 默认 limit_type=min / limit_side_len=736: 把图**按短边**放大到 736。
+#   我们送进去的是 1260x36 这种细长条, 短边 36 -> 放大 20 倍 -> 约 25000x736,
+#   接近两千万像素, 就为了读一条 36 像素高的字。实测 0.6 行/秒, 13.4 万行要 58 小时。
+#
+#   改成按短边只放大到 64:
+#       快 3.3 倍
+#       而且**标签更干净**: 可用率 85% -> 90%, 混着拼音的从 12 条降到 6 条
+#
+#   为什么更干净: 放大 20 倍之后, 拼音的碎笔画也被放成了"像字的东西",
+#   检测器就给它画框, 于是 ciuallg / a SI all / Sln 这类噪声混进标签。
+#   不放那么大, 检测器自然就不理它们了。
+DET_TYPE = "min"
+DET_SIDE = 64
+
+# ★★★ 角度分类器也关掉。它是用来判一条文本是不是倒着/竖着的,
+#   而我们的裁图是**自己按水平行裁出来的**, 永远是正的, 这一步纯属白花时间。
+#   实测再快 1.45 倍, 可用率还微涨(135/150 -> 136/150)。
+USE_CLS = False
 
 
-def _init_worker() -> None:
+def _init_worker(kw: dict | None = None) -> None:
     """子进程起来时先把线程数按死成 1。
 
     ★★ onnxruntime 默认会自己开一堆 intra-op 线程。8 个进程 x 每个开 8 条线程
        = 64 条抢 8 个核, 抢得比单进程还慢。**并行要放在进程这一层**:
        一个进程读一张图, 线程数按死成 1。
     """
+    global _OCR_KW
+    if kw:
+        _OCR_KW = kw
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["OPENBLAS_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
@@ -110,8 +135,8 @@ def _read_one(path_str: str) -> tuple[str, str]:
             return "", "读不了"
         if _OCR is None:
             from rapidocr_onnxruntime import RapidOCR
-            _OCR = RapidOCR()
-        res, _ = _OCR(img)
+            _OCR = RapidOCR(**_OCR_KW)
+        res, _ = _OCR(img, use_cls=USE_CLS)
         # 一行可能读出多段(左标签 + 右取值), 按 x 排好拼起来
         parts = []
         for box, t, _conf in (res or []):
@@ -142,6 +167,10 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--resume", action="store_true",
                     help="接着上次跑, 已经填过的行跳过")
+    ap.add_argument("--det-side", type=int, default=DET_SIDE,
+                    help="det 按短边缩放到多少。★ 默认 64 是量出来的, "
+                         "rapidocr 原厂的 736 会把细长条放大二十倍, 慢 3.3 倍还更脏")
+    ap.add_argument("--det-type", default=DET_TYPE, choices=["min", "max"])
     ap.add_argument("--workers", type=int, default=1,
                     help="几个进程一起读。★★ 默认 1 是**量出来的**, 不是图省事 —— "
                          "onnxruntime 自己就会用多核, 多开进程反而更慢, 见下面注释")
@@ -190,10 +219,13 @@ def main() -> None:
         print("没装 rapidocr_onnxruntime:  pip install rapidocr_onnxruntime")
         return
 
+    global _OCR_KW
+    _OCR_KW = {"det_limit_type": a.det_type, "det_limit_side_len": a.det_side}
+
     label_dir = a.pairs / "label"
     paths = [str(label_dir / r["file"]) for r in todo]
     w = max(1, a.workers)
-    print(f"要读 {len(todo):,} 条,  {w} 个进程")
+    print(f"要读 {len(todo):,} 条,  {w} 个进程,  det {a.det_type}/{a.det_side}")
     t0 = time.time()
 
     # ★★★★★ workers=1 时**不开进程池**, 就在本进程里顺着读。
@@ -207,8 +239,13 @@ def main() -> None:
     #   重复跑的抖动约 6%, 所以 workers=2 和 1 其实没差, 4 是真慢。
     #
     # ★ 我一开始以为"单进程"就是慢的原因, 加了进程池。**量完发现不是** ——
-    #   OCR 从来就没卡在单核上。要真想快, 得靠 GPU, 不是靠多开进程。
-    #   进程池留着, 但默认 1。
+    #   OCR 从来就没卡在单核上。换成小图之后又量了一遍, 还是不快反慢
+    #   (3.20 / 2.40 / 2.29 行每秒, workers 1 / 4 / 7)。进程池留着, 但默认 1。
+    #
+    # ★★★ 真正快起来靠的是另外两件, 都在上面的常量里:
+    #       det 不要把细长条放大二十倍   快 3.3 倍, 标签还更干净
+    #       关掉角度分类                 再快 1.45 倍
+    #   合起来 1.14 -> 5.13 行/秒, **4.5 倍**。
     def emit(i: int, text: str, kind: str) -> None:
         r = todo[i - 1]
         r["text"] = text
@@ -228,7 +265,8 @@ def main() -> None:
             emit(i, *_read_one(p))
     else:
         # ex.map 按**送进去的顺序**把结果吐回来, 所以直接和 todo 对得上号
-        with ProcessPoolExecutor(max_workers=w, initializer=_init_worker) as ex:
+        with ProcessPoolExecutor(max_workers=w, initializer=_init_worker,
+                                 initargs=(_OCR_KW,)) as ex:
             for i, (text, kind) in enumerate(ex.map(_read_one, paths, chunksize=16), 1):
                 emit(i, text, kind)
 
