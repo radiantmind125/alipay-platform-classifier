@@ -52,6 +52,63 @@ namespace Ssp
         /// </summary>
         public const double AnnotationGapRatio = 0.5;
 
+        /// <summary>
+        /// ★★★★★ 带拼音时, 文字框的**顶**被顶高了多少 —— 相对**正文字高**的倍数。
+        ///
+        /// 拼音把 OCR 的框撑大了: 框会把上面那行拼音一起圈进去, 顶就比正常位置高。
+        /// 按位置判字段的规则要补这个差, 补多少就是这个数。
+        ///
+        /// <c>yOffset = -(int)Math.Round(AnnotationShiftRatio * 正文字高)</c>
+        /// 或者直接用 <see cref="AnnotationOffset"/>。
+        ///
+        /// ★ 这个 0.46 是**量出来的**, 不是拍的。
+        ///   2026-09-16 在 800 张带拼音的白底回单上量:
+        /// <code>
+        ///                   中位   25分位  75分位  95分位
+        ///     拼音行高       9.0     8.0    10.0    11.0
+        ///     拼音底到汉字顶 3.0     2.0     4.0     5.0
+        ///     框顶上移量    12.0    10.0    13.0    16.0     <- 就是这个
+        ///     正文字高      26.0    23.0    30.0    35.0
+        /// </code>
+        ///   12 / 26 = 0.46。对得上类注释里 011.jpg 那组(框 29 -> 44, 顶高 15 像素)。
+        ///
+        /// ★★ 给倍数而不是给像素, 是因为**不同机型分辨率不一样**, 像素数会跟着变;
+        ///   除以正文字高之后就稳了。页高 2412 的图上, 0.46 x 26 就是 12 像素。
+        ///
+        /// ★★★ **这个偏移是个常数, 不随行号变。** 本来担心每行上面都加一行拼音,
+        ///   下面的行会被累积推下去(那样第 N 行就得偏 N 倍, 一个数就不够用)。
+        ///   实测行距(归一化到页高): 带拼音 0.04751, 不带 0.04829, 比值 0.98;
+        ///   行距除以行高 3.04 对 3.03。**拼音是挤在原有行距里的, app 没另开空间**,
+        ///   所以没有累积推移, 一个常数就够。
+        /// </summary>
+        public const double AnnotationShiftRatio = 0.46;
+
+        /// <summary>
+        /// 算带拼音时该用的 <c>yOffset</c>(像素, **负数**表示向上)。
+        ///
+        /// <paramref name="bodyTextHeight"/> 传正文字高 —— <c>PinyinCheck.Check</c> 返回的
+        /// <c>PinyinResult.BigHeight</c> 就是这个数(块高的 75 分位)。
+        ///
+        /// 用法:
+        /// <code>
+        ///     var pr = PinyinCheck.Check(image);
+        ///     int off = pr.Verdict == PinyinVerdict.HasPinyin
+        ///             ? TextRegion.AnnotationOffset(pr.BigHeight)
+        ///             : 0;                                   // 普通图不偏
+        ///     bool hit = TextRegion.InRect(textBox, fieldRect, off);
+        /// </code>
+        ///
+        /// ★ 传进来的高度不合理(小于等于 0 或者大得离谱)时返回 0 —— 宁可不偏,
+        ///   也不要偏一个瞎算出来的数把规则带歪。
+        /// </summary>
+        public static int AnnotationOffset(double bodyTextHeight)
+        {
+            if (double.IsNaN(bodyTextHeight) || bodyTextHeight <= 0) return 0;
+            if (bodyTextHeight > 1000) return 0;          // 明显不是字高, 别硬算
+            return -(int)Math.Round(AnnotationShiftRatio * bodyTextHeight,
+                                    MidpointRounding.AwayFromZero);
+        }
+
         const int DiffThreshold = 28;    // 和局部底色差多少才算文字, 和 PinyinCheck 一致
 
         /// <summary>

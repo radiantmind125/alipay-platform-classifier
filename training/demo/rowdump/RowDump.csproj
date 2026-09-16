@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    把带拼音的白图按**正文行**裁出来, 给 OCR 出训练标签用。
+    用法见 Program.cs 顶上的注释(XML 注释里不能写两个连字符, 所以命令行写那边)。
+
+    为什么要它: 训一个能读拼音图的 OCR, 要 (带拼音的行图, 正确文字) 的配对。
+    正确文字得让 OCR 读**不含拼音**的内容才准。
+      擦掉拼音再读 —— 试过, 不行。擦得只剩骨架 OCR 照样读得出来,
+                     8 张图整页送 OCR, 原图 129 行纯拉丁, 擦完还有 72 行。
+      按正文行裁   —— 拼音行物理上在框外, 根本进不了 OCR。
+
+    ★ 行切分必须用 TextRegion.FindTextRows: 回单是左标签右取值两栏,
+      两栏基线不在同一高度。按 y 简单合并会把两栏链成一条高带,
+      连上面的拼音行一起圈进去 —— 这个坑 Python 那版实测踩过
+      (133 行裁出来 OCR 读出 608 行, 纯拉丁 259 行, 比原图还差一倍)。
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>RowDump</AssemblyName>
+    <RootNamespace>Ssp.RowDump</RootNamespace>
+    <NoWarn>$(NoWarn);CS1574;CS1580;CS1584</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="OpenCvSharp4" Version="4.10.0.20241108" />
+    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.10.0.20241108" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 相对路径, 换台机器照样能跑 -->
+    <Compile Include="..\TextRegion.cs" Link="TextRegion.cs" />
+    <Compile Include="..\PinyinCheck.cs" Link="PinyinCheck.cs" />
+  </ItemGroup>
+
+</Project>

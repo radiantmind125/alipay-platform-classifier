@@ -274,6 +274,50 @@ static class Program
         }
 
         Console.WriteLine();
+        Console.WriteLine("=== F. AnnotationOffset: 经理要的那个数值 ===");
+        {
+            // 2026-09-16 在 800 张带拼音白底回单上量到:
+            //   正文字高 中位 26, 框顶上移量 中位 12  ->  12/26 = 0.46
+            Check("F1 倍数就是量出来的那个", Math.Abs(TextRegion.AnnotationShiftRatio - 0.46) < 1e-9, true);
+
+            // 页高 2412 那档: 字高 26 -> 偏 12 像素, 向上所以是负数
+            CheckInt("F2 字高 26 算出 -12", TextRegion.AnnotationOffset(26), -12);
+            // 类注释里 011.jpg 那组: 框 29 -> 44, 顶高 15。字高按 29 算
+            CheckInt("F3 字高 29 算出 -13(011.jpg 量到 15, 在 10~16 区间里)",
+                     TextRegion.AnnotationOffset(29), -13);
+
+            Check("F4 一定是向上(负数)", TextRegion.AnnotationOffset(26) < 0, true);
+
+            // 高分辨率机型: 字高变大, 偏移跟着变大 —— 这正是给倍数不给像素的理由
+            CheckInt("F5 字高 40 算出 -18", TextRegion.AnnotationOffset(40), -18);
+
+            // ★ 传进来的数不合理时宁可不偏, 也不要偏一个瞎算的数
+            CheckInt("F6 高度 0 不偏", TextRegion.AnnotationOffset(0), 0);
+            CheckInt("F7 高度为负不偏", TextRegion.AnnotationOffset(-5), 0);
+            CheckInt("F8 高度离谱不偏", TextRegion.AnnotationOffset(5000), 0);
+            CheckInt("F9 NaN 不偏", TextRegion.AnnotationOffset(double.NaN), 0);
+
+            // ★★★★★ 真正要验的: 偏移能不能把 D 组那个"并进拼音就判否"的救回来。
+            //   D 组数据: 正文行 468-496(29 高), 并入拼音后 453-497(44 高),
+            //   目标格 478-510。不偏的时候覆盖比例 0.432, 判否。
+            var merged = new Rect(0, 453, 500, 44);
+            var targetField = new Rect(0, 478, 500, 32);
+
+            bool before = TextRegion.InRect(merged, targetField);
+            int off = TextRegion.AnnotationOffset(29);          // 字高 29 -> -13
+            bool after = TextRegion.InRect(merged, targetField, off);
+
+            var hitAfter = Rect.Intersect(merged, targetField + new Point(0, off));
+            double ratioAfter = (double)(hitAfter.Width * hitAfter.Height)
+                              / (merged.Width * merged.Height);
+            Console.WriteLine($"  不偏: 判={before}");
+            Console.WriteLine($"  偏 {off}: 判={after}, 覆盖比例={ratioAfter:F3}");
+
+            Check("F10 不偏的时候认不出(和 D2 一致)", before, false);
+            Check("F11 ★ 偏完之后认得出来了", after, true);
+        }
+
+        Console.WriteLine();
         Console.WriteLine($"通过 {passed}, 失败 {failed}");
         return failed == 0 ? 0 : 1;
     }
