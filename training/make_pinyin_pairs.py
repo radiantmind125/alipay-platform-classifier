@@ -1,0 +1,237 @@
+"""给拼音 OCR 出训练配对: 一行出**两张**裁图。
+
+    label/  不含拼音 —— 拿去给现成 OCR 读, 读出来的字当**标签**
+    input/  含拼音   —— 学生看到的图, 当**输入**
+
+★★★★★ 两套不能反。学生要学的是"**看见拼音也能读对**",
+   所以输入必须**带拼音**; 只有标签才来自把拼音排除掉之后读出来的文字。
+   输入要是也不含拼音, 就训成了一个普通 OCR, 白训。
+
+为什么标签不能直接 OCR 原图
+---------------------------
+实测(rapidocr, 每组 25 张白图), 数固定字段标签能读出几个:
+
+    带拼音    中位 2.0 个
+    不带拼音  中位 9.0 个        <- 比值 0.22
+
+而且不是没检出来, 是**认成了别的字**: `账户余额` 读成 `芦荼额`。
+拼音笔画混在识别的那条线里, 字就认错。
+
+把拼音**裁在框外**之后:
+
+    按行裁    中位 7.0 个        <- 追回不带拼音那档的 78%
+
+★ 也试过"把拼音擦掉再读", 不行: 擦得只剩骨架 OCR 照样读得出来,
+  8 张图整页送 OCR, 原图 129 行纯拉丁, 擦完还有 72 行。**像素占比低 ≠ OCR 看不见。**
+
+行怎么切 —— 两条关键, 缺一不可
+------------------------------
+1. **按纵向重叠聚行**, 不能按"离得近就合并"。
+   回单是左标签右取值两栏, 两栏基线不在同一高度;
+   按距离链式合并会把整页连成一条(实测 8 张裁出来 OCR 读出 608 行, 纯拉丁 259 行)。
+
+2. **边界取成员的中位**, 不能取并集。
+   `〈` 返回箭头这类**很高的元件**跨越整行, 取并集会从它的顶开始,
+   一路顶进上面的拼音带(实测裁出来每一条都还带着拼音)。
+
+★ 也别用水平投影切行: 拼音有 g q y j 这些下伸笔画,
+  一行拼音横跨一千多像素, 只要一个笔画探进汉字行, 投影就没有空行。
+  实测空隙中位只有 3 像素, 25% 的地方不到 2 像素。
+
+用法
+----
+    python make_pinyin_pairs.py --src 图目录 --out 输出目录 [--limit N] [--workers N]
+
+出完之后再跑 OCR 填标签(另一个脚本), 这样重跑 OCR 不用重裁。
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import os
+import sys
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from erase_pinyin import EXTS, annotation_labels, local_background, text_mask  # noqa: E402
+
+# 纵向重叠超过这个比例算同一行。两栏基线错开一点仍然大幅重叠, 上下两行几乎不重叠。
+OVERLAP = 0.5
+
+# 一行至少这么高才要 —— 更矮的多半是分隔线或噪声
+MIN_ROW_H = 10
+
+# 标签裁图上下留的余量。★ 不能留大, 留多了会把上面那行拼音带进来。
+LABEL_PAD = 1
+
+# 输入裁图: 上面没找到拼音块时, 按这个倍数的字高往上扩。
+# 0.46 是量出来的(800 张白图: 框顶被拼音顶高中位 12 像素, 正文字高中位 26)。
+FALLBACK_SHIFT_RATIO = 0.46
+
+
+def _rows(big_boxes):
+    """按纵向重叠聚行, 边界取成员中位。返回 [(y0, y1)]。"""
+    if not big_boxes:
+        return []
+    items = sorted(((y, y + h) for _, y, _, h in big_boxes))
+    groups: list[list] = []
+    for y0, y1 in items:
+        placed = False
+        for g in groups:
+            inter = min(g[1], y1) - max(g[0], y0)
+            shorter = min(g[1] - g[0], y1 - y0)
+            if shorter > 0 and inter >= OVERLAP * shorter:
+                g[0] = min(g[0], y0)
+                g[1] = max(g[1], y1)
+                g[2].append((y0, y1))
+                placed = True
+                break
+        if not placed:
+            groups.append([y0, y1, [(y0, y1)]])
+    groups.sort()
+
+    out = []
+    for g in groups:
+        members = g[2]
+        if len(members) < 2:
+            continue                       # 孤零零一个块不算一行
+        y0 = int(np.median([a for a, _ in members]))
+        y1 = int(np.median([b for _, b in members]))
+        if y1 - y0 >= MIN_ROW_H:
+            out.append((y0, y1))
+    return out
+
+
+def process(args) -> list[dict]:
+    path_str, out_dir = args
+    p = Path(path_str)
+    rows_out: list[dict] = []
+    try:
+        img = cv2.imdecode(np.fromfile(path_str, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            return rows_out
+        H, W = img.shape[:2]
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        mask = text_mask(gray, local_background(gray))
+        n, lab, st, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        _, kept, _, big = annotation_labels(mask)
+        rows = _rows(big)
+        if not rows:
+            return rows_out
+
+        char_h = float(np.median([b - a for a, b in rows]))
+        fallback = int(round(FALLBACK_SHIFT_RATIO * char_h))
+
+        label_dir = Path(out_dir) / "label"
+        input_dir = Path(out_dir) / "input"
+        stem = p.stem
+
+        for i, (y0, y1) in enumerate(rows):
+            # --- 标签裁图: 中位边界, 拼音在框外 ---
+            la = max(0, y0 - LABEL_PAD)
+            lb = min(H, y1 + LABEL_PAD)
+            if lb - la < MIN_ROW_H:
+                continue
+
+            # --- 输入裁图: 往上扩到把这一行的拼音包进来 ---
+            #   优先用**这一行实测的**拼音位置, 找不到才退回常数 ——
+            #   常数是全局中位, 具体到某一行可能偏大或偏小。
+            tops = []
+            for idx in kept:
+                if idx >= len(st):
+                    continue
+                cy, ch = int(st[idx][1]), int(st[idx][3])
+                if cy + ch <= y0 and (y0 - (cy + ch)) < (y1 - y0):
+                    tops.append(cy)
+            has_py = bool(tops)
+            ia = max(0, (min(tops) - 1) if has_py else (y0 - fallback))
+            ib = lb
+
+            lcrop = img[la:lb, :]
+            icrop = img[ia:ib, :]
+            if lcrop.size == 0 or icrop.size == 0:
+                continue
+
+            name = f"{stem}_r{i:02d}.png"
+            label_dir.mkdir(parents=True, exist_ok=True)
+            input_dir.mkdir(parents=True, exist_ok=True)
+            cv2.imencode(".png", lcrop)[1].tofile(str(label_dir / name))
+            cv2.imencode(".png", icrop)[1].tofile(str(input_dir / name))
+
+            rows_out.append({
+                "file": name,
+                "source": path_str,
+                "row": i,
+                "label_y0": la, "label_y1": lb,
+                "input_y0": ia, "input_y1": ib,
+                # ★ 这一行上面到底有没有拼音。没有的行也留着(模型也要会读普通行),
+                #   但训练时可以按这个字段挑。
+                "has_pinyin": int(has_py),
+                "text": "",          # 留给下一步 OCR 填
+            })
+    except Exception:                      # noqa: BLE001
+        return rows_out
+    return rows_out
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--src", type=Path, required=True)
+    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) - 1))
+    a = ap.parse_args()
+
+    if not a.src.exists():
+        print(f"目录不在: {a.src}")
+        return
+    files = [str(p) for p in sorted(a.src.iterdir())
+             if p.suffix.lower() in EXTS]
+    if a.limit:
+        files = files[: a.limit]
+    if not files:
+        print("没找到图")
+        return
+
+    a.out.mkdir(parents=True, exist_ok=True)
+    print(f"要处理 {len(files):,} 张,  {a.workers} 个进程")
+
+    all_rows: list[dict] = []
+    with ProcessPoolExecutor(max_workers=a.workers) as ex:
+        for i, rows in enumerate(ex.map(process,
+                                        [(f, str(a.out)) for f in files],
+                                        chunksize=10), 1):
+            all_rows.extend(rows)
+            if i % 200 == 0:
+                print(f"  {i:,}/{len(files):,}   裁出 {len(all_rows):,} 行")
+
+    man = a.out / "_pairs.csv"
+    with man.open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=[
+            "file", "source", "row", "label_y0", "label_y1",
+            "input_y0", "input_y1", "has_pinyin", "text"])
+        w.writeheader()
+        w.writerows(all_rows)
+
+    with_py = sum(r["has_pinyin"] for r in all_rows)
+    print()
+    print("=" * 60)
+    print(f"共裁出 {len(all_rows):,} 行")
+    print(f"  上面有拼音的  {with_py:,}  ({with_py/max(1,len(all_rows)):.0%})")
+    print(f"  上面没拼音的  {len(all_rows)-with_py:,}")
+    print(f"  平均每张      {len(all_rows)/max(1,len(files)):.1f} 行")
+    print("=" * 60)
+    print(f"标签裁图 -> {a.out / 'label'}")
+    print(f"输入裁图 -> {a.out / 'input'}")
+    print(f"清单     -> {man}")
+    print()
+    print("★ 下一步: 对 label/ 跑 OCR 把 text 填上, 再人工核几十行对不对。")
+    print("★★ 核过之前**别**跑全量 —— 7159 张约 12 万行, OCR 要跑好几个小时。")
+
+
+if __name__ == "__main__":
+    main()
