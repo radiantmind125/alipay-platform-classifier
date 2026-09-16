@@ -347,6 +347,24 @@ static class Program
             Check("F16 顶高小于偏移量时, 整个挪上去反而更差",
                   covSmallMoved < covSmallPlain, true);
             Check("F17 ★ 同一行撑开仍然最好", covSmallWide >= covSmallPlain, true);
+
+            // ★★★★★ F18: 上面几条都建立在"OCR 把拼音并进正文框"这个假设上。
+            //   2026-09-16 拿 rapidocr 跑真图验这个假设, **不成立** ——
+            //   拼音是被单独检成一个框的, 中文框没被撑大。
+            //   那种情况下撑开不但没用还有害: 命中两边都 100%,
+            //   误配从 1.2% 涨到 10.3%(拼音框正好在上面, 撑开等于往里收它)。
+            //
+            //   这一条验的就是那个机制: 拼音自己一个框的时候, 撑开会把它收进来。
+            //   ★ 这个拼音框的位置是照真实量到的样子摆的: 真 OCR 里拼音框的**底**
+            //     会探进汉字行(实测拼音框 162..215 对中文框 195..247, 交叠 20 像素),
+            //     那 8~20 像素是检测框自带的 padding。
+            //     汉字行 500..526, 所以拼音框摆成 486..506(交叠 6 像素)。
+            var pyBox = new Rect(0, 486, 500, 20);           // 拼音框, 底探进汉字行一点
+            var fieldPlain = chars;                          // 汉字行 500..526
+            var fieldWide = TextRegion.ExpandForAnnotation(chars, 26);  // 488..526
+            Check("F18 不撑时拼音框收不进来", TextRegion.InRect(pyBox, fieldPlain), false);
+            Check("F18 ★ 撑开之后拼音框反而被收进来了(所以默认别撑)",
+                  TextRegion.InRect(pyBox, fieldWide), true);
         }
 
         Console.WriteLine();

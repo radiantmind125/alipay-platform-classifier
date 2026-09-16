@@ -102,11 +102,29 @@ namespace Ssp
         /// 带拼音时, 把字段格子的**顶往上撑开**, 好把被拼音顶高的文字框也罩进去。
         /// **底不动, 高度变大** —— 不是把整个格子挪上去。
         ///
+        /// ★★★★★ **用之前先看清楚: 你的 OCR 把拼音和汉字出成几个框。**
+        ///
+        /// <code>
+        ///     OCR 的行为              该不该撑     实测
+        ///     并成一个框              该撑         88.5% -> 99.6%
+        ///     拼音单独一个框          ★ 别撑       误配 1.2% -> 10.3%
+        /// </code>
+        ///
+        ///   2026-09-16 拿 rapidocr 跑真图量到: **拼音是被单独检成一个框的** ——
+        ///   拼音框底到中文框顶的距离中位 -8 像素(那 8 像素是检测框自带的 padding),
+        ///   96.9% 的配对有交叠但只有 17.4% 算得上"同一个框"。
+        ///   这种情况下中文框根本没被撑大, 撑开一点没多捞(命中两边都是 100%),
+        ///   却把上面那个拼音框往格子里收, 误配从 1.2% 涨到 10.3%。
+        ///
+        /// ★★★ **经理的硬约束是误杀要赔钱, 所以默认不要撑。**
+        ///   拿不准的时候: 找几张带拼音的图跑一遍你的 OCR, 看拼音是不是单独一个框。
+        ///   是 -> 别调这个方法; 和汉字并在一起 -> 再调。
+        ///
         /// <code>
         ///     var pr = PinyinCheck.Check(image);
-        ///     var box = pr.Verdict == PinyinVerdict.HasPinyin
+        ///     var box = (pr.Verdict == PinyinVerdict.HasPinyin &amp;&amp; ocrMergesAnnotation)
         ///             ? TextRegion.ExpandForAnnotation(fieldRect, pr.BigHeight)
-        ///             : fieldRect;                        // 普通图原样
+        ///             : fieldRect;                        // ★ 默认走这条
         ///     bool hit = TextRegion.InRect(textBox, box);  // yOffset 保持 0
         /// </code>
         ///
