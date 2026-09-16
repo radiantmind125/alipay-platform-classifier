@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using OpenCvSharp;
 using Ssp;
 
@@ -365,6 +366,64 @@ static class Program
             Check("F18 不撑时拼音框收不进来", TextRegion.InRect(pyBox, fieldPlain), false);
             Check("F18 ★ 撑开之后拼音框反而被收进来了(所以默认别撑)",
                   TextRegion.InRect(pyBox, fieldWide), true);
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("=== G. 自动判 OCR 是单独出框还是并框 ===");
+        {
+            // 单独出框那种: 拼音自成一框, 所以有一堆纯拉丁的框
+            // 实测 rapidocr 在带拼音白图上纯拉丁框占比中位 0.340
+            var separate = new List<IReadOnlyList<string>>();
+            for (int i = 0; i < 6; i++)
+                separate.Add(new[] {
+                    "zhang dan xiang qing", "账单详情",
+                    "jiao yi cheng gong", "交易成功",
+                    "fu kuan fang shi", "付款方式",
+                    "2026-07-01 00:05:25", "中国银行储蓄卡",
+                });
+            CheckInt("G1 拼音单独成框 -> Separate",
+                     (int)TextRegion.DetectAnnotationBoxing(separate),
+                     (int)TextRegion.AnnotationBoxing.Separate);
+
+            // 并框那种: 拼音混在中文框里, 纯拉丁框接近 0
+            var merged = new List<IReadOnlyList<string>>();
+            for (int i = 0; i < 6; i++)
+                merged.Add(new[] {
+                    "zhangdanxiangqing账单详情", "jiaoyichenggong交易成功",
+                    "fukuanfangshi付款方式", "2026-07-01 00:05:25",
+                    "中国银行储蓄卡", "转账备注", "对方账户", "订单号",
+                });
+            CheckInt("G2 拼音并进正文框 -> Merged",
+                     (int)TextRegion.DetectAnnotationBoxing(merged),
+                     (int)TextRegion.AnnotationBoxing.Merged);
+
+            // ★★ 样本不够就别判 —— 实测 25 张带拼音的里有 1 张一个纯拉丁框都没有,
+            //   只看那一张会判成 Merged, 进而错误地去撑开。
+            CheckInt("G3 样本不够 -> CannotDetermine",
+                     (int)TextRegion.DetectAnnotationBoxing(separate.GetRange(0, 2)),
+                     (int)TextRegion.AnnotationBoxing.CannotDetermine);
+            CheckInt("G4 传 null 也不崩",
+                     (int)TextRegion.DetectAnnotationBoxing(null),
+                     (int)TextRegion.AnnotationBoxing.CannotDetermine);
+
+            // ★ 邮箱和卡号不算拼音 —— 回单上本来就有
+            var emails = new List<IReadOnlyList<string>>();
+            for (int i = 0; i < 6; i++)
+                emails.Add(new[] {
+                    "joh***@outlook.com", "tad***@163.com", "收款方",
+                    "付款方式", "账户余额", "转账", "订单号", "交易成功",
+                });
+            CheckInt("G5 ★ 邮箱不该被当成拼音框",
+                     (int)TextRegion.DetectAnnotationBoxing(emails),
+                     (int)TextRegion.AnnotationBoxing.Merged);
+
+            // 框太少的图不作数
+            var tooFew = new List<IReadOnlyList<string>>();
+            for (int i = 0; i < 6; i++)
+                tooFew.Add(new[] { "zhang dan", "账单" });
+            CheckInt("G6 每张框太少 -> 判不了",
+                     (int)TextRegion.DetectAnnotationBoxing(tooFew),
+                     (int)TextRegion.AnnotationBoxing.CannotDetermine);
         }
 
         Console.WriteLine();

@@ -160,6 +160,97 @@ namespace Ssp
             return new Rect(field.X, field.Y - up, field.Width, field.Height + up);
         }
 
+        /// <summary>
+        /// 一个 OCR 把拼音出成**单独的框**, 还是**并进正文框**。
+        /// 决定该不该调 <see cref="ExpandForAnnotation"/>。
+        /// </summary>
+        public enum AnnotationBoxing
+        {
+            /// 样本不够, 判不了 —— 这时候**别撑**(拿不准就不动)
+            CannotDetermine = 0,
+            /// 拼音单独一个框。**别撑** —— 撑了会把拼音框收进字段格子
+            Separate = 1,
+            /// 拼音并在正文框里。可以撑
+            Merged = 2,
+        }
+
+        /// <summary>
+        /// 判**纯拉丁**: 只有拉丁字母和空格之类, 不含汉字/数字/@。
+        /// ★ 排除 @ 和数字是因为回单上本来就有邮箱和卡号, 那些不是拼音。
+        /// </summary>
+        static bool IsLatinOnly(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return false;
+            int letters = 0;
+            foreach (char c in s)
+            {
+                if (c >= '一' && c <= '鿿') return false;   // 有汉字, 不算
+                if (c >= '0' && c <= '9') return false;             // 有数字, 不算
+                if (c == '@') return false;                         // 邮箱, 不算
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                    || (c >= 'À' && c <= 'ɏ')) letters++;
+            }
+            return letters > 2;
+        }
+
+        /// <summary>
+        /// 拿几张**已经判为带拼音**的图的 OCR 文本, 判这个 OCR 属于哪种行为。
+        ///
+        /// <paramref name="perImageTexts"/> 每一项是一张图上 OCR 出来的所有文本。
+        /// ★ 必须是 <c>PinyinCheck</c> 判为 <c>HasPinyin</c> 的图 ——
+        ///   不带拼音的图上纯拉丁框本来就接近 0, 混进来会把结论带偏。
+        ///
+        /// 判据: 在带拼音的页上, **纯拉丁的框只可能是被单独检出来的拼音**。
+        /// 所以纯拉丁框占比高 = 单独出框; 接近 0 = 拼音混在中文框里(并了)。
+        ///
+        /// ★ 2026-09-16 实测(rapidocr, 每组 25 张白图):
+        /// <code>
+        ///     带拼音    纯拉丁框占比 中位 0.340,  5分位 0.035
+        ///     不带拼音  纯拉丁框占比 中位 0.000,  最大 0.000
+        /// </code>
+        ///   不带拼音的页**一个纯拉丁框都没有**, 所以阈值取 0.02 就够分开。
+        ///
+        /// ★★ **要给多张, 不能只给一张。** 实测 25 张带拼音的图里有 1 张
+        ///   OCR 没吐出任何纯拉丁框; 只看那一张就会判成 Merged, 进而错误地去撑开。
+        ///   所以取各图的**中位数**, 而且少于 <see cref="MinSamplesForBoxing"/> 张直接判不了。
+        /// </summary>
+        public static AnnotationBoxing DetectAnnotationBoxing(
+            IEnumerable<IReadOnlyList<string>> perImageTexts)
+        {
+            if (perImageTexts == null) return AnnotationBoxing.CannotDetermine;
+
+            var shares = new List<double>();
+            foreach (var texts in perImageTexts)
+            {
+                if (texts == null || texts.Count < 5) continue;   // 框太少不作数
+                int lat = 0, tot = 0;
+                foreach (var t in texts)
+                {
+                    if (string.IsNullOrWhiteSpace(t)) continue;
+                    tot++;
+                    if (IsLatinOnly(t.Trim())) lat++;
+                }
+                if (tot > 0) shares.Add((double)lat / tot);
+            }
+            if (shares.Count < MinSamplesForBoxing) return AnnotationBoxing.CannotDetermine;
+
+            shares.Sort();
+            double med = shares.Count % 2 == 1
+                ? shares[shares.Count / 2]
+                : (shares[shares.Count / 2 - 1] + shares[shares.Count / 2]) / 2.0;
+
+            return med > LatinShareThreshold
+                ? AnnotationBoxing.Separate
+                : AnnotationBoxing.Merged;
+        }
+
+        /// 少于这么多张就判不了 —— 单张会被"这张恰好没吐拼音框"带偏
+        public const int MinSamplesForBoxing = 5;
+
+        /// 纯拉丁框占比超过这个数, 就认为 OCR 把拼音单独出框了。
+        /// 实测不带拼音的页是 0.000, 带拼音单独出框的 5 分位是 0.035, 取中间。
+        public const double LatinShareThreshold = 0.02;
+
         const int DiffThreshold = 28;    // 和局部底色差多少才算文字, 和 PinyinCheck 一致
 
         /// <summary>
