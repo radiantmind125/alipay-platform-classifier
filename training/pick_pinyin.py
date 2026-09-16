@@ -51,6 +51,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import shutil
@@ -384,6 +385,7 @@ def main() -> None:
             rows = rows[: a.limit]
         a.copy_to.mkdir(parents=True, exist_ok=True)
         n = 0
+        copied: list[tuple[str, float, str]] = []
         for r in rows:
             src = Path(r["path"])
             if not src.exists():
@@ -394,11 +396,25 @@ def main() -> None:
                 dst = a.copy_to / f"{src.stem}__{i}{src.suffix}"
                 i += 1
             shutil.copy2(src, dst)
+            copied.append((dst.name, r["score"], str(src)))
             n += 1
         what = "**没有拼音的**(对照组)" if a.copy_clean else "挑出来的"
         print(f"复制了 {n} 张{what} -> {a.copy_to}")
         if rows:
             print(f"  分数范围 {rows[0]['score']:.4f} 到 {rows[min(n, len(rows))-1]['score']:.4f}")
+
+        # ★★ 一起写一份清单。没有它, 归集完就只剩一堆文件名,
+        #   分数和来源都丢了, 以后想按分数段抽查都没法抽。
+        #   追加模式: 两个库可以往同一个目录归集, 清单接着写。
+        man = a.copy_to / "_manifest.csv"
+        new = not man.exists()
+        with man.open("a", encoding="utf-8-sig", newline="") as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(["file", "score", "source"])
+            w.writerows(copied)
+        total = sum(1 for _ in man.open(encoding="utf-8-sig")) - 1
+        print(f"  清单 -> {man}   (累计 {total} 行)")
         return
 
     if a.sheet:
