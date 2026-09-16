@@ -84,29 +84,56 @@ namespace Ssp
         public const double AnnotationShiftRatio = 0.46;
 
         /// <summary>
-        /// 算带拼音时该用的 <c>yOffset</c>(像素, **负数**表示向上)。
+        /// 拼音把框顶高了多少(像素, **正数**)。<paramref name="bodyTextHeight"/> 传正文字高 ——
+        /// <c>PinyinCheck.Check</c> 返回的 <c>PinyinResult.BigHeight</c> 就是这个数。
         ///
-        /// <paramref name="bodyTextHeight"/> 传正文字高 —— <c>PinyinCheck.Check</c> 返回的
-        /// <c>PinyinResult.BigHeight</c> 就是这个数(块高的 75 分位)。
-        ///
-        /// 用法:
-        /// <code>
-        ///     var pr = PinyinCheck.Check(image);
-        ///     int off = pr.Verdict == PinyinVerdict.HasPinyin
-        ///             ? TextRegion.AnnotationOffset(pr.BigHeight)
-        ///             : 0;                                   // 普通图不偏
-        ///     bool hit = TextRegion.InRect(textBox, fieldRect, off);
-        /// </code>
-        ///
-        /// ★ 传进来的高度不合理(小于等于 0 或者大得离谱)时返回 0 —— 宁可不偏,
-        ///   也不要偏一个瞎算出来的数把规则带歪。
+        /// ★ 这只是个量, 怎么用见 <see cref="ExpandForAnnotation"/>。
+        /// ★ 高度不合理(小于等于 0 / 大得离谱 / NaN)时返回 0 —— 宁可不动, 也不要按瞎算的数动。
         /// </summary>
-        public static int AnnotationOffset(double bodyTextHeight)
+        public static int AnnotationShift(double bodyTextHeight)
         {
             if (double.IsNaN(bodyTextHeight) || bodyTextHeight <= 0) return 0;
             if (bodyTextHeight > 1000) return 0;          // 明显不是字高, 别硬算
-            return -(int)Math.Round(AnnotationShiftRatio * bodyTextHeight,
-                                    MidpointRounding.AwayFromZero);
+            return (int)Math.Round(AnnotationShiftRatio * bodyTextHeight,
+                                   MidpointRounding.AwayFromZero);
+        }
+
+        /// <summary>
+        /// 带拼音时, 把字段格子的**顶往上撑开**, 好把被拼音顶高的文字框也罩进去。
+        /// **底不动, 高度变大** —— 不是把整个格子挪上去。
+        ///
+        /// <code>
+        ///     var pr = PinyinCheck.Check(image);
+        ///     var box = pr.Verdict == PinyinVerdict.HasPinyin
+        ///             ? TextRegion.ExpandForAnnotation(fieldRect, pr.BigHeight)
+        ///             : fieldRect;                        // 普通图原样
+        ///     bool hit = TextRegion.InRect(textBox, box);  // yOffset 保持 0
+        /// </code>
+        ///
+        /// ★★★★★ **为什么是"撑开"不是"挪"** —— 2026-09-16 在 200 张真图
+        ///   (2153 个带拼音的行)上量过, 三种做法:
+        /// <code>
+        ///     做法              通过率    覆盖比例中位
+        ///     不动              89.1%      0.658
+        ///     整个挪上去        85.8%      0.645     <- **比不动还差**
+        ///     ★ 顶往上撑开      99.5%      0.971
+        /// </code>
+        ///   挪为什么更差: 字段格子本来就和汉字行对齐、整个落在合并框里面,
+        ///   往上挪反而有一截跑到框外, 交集变小。
+        ///   撑开才对: 合并框往上长出来的那一截, 正好被撑开的部分罩住。
+        ///
+        /// ★★ 我一开始实现成了"挪"(<c>AnnotationOffset</c>), 而且写了个测试说它管用 ——
+        ///   那个测试用的是 011.jpg 的几个**合成矩形**, 格子比正文行低 10 像素,
+        ///   那个错位是当初为了演示"中心法会翻"特意造的, 不是真实版面。
+        ///   拿真图一量就露馅了。**合成用例过了不等于真数据上成立。**
+        ///
+        /// ★ 撑多少: 见 <see cref="AnnotationShiftRatio"/>, 0.46 倍正文字高(中位 12 像素)。
+        /// </summary>
+        public static Rect ExpandForAnnotation(Rect field, double bodyTextHeight)
+        {
+            int up = AnnotationShift(bodyTextHeight);
+            if (up <= 0) return field;
+            return new Rect(field.X, field.Y - up, field.Width, field.Height + up);
         }
 
         const int DiffThreshold = 28;    // 和局部底色差多少才算文字, 和 PinyinCheck 一致

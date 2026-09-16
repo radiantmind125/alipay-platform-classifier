@@ -22,6 +22,14 @@ static class Program
         else { failed++; Console.WriteLine($"  FAIL  {name}: 得到 {actual}, 应当 {expect}"); }
     }
 
+    /// 覆盖比例 = 交集面积 / 文字框面积, 和 InRect 里的算法一致
+    static double Ratio(Rect text, Rect region)
+    {
+        var hit = Rect.Intersect(text, region);
+        long area = (long)text.Width * text.Height;
+        return area <= 0 ? 0 : (double)(hit.Width * hit.Height) / area;
+    }
+
     static int Main(string[] args)
     {
         // ★ 自检: 带 --selftest 跑, 会故意插一条失败的断言。
@@ -274,47 +282,70 @@ static class Program
         }
 
         Console.WriteLine();
-        Console.WriteLine("=== F. AnnotationOffset: 经理要的那个数值 ===");
+        Console.WriteLine("=== F. 带拼音时把格子顶撑开(经理说的那个数值) ===");
         {
             // 2026-09-16 在 800 张带拼音白底回单上量到:
-            //   正文字高 中位 26, 框顶上移量 中位 12  ->  12/26 = 0.46
-            Check("F1 倍数就是量出来的那个", Math.Abs(TextRegion.AnnotationShiftRatio - 0.46) < 1e-9, true);
+            //   正文字高 中位 26, 框顶被拼音顶高 中位 12  ->  12/26 = 0.46
+            Check("F1 倍数就是量出来的那个",
+                  Math.Abs(TextRegion.AnnotationShiftRatio - 0.46) < 1e-9, true);
+            CheckInt("F2 字高 26 撑 12 像素", TextRegion.AnnotationShift(26), 12);
+            CheckInt("F3 字高 29 撑 13(011.jpg 量到 15, 在 10~16 区间里)",
+                     TextRegion.AnnotationShift(29), 13);
+            CheckInt("F4 字高 40 撑 18(高分辨率机型)", TextRegion.AnnotationShift(40), 18);
 
-            // 页高 2412 那档: 字高 26 -> 偏 12 像素, 向上所以是负数
-            CheckInt("F2 字高 26 算出 -12", TextRegion.AnnotationOffset(26), -12);
-            // 类注释里 011.jpg 那组: 框 29 -> 44, 顶高 15。字高按 29 算
-            CheckInt("F3 字高 29 算出 -13(011.jpg 量到 15, 在 10~16 区间里)",
-                     TextRegion.AnnotationOffset(29), -13);
+            // ★ 数不合理时宁可不动, 也不要按瞎算的数动
+            CheckInt("F5 高度 0 不动", TextRegion.AnnotationShift(0), 0);
+            CheckInt("F6 高度为负不动", TextRegion.AnnotationShift(-5), 0);
+            CheckInt("F7 高度离谱不动", TextRegion.AnnotationShift(5000), 0);
+            CheckInt("F8 NaN 不动", TextRegion.AnnotationShift(double.NaN), 0);
 
-            Check("F4 一定是向上(负数)", TextRegion.AnnotationOffset(26) < 0, true);
+            // ★★ 撑开的是**顶**: 底不动, 高度变大
+            var field = new Rect(10, 100, 200, 30);
+            var wide = TextRegion.ExpandForAnnotation(field, 26);
+            CheckInt("F9 顶上移了 12", wide.Y, 88);
+            CheckInt("F10 底没动", wide.Y + wide.Height, field.Y + field.Height);
+            CheckInt("F11 高度变大了 12", wide.Height, 42);
+            CheckInt("F12 左右不动", wide.X, field.X);
+            Check("F13 高度不合理时原样返回",
+                  TextRegion.ExpandForAnnotation(field, 0) == field, true);
 
-            // 高分辨率机型: 字高变大, 偏移跟着变大 —— 这正是给倍数不给像素的理由
-            CheckInt("F5 字高 40 算出 -18", TextRegion.AnnotationOffset(40), -18);
+            // ★★★★★ 真实版面下的对比。
+            //   拿真图量到的典型值: 汉字行 26 高, 拼音把框顶高 12 -> 合并框 38 高。
+            //   字段格子和汉字行对齐(模板来自普通回单, 两边行位置基本一样 ——
+            //   实测行距比值 0.98)。
+            var chars = new Rect(0, 500, 500, 26);              // 汉字行
+            var merged = new Rect(0, 488, 500, 38);             // 并入拼音后, 往上长了 12
+            var box = TextRegion.ExpandForAnnotation(chars, 26);
 
-            // ★ 传进来的数不合理时宁可不偏, 也不要偏一个瞎算的数
-            CheckInt("F6 高度 0 不偏", TextRegion.AnnotationOffset(0), 0);
-            CheckInt("F7 高度为负不偏", TextRegion.AnnotationOffset(-5), 0);
-            CheckInt("F8 高度离谱不偏", TextRegion.AnnotationOffset(5000), 0);
-            CheckInt("F9 NaN 不偏", TextRegion.AnnotationOffset(double.NaN), 0);
+            double covPlain = Ratio(merged, chars);
+            double covWide = Ratio(merged, box);
+            Console.WriteLine($"  不撑: 覆盖={covPlain:F3}, 判={TextRegion.InRect(merged, chars)}");
+            Console.WriteLine($"  撑开: 覆盖={covWide:F3}, 判={TextRegion.InRect(merged, box)}");
 
-            // ★★★★★ 真正要验的: 偏移能不能把 D 组那个"并进拼音就判否"的救回来。
-            //   D 组数据: 正文行 468-496(29 高), 并入拼音后 453-497(44 高),
-            //   目标格 478-510。不偏的时候覆盖比例 0.432, 判否。
-            var merged = new Rect(0, 453, 500, 44);
-            var targetField = new Rect(0, 478, 500, 32);
+            Check("F14 撑开之后覆盖比例明显变高", covWide > covPlain + 0.2, true);
+            Check("F15 ★ 撑开之后判得中", TextRegion.InRect(merged, box), true);
 
-            bool before = TextRegion.InRect(merged, targetField);
-            int off = TextRegion.AnnotationOffset(29);          // 字高 29 -> -13
-            bool after = TextRegion.InRect(merged, targetField, off);
-
-            var hitAfter = Rect.Intersect(merged, targetField + new Point(0, off));
-            double ratioAfter = (double)(hitAfter.Width * hitAfter.Height)
-                              / (merged.Width * merged.Height);
-            Console.WriteLine($"  不偏: 判={before}");
-            Console.WriteLine($"  偏 {off}: 判={after}, 覆盖比例={ratioAfter:F3}");
-
-            Check("F10 不偏的时候认不出(和 D2 一致)", before, false);
-            Check("F11 ★ 偏完之后认得出来了", after, true);
+            // ★★★ 200 张真图 2153 行上量到的三种做法(记在这里免得以后有人再试"挪"):
+            //       不动        通过率 89.1%   覆盖中位 0.658
+            //       整个挪上去  通过率 85.8%   覆盖中位 0.645   <- 比不动还差
+            //       顶往上撑开  通过率 99.5%   覆盖中位 0.971
+            //
+            // ★ 上面那个 merged 是"拼音正好顶高 12"的**边界情形**: 挪 12 之后格子顶
+            //   刚好落在合并框顶上, 仍然整个在框内, 所以覆盖不变(0.684), 看不出差别。
+            //   真图上顶高量是 10~16 而偏移是固定的 12, **有一半的行顶高不到 12**,
+            //   这时候挪上去就有一截跑到框外 —— 下面用这种行验。
+            int up = TextRegion.AnnotationShift(26);          // 12
+            var mergedSmall = new Rect(0, 492, 500, 34);      // 这一行拼音只顶高 8
+            double covSmallPlain = Ratio(mergedSmall, chars);
+            var movedSmall = new Rect(chars.X, chars.Y - up, chars.Width, chars.Height);
+            double covSmallMoved = Ratio(mergedSmall, movedSmall);
+            var wideSmall = TextRegion.ExpandForAnnotation(chars, 26);
+            double covSmallWide = Ratio(mergedSmall, wideSmall);
+            Console.WriteLine($"  顶高只有 8 的行: 不动={covSmallPlain:F3}, "
+                              + $"挪={covSmallMoved:F3}, 撑={covSmallWide:F3}");
+            Check("F16 顶高小于偏移量时, 整个挪上去反而更差",
+                  covSmallMoved < covSmallPlain, true);
+            Check("F17 ★ 同一行撑开仍然最好", covSmallWide >= covSmallPlain, true);
         }
 
         Console.WriteLine();
