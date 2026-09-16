@@ -29,6 +29,18 @@ import numpy as np
 
 # 纯拉丁(拼音漏进来了)。排除带 @ 和数字的 —— 回单上本来就有邮箱和卡号
 LATIN_ONLY = re.compile(r"^[a-zA-ZÀ-ɏ\s'·]+$")
+
+# ★★★★★ 只挡"整条都是拉丁"不够。实测漏过这两条:
+#     黄某人（德）备注 tongzhi 到账
+#     Sueuz uanxiangqing quan buzhangdan 立 ?
+#   它们**混着**汉字, 所以 LATIN_ONLY 判不中, 照样被当成可用标签。
+#   拿这种去训, 等于教模型把拼音也读出来 —— 正好是要它别做的事。
+#
+#   所以再加一条: 文本里只要有**连续 4 个以上拉丁字母**的片段就不要。
+#   4 这个数是看着实测样本定的: `tongzhi` 7 个, `uanxiangqing` 12 个;
+#   而回单上正常的英文片段(卡组织缩写之类)一般不超过 3 个字母,
+#   邮箱另外用 @ 放行。
+LATIN_RUN = re.compile(r"[a-zA-ZÀ-ɏ]{4,}")
 MIN_LEN = 2
 
 
@@ -40,6 +52,8 @@ def classify(text: str) -> str:
         return "太短"
     if LATIN_ONLY.match(s) and "@" not in s:
         return "纯拉丁(拼音漏进来了)"
+    if "@" not in s and LATIN_RUN.search(s):
+        return "混着拼音"
     return "可用"
 
 

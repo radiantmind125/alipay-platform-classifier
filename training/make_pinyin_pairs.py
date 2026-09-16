@@ -73,11 +73,74 @@ LABEL_PAD = 1
 FALLBACK_SHIFT_RATIO = 0.46
 
 
-def _rows(big_boxes):
-    """按纵向重叠聚行, 边界取成员中位。返回 [(y0, y1)]。"""
+def _pinyin_bands(kept, st, big_boxes):
+    """把判成注音的那些块按高度聚成**带**, 返回 [(y0, y1)]。
+
+    ★★★★★ 为什么要有这个: `annotation_labels` 把连通块切成两档 ——
+       small(<=0.55*big_h) 和 big(>=0.8*big_h), 两档**互不相交**。
+       判注音只看 small 那一档。
+
+       但拼音块不是都那么矮。`zhàng dān xiáng qíng` 这种,
+       几乎每个音节**上面有声调符号、下面有下伸笔画**, 整个块顶到底
+       和汉字一样高, 于是落进 big 那一档 —— 判注音时看不见它,
+       聚行时它却**自己凑成一行**, 行顶就落在拼音带里。
+
+       实测后果: 标签裁图裁出来 OCR 读成
+           Sueuz uanxiangqing quan buzhangdan 立 ?
+       整条都是拼音, 汉字反而被切掉了。
+
+    ★ 所以按**矮拼音块的高度**先把带划出来, 聚行时凡是中心落在带里的
+      一律不要 —— 高拼音和矮拼音在同一个高度上, 用矮的就能把高的一起圈掉。
+
+    ★★ 聚带也得**按纵向重叠**, 不能按"离得近就并"。按距离并是链式的 ——
+       整页拼音一条条往下挨着, 并到最后成了一条覆盖半页的带, 行全被吃掉。
+       (这个坑聚行时已经踩过一次, 见模块开头。实测: 按距离并之后
+        判出有拼音的行从 64% 掉到 45%, 漏进标签的反而从 8.6% 涨到 13.1%。)
+    """
+    if not kept:
+        return []
+    ys = []
+    for idx in kept:
+        if idx < len(st):
+            ys.append((int(st[idx][1]), int(st[idx][1]) + int(st[idx][3])))
+    if not ys:
+        return []
+
+    bands: list[list] = []
+    for a, b in sorted(ys):
+        for g in bands:
+            inter = min(g[1], b) - max(g[0], a)
+            shorter = min(g[1] - g[0], b - a)
+            if shorter > 0 and inter >= OVERLAP * shorter:
+                g[0] = min(g[0], a)
+                g[1] = max(g[1], b)
+                break
+        else:
+            bands.append([a, b])
+
+    # ★★★ 试过再加一步"把大部分身子在带里的高块吸进带", 想把带撑到实际范围。
+    #   **不能加** —— 它会把汉字也吸进去。汉字一旦进了带就不参与聚行,
+    #   行里只剩 〈 这类更高的元件, 中位反而**往上**跑, 比不排除还糟:
+    #       订单号 ...           -> Sln 单号 uan nlao      顶 1399 -> 1389
+    #       芭芭农场 限时翻倍     -> ... baba nongchang     顶 1371 -> 1340
+    #   实测 23 行变坏, 只有 9 行变好。
+    #
+    #   本来也不需要: 高拼音是"矮拼音 + 上面声调 + 下面下伸笔画",
+    #   它的**中心**照样落在矮拼音划出来的这条带里, 聚行时按中心判就圈得掉。
+    return [(a, b) for a, b in bands]
+
+
+def _rows(big_boxes, bands=()):
+    """按纵向重叠聚行, 边界取成员中位。返回 [(y0, y1)]。
+
+    bands 是拼音带, 中心落在带里的块**不参与聚行** —— 见 _pinyin_bands。
+    """
     if not big_boxes:
         return []
-    items = sorted(((y, y + h) for _, y, _, h in big_boxes))
+    items = sorted((y, y + h) for _, y, _, h in big_boxes
+                   if not any(a <= y + h // 2 <= b for a, b in bands))
+    if not items:
+        return []
     groups: list[list] = []
     for y0, y1 in items:
         placed = False
@@ -119,7 +182,8 @@ def process(args) -> list[dict]:
         mask = text_mask(gray, local_background(gray))
         n, lab, st, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
         _, kept, _, big = annotation_labels(mask)
-        rows = _rows(big)
+        bands = _pinyin_bands(kept, st, big)
+        rows = _rows(big, bands)
         if not rows:
             return rows_out
 
@@ -131,24 +195,29 @@ def process(args) -> list[dict]:
         stem = p.stem
 
         for i, (y0, y1) in enumerate(rows):
-            # --- 标签裁图: 中位边界, 拼音在框外 ---
+            # 压在这一行头上的那条拼音带: 带底在行顶之上, 而且离得不到一行高
+            above = [(a, b) for a, b in bands
+                     if b <= y0 + 2 and (y0 - b) < (y1 - y0)]
+            has_py = bool(above)
+
+            # --- 标签裁图: 中位边界, 再往下夹到拼音带底下 ---
+            #
+            # ★★ 夹**不得越过行顶** —— 越过就等于切汉字。实测踩过:
+            #   不设上限的话, 拼音带和汉字挨得紧的行会被夹掉一半,
+            #   `账单详情 全部账单` 裁出来读成 `单 立 k`。
+            #   行顶本身已经由 _rows 排除拼音带算出来了, 这一夹只是收掉那点余量。
             la = max(0, y0 - LABEL_PAD)
+            if above:
+                la = min(y0, max(la, max(b for _, b in above) + 1))
             lb = min(H, y1 + LABEL_PAD)
             if lb - la < MIN_ROW_H:
-                continue
+                continue                    # 夹完太薄就不要这一行了
 
             # --- 输入裁图: 往上扩到把这一行的拼音包进来 ---
-            #   优先用**这一行实测的**拼音位置, 找不到才退回常数 ——
+            #   优先用**这一行实测的**拼音带顶, 找不到才退回常数 ——
             #   常数是全局中位, 具体到某一行可能偏大或偏小。
-            tops = []
-            for idx in kept:
-                if idx >= len(st):
-                    continue
-                cy, ch = int(st[idx][1]), int(st[idx][3])
-                if cy + ch <= y0 and (y0 - (cy + ch)) < (y1 - y0):
-                    tops.append(cy)
-            has_py = bool(tops)
-            ia = max(0, (min(tops) - 1) if has_py else (y0 - fallback))
+            ia = max(0, (min(a for a, _ in above) - 1) if above
+                     else (y0 - fallback))
             ib = lb
 
             lcrop = img[la:lb, :]
