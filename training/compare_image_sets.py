@@ -86,11 +86,68 @@ def summarise(name: str, rows: list[dict]) -> None:
     print()
 
 
+def make_sheet(sets, sheet: Path, per_set: int = 6,
+               crop: tuple[float, float] = (0.0, 0.22)) -> None:
+    """每组抽几张并排贴出来, 肉眼比**版面**有什么不一样。
+
+    ★★★★★ 为什么必须有这个: 上面那些统计量(尺寸/亮度/墨占比)全是**全局**的,
+       两组可能每一项都一样, 但**版面完全不同** —— 比如一组是转账给个人,
+       另一组是付款给商家, 字段根本不是同一套。全局统计看不见这个。
+
+    默认裁页面**最上面那一段**(0~22%): 回单类型(转账成功/支付成功/到账成功)
+    和金额都在那儿, 一眼就能看出是不是同一种单子。
+    """
+    cells, labels = [], []
+    for name, rows in sets:
+        if not rows:
+            continue
+        step = max(1, len(rows) // per_set)
+        picked = [r for r in rows[::step]][:per_set]
+        for r in picked:
+            p = Path(r["path"])
+            if not p.exists():
+                continue
+            img = cv2.imdecode(np.fromfile(str(p), np.uint8), cv2.IMREAD_COLOR)
+            if img is None:
+                continue
+            h = img.shape[0]
+            c = img[int(h * crop[0]): int(h * crop[1]), :]
+            if c.size == 0:
+                continue
+            c = cv2.resize(c, (460, max(1, int(460 * c.shape[0] / c.shape[1]))))
+            cv2.putText(c, name[:10], (8, 24),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cells.append(c)
+            labels.append(name)
+    if len(cells) < 2:
+        print("图不够, 贴不出来")
+        return
+    hh = max(c.shape[0] for c in cells)
+    cells = [cv2.copyMakeBorder(c, 0, hh - c.shape[0], 0, 0,
+                                cv2.BORDER_CONSTANT, value=(255, 255, 255))
+             for c in cells]
+    per_row = per_set
+    rows_img = [np.hstack(cells[i:i + per_row])
+                for i in range(0, len(cells) - len(cells) % per_row, per_row)]
+    if not rows_img:
+        return
+    grid = np.vstack(rows_img)
+    sheet.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imencode(".png", grid)[1].tofile(str(sheet))
+    print(f"贴了 {len(cells) - len(cells) % per_row} 张 -> {sheet}")
+    print("★ 每一行是一组。看**单子的类型**一不一样(转账成功 / 支付成功 / 到账成功),")
+    print("  还有字段是不是同一套(收款方 对 商家)。")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--set", action="append", required=True,
                     help="名字=目录, 至少两个")
     ap.add_argument("--limit", type=int, default=60)
+    ap.add_argument("--sheet", type=Path, default=None,
+                    help="★ 每组抽几张并排贴出来 —— 全局统计看不见版面差别")
+    ap.add_argument("--crop", type=str, default="0.0,0.22",
+                    help="裁页面哪一段, 默认最上面(回单类型和金额在那儿)")
     a = ap.parse_args()
 
     sets = []
@@ -104,7 +161,12 @@ def main() -> None:
             print(f"目录不在: {d}")
             return
         files = [p for p in sorted(d.rglob("*")) if p.suffix.lower() in EXTS][: a.limit]
-        rows = [r for r in (measure(p) for p in files) if r]
+        rows = []
+        for p in files:
+            r = measure(p)
+            if r:
+                r["path"] = str(p)          # 贴图时要按路径回读原图
+                rows.append(r)
         sets.append((name, rows))
 
     print("=" * 70)
@@ -131,6 +193,18 @@ def main() -> None:
         print()
         print("★ 检测器画布是 864x1536 letterbox。图进去之前会先按 max-side-1600 校正,")
         print("  所以尺寸和长宽比差太多的话, 版面在画布上的位置会差很远。")
+        print()
+        print("★★ 上面这些全是**全局**统计。两组每一项都一样, 也可能版面完全不同")
+        print("   (比如一组转账给个人, 一组付款给商家)。要看版面得加 --sheet 贴图。")
+
+    if a.sheet:
+        try:
+            c1, c2 = (float(x) for x in a.crop.split(","))
+        except Exception:                        # noqa: BLE001
+            print("--crop 格式应当是 0.0,0.22")
+            return
+        print()
+        make_sheet(sets, a.sheet, crop=(c1, c2))
 
 
 if __name__ == "__main__":
