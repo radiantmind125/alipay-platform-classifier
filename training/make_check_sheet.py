@@ -39,8 +39,30 @@ from fill_pinyin_labels import classify  # noqa: E402
 HAN = re.compile(r"[一-鿿]")
 
 
+def _cjk_font(size: int):
+    """找一个能画中文的字体。找不到就返回 None, 退回只出图不写字。"""
+    for name in ("msyh.ttc", "simsun.ttc", "msyhl.ttc", "simhei.ttf"):
+        p = Path(r"C:\Windows\Fonts") / name
+        if p.exists():
+            try:
+                from PIL import ImageFont
+                return ImageFont.truetype(str(p), size)
+            except Exception:                      # noqa: BLE001
+                continue
+    return None
+
+
 def stitch(rows, pair_dir: Path, dst: Path) -> tuple[int, int]:
-    """把每行的 input 裁图竖着拼起来, 左边留一条写编号。"""
+    """把每行的 input 裁图竖着拼起来, 左边写编号, **右边把 OCR 读出来的文字画上去**。
+
+    ★★★★★ 文字一定要画进图里, 不能只打在控制台。
+       服务器控制台按 GBK 显示而我们输出 UTF-8, 贴回来是
+           鈽呪槄 涓嬩竴姝?*蹇呴』**浜哄伐鏍稿嚑鍗佹潯
+       关键的标签文字全糊了, 等于没法核。**画进图里就不过编码这一关。**
+
+    ★ cv2.putText 画不了中文, 所以中文这部分走 PIL + 系统字体。
+    """
+    font = _cjk_font(22)
     imgs, W = [], 0
     for i, r in enumerate(rows, 1):
         p = pair_dir / "input" / r["file"]
@@ -51,17 +73,32 @@ def stitch(rows, pair_dir: Path, dst: Path) -> tuple[int, int]:
             continue
         im = cv2.copyMakeBorder(im, 2, 2, 46, 2, cv2.BORDER_CONSTANT,
                                 value=(210, 210, 210))
-        # ★ 只拿 putText 写编号(ASCII)。它画不了中文, 中文一律走文字清单。
         cv2.putText(im, str(i), (6, im.shape[0] // 2 + 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 160), 2)
         imgs.append(im)
         W = max(W, im.shape[1])
     if not imgs:
         return 0, 0
-    imgs = [cv2.copyMakeBorder(m, 0, 0, 0, W - m.shape[1],
+
+    TEXT_W = 760 if font else 0
+    imgs = [cv2.copyMakeBorder(m, 0, 0, 0, W - m.shape[1] + TEXT_W,
                                cv2.BORDER_CONSTANT, value=(255, 255, 255))
             for m in imgs]
     out = np.vstack(imgs)
+
+    if font:
+        from PIL import Image, ImageDraw
+        pil = Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
+        dr = ImageDraw.Draw(pil)
+        y = 0
+        for i, (m, r) in enumerate(zip(imgs, rows), 1):
+            h = m.shape[0]
+            dr.line([(W, y), (W, y + h)], fill=(190, 190, 190), width=1)
+            dr.text((W + 10, y + max(0, (h - 26) // 2)),
+                    (r.get("text") or "")[:42], font=font, fill=(150, 0, 0))
+            y += h
+        out = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+
     cv2.imencode(".png", out)[1].tofile(str(dst))
     return out.shape[1], out.shape[0]
 
