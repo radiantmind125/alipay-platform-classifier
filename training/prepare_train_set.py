@@ -43,6 +43,9 @@ def main() -> None:
     ap.add_argument("--pinyin-only", action="store_true",
                     help="只要上面有拼音的行。★ 默认**两种都要** —— "
                          "拼音页上本来就两种行都有, 只训带拼音的, 训出来只会读半页")
+    ap.add_argument("--both-views", action="store_true",
+                    help="同一行出两条样本: input/(带拼音) 和 label/(不带拼音), "
+                         "文字相同。★ 见下面注释, 这是个要用实验定的选择, 不是显然更好")
     ap.add_argument("--seed", type=int, default=42)
     a = ap.parse_args()
 
@@ -110,12 +113,34 @@ def main() -> None:
     print()
 
     # ---------- 写盘 ----------
-    img_dir = a.pairs / "input"     # ★ 输入用 input/ —— **带拼音**的那套
+    #
+    # ★★★★★ 为什么有 --both-views 这个选项 —— 训练和上线时看到的图**不一样**。
+    #
+    #   训练时我们喂的是 input/: 上面**整条**拼音都在。
+    #   上线时模型拿到的是经理那条管线的检测器画的框 —— 实测那个检测器
+    #   97% 的行都框得到, 也就是说它框的是**汉字那一行**, 顶多蹭到一点
+    #   拼音的下伸笔画, 不会把整条拼音带框进去。
+    #
+    #   于是有个风险: 模型在训练里学会了"上面那一截不用看", 上线时拿到
+    #   一个贴着汉字裁的紧框, 它可能把汉字的上半截也当成"不用看的那一截"。
+    #
+    #   --both-views 的办法: 同一行出两条样本, 文字一样, 图一张带拼音一张不带。
+    #   等于告诉模型"有没有拼音你都得读对", 而不是"永远忽略上面那截"。
+    #
+    # ★★ 但这**不是显然更好**, 所以默认关着:
+    #     label/ 那张图正是老师用来读出这条文字的图, 拿它当样本接近同义反复,
+    #     容易让模型在简单样本上刷分, 冲淡真正要学的那一半。
+    #   两种都训一遍, 在验证集上比字准确率, 用数说话。
+    img_dir = a.pairs / "input"     # ★ 主样本用 input/ —— **带拼音**的那套
+    lab_dir = a.pairs / "label"
+
     def dump(rs, name):
         p = out_dir / name
         with p.open("w", encoding="utf-8", newline="\n") as f:
             for r in rs:
                 f.write(f"{img_dir / r['file']}\t{r['text']}\n")
+                if a.both_views:
+                    f.write(f"{lab_dir / r['file']}\t{r['text']}\n")
         return p
 
     pt, pv = dump(train, "train.txt"), dump(val, "val.txt")
