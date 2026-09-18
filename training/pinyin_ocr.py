@@ -220,11 +220,21 @@ def main() -> None:
             from PIL import Image, ImageDraw
             pil = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
             dr = ImageDraw.Draw(pil)
+            # ★ 一行里的几段**拼成一条**再画, 不能各画各的 ——
+            #   同一行的段 y0 相同, 各画各的会叠在一起, 画出来是
+            #       账单详情 + 全部账单  ->  账部账情
+            #   看着像模型读错了, 其实是这张图画坏了。
+            by_row: dict[int, list] = {}
             for s in segs:
                 dr.rectangle([s["x0"], s["y0"], s["x1"], s["y1"]],
                              outline=(0, 140, 255), width=2)
-                dr.text((img.shape[1] + 12, s["y0"]), s["text"][:24],
-                        font=font, fill=(160, 0, 0))
+                by_row.setdefault(s["row"], []).append(s)
+            for _ri, group in sorted(by_row.items()):
+                group.sort(key=lambda s: s["x0"])
+                line = "  |  ".join(s["text"] for s in group if s["text"].strip())
+                if line:
+                    dr.text((img.shape[1] + 12, group[0]["y0"]), line[:38],
+                            font=font, fill=(160, 0, 0))
             canvas = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
         cv2.imencode(".png", canvas)[1].tofile(str(a.sheet))
         print(f"  sheet -> {a.sheet}")
