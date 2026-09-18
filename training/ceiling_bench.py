@@ -51,6 +51,9 @@ def main() -> None:
     ap.add_argument("--with-ocr", action="store_true",
                     help="同时把整页(带拼音)送现成 OCR 量一遍。慢, 约 5 张/分钟")
     ap.add_argument("--n", type=int, default=200, help="--with-ocr 时量几张")
+    ap.add_argument("--img-dir", type=Path, default=None,
+                    help="★ 清单里存的是**出清单那台机器上的**路径。换一台机器跑时"
+                         "用这个指到本地的图目录, 按文件名去找")
     ap.add_argument("--seed", type=int, default=17)
     a = ap.parse_args()
 
@@ -96,9 +99,13 @@ def main() -> None:
     random.seed(a.seed)
     srcs = random.sample(srcs, min(a.n, len(srcs)))
     with_py, ceil_sub = [], []
+    missing = 0
     for i, s in enumerate(srcs, 1):
         p = Path(s)
+        if a.img_dir:
+            p = a.img_dir / p.name
         if not p.exists():
+            missing += 1
             continue
         img = cv2.imdecode(np.fromfile(str(p), np.uint8), cv2.IMREAD_COLOR)
         if img is None:
@@ -109,6 +116,15 @@ def main() -> None:
         if i % 25 == 0:
             print(f"    {i}/{len(srcs)}", flush=True)
 
+    if missing:
+        # ★ 之前这里是**一声不吭**跳过, 结果整批图都找不到还照样往下算,
+        #   最后打出来一堆 nan。找不到图是大事, 必须吼出来。
+        print(f"
+  ★★ {missing}/{len(srcs)} 张图找不到 —— "
+              f"清单里存的是出清单那台机器的路径, 用 --img-dir 指到本地图目录")
+    if not with_py:
+        print("  一张都没读到, 停")
+        return
     w = np.array(with_py)
     cs = np.array(ceil_sub)
     print()

@@ -60,6 +60,9 @@ def main() -> None:
     ap.add_argument("--model", type=Path, default=None)
     ap.add_argument("--onnx", type=Path, default=None)
     ap.add_argument("--n", type=int, default=60)
+    ap.add_argument("--pairs", type=Path, default=None,
+                    help="给了就同时算**天花板**: 同一张图每行 label 裁图"
+                         "(拼音在框外)读出来的字拼起来能找到几个字段")
     ap.add_argument("--seed", type=int, default=17)
     a = ap.parse_args()
     if not a.model and not a.onnx:
@@ -70,6 +73,19 @@ def main() -> None:
     random.seed(a.seed)
     files = random.sample(files, min(a.n, len(files)))
 
+    # 天花板: 同一张图, 拼音在框外时现成 OCR 能读出几个字段
+    ceil_by_src = {}
+    if a.pairs:
+        import csv
+        from collections import defaultdict
+        agg = defaultdict(list)
+        man = a.pairs / "_pairs_labeled.csv"
+        if man.exists():
+            for r in csv.DictReader(man.open(encoding="utf-8-sig")):
+                if (r.get("text") or "").strip():
+                    agg[Path(r["source"]).name].append(r["text"])
+            ceil_by_src = {k: " ".join(v) for k, v in agg.items()}
+
     rec = Recognizer(a.model, a.onnx)
     try:
         from rapidocr_onnxruntime import RapidOCR
@@ -79,6 +95,11 @@ def main() -> None:
 
     ours, base, t_ours, t_base = [], [], 0.0, 0.0
     ours22, base22 = [], []
+    ceil = []
+    # 每个字段各自被谁找到了 —— 经理那边是按字段抽的, 这个比总数有用
+    hit_o = {f: 0 for f in FIELDS_15}
+    hit_b = {f: 0 for f in FIELDS_15}
+    hit_c = {f: 0 for f in FIELDS_15}
     for i, p in enumerate(files, 1):
         t0 = time.time()
         segs = read_image(p, rec)
@@ -86,6 +107,13 @@ def main() -> None:
         txt_o = " ".join(s["text"] for s in segs)
         ours.append(found(txt_o))
         ours22.append(found(txt_o, FIELDS_15 + FIELDS_EXTRA))
+        for f in FIELDS_15:
+            hit_o[f] += f in txt_o
+        if ceil_by_src:
+            tc = ceil_by_src.get(p.name, "")
+            ceil.append(found(tc))
+            for f in FIELDS_15:
+                hit_c[f] += f in tc
 
         if ocr is not None:
             img = cv2.imdecode(np.fromfile(str(p), np.uint8), cv2.IMREAD_COLOR)
@@ -95,6 +123,8 @@ def main() -> None:
             txt_b = " ".join((t or "") for _b, t, _c in (res or []))
             base.append(found(txt_b))
             base22.append(found(txt_b, FIELDS_15 + FIELDS_EXTRA))
+            for f in FIELDS_15:
+                hit_b[f] += f in txt_b
         if i % 20 == 0:
             print(f"    {i}/{len(files)}", flush=True)
 
@@ -119,7 +149,22 @@ def main() -> None:
         tie = int((o == b).sum())
         print(f"    ours better on {win}/{len(files)} images, "
               f"tie {tie}, worse {len(files)-win-tie}")
+    if ceil:
+        c = np.array(ceil)
+        print(f"  {'ceiling':<12}{np.median(c):>8.1f}{c.mean():>8.2f}"
+              f"{c.min():>6}{c.max():>6}{(c == 0).sum():>7}"
+              f"   <- 同图不带拼音时的上限")
+        print(f"    ours / ceiling = {o.mean()/max(1e-9,c.mean()):.2f}"
+              f"   (1.00 就是拼音这道坎填平了)")
     print()
+    if ceil:
+        print("  ---- 每个字段各自被谁读到 (占这批图的比例) ----")
+        print(f"    {'field':<10}{'ceiling':>9}{'ours':>8}{'rapidocr':>10}")
+        n_img = len(files)
+        for f in FIELDS_15:
+            print(f"    {f:<10}{hit_c[f]/n_img:>8.0%}{hit_o[f]/n_img:>8.0%}"
+                  f"{hit_b[f]/n_img:>9.0%}")
+        print()
     if ours22:
         print(f"  (22 字段表: ours {np.median(ours22):.1f}  "
               f"rapidocr {np.median(base22) if base22 else float('nan'):.1f})")
