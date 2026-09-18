@@ -63,6 +63,8 @@ def main() -> None:
     ap.add_argument("--pairs", type=Path, default=None,
                     help="给了就同时算**天花板**: 同一张图每行 label 裁图"
                          "(拼音在框外)读出来的字拼起来能找到几个字段")
+    ap.add_argument("--dump", type=Path, default=None,
+                    help="把每张图三边的文字都存下来, 事后好做失败归类")
     ap.add_argument("--seed", type=int, default=17)
     a = ap.parse_args()
     if not a.model and not a.onnx:
@@ -93,6 +95,8 @@ def main() -> None:
     except ImportError:
         ocr = None
 
+    import json
+    dump_fh = a.dump.open("w", encoding="utf-8") if a.dump else None
     ours, base, t_ours, t_base = [], [], 0.0, 0.0
     ours22, base22 = [], []
     ceil = []
@@ -125,9 +129,22 @@ def main() -> None:
             base22.append(found(txt_b, FIELDS_15 + FIELDS_EXTRA))
             for f in FIELDS_15:
                 hit_b[f] += f in txt_b
+        if dump_fh:
+            dump_fh.write(json.dumps({
+                "file": p.name, "ours": txt_o,
+                "base": txt_b if ocr is not None else "",
+                "ceiling": ceil_by_src.get(p.name, ""),
+                "segs": [{"row": s0["row"], "seg": s0["seg"], "x0": s0["x0"],
+                          "x1": s0["x1"], "y0": s0["y0"], "y1": s0["y1"],
+                          "pin": s0["has_pinyin"], "t": s0["text"]}
+                         for s0 in segs],
+            }, ensure_ascii=False))
+            dump_fh.write("\n")
         if i % 20 == 0:
             print(f"    {i}/{len(files)}", flush=True)
 
+    if dump_fh:
+        dump_fh.close()
     o = np.array(ours)
     print()
     print("=" * 58)
