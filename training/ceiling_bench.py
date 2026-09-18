@@ -119,9 +119,9 @@ def main() -> None:
     if missing:
         # ★ 之前这里是**一声不吭**跳过, 结果整批图都找不到还照样往下算,
         #   最后打出来一堆 nan。找不到图是大事, 必须吼出来。
-        print(f"
-  ★★ {missing}/{len(srcs)} 张图找不到 —— "
-              f"清单里存的是出清单那台机器的路径, 用 --img-dir 指到本地图目录")
+        print()
+        print("  ★★ {}/{} 张图找不到 —— 清单里存的是出清单那台机器的路径, "
+              "用 --img-dir 指到本地图目录".format(missing, len(srcs)))
     if not with_py:
         print("  一张都没读到, 停")
         return
