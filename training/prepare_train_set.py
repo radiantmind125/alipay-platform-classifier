@@ -46,13 +46,16 @@ def main() -> None:
     ap.add_argument("--both-views", action="store_true",
                     help="同一行出两条样本: input/(带拼音) 和 label/(不带拼音), "
                          "文字相同。★ 见下面注释, 这是个要用实验定的选择, 不是显然更好")
+    ap.add_argument("--segments", action="store_true",
+                    help="★★★★★ 用 split_segments.py 切好的**段**, 而不是整行。"
+                         "识别器的单位是段不是行 —— 整行 26:1, 段 3.8:1")
     ap.add_argument("--seed", type=int, default=42)
     a = ap.parse_args()
 
-    man = a.pairs / "_pairs_labeled.csv"
+    man = a.pairs / ("_segments.csv" if a.segments else "_pairs_labeled.csv")
     if not man.exists():
         print(f"清单不在: {man}")
-        print("   先跑 fill_pinyin_labels.py")
+        print("   先跑 " + ("split_segments.py" if a.segments else "fill_pinyin_labels.py"))
         return
     rows = list(csv.DictReader(man.open(encoding="utf-8-sig")))
     if not rows:
@@ -63,7 +66,9 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ---------- 筛 ----------
-    keep = [r for r in rows if r.get("usable") == "1" and (r.get("text") or "").strip()]
+    # ★ 段清单里没有 usable 列 —— 它本来就是从可用的行里切出来的
+    keep = [r for r in rows
+            if (a.segments or r.get("usable") == "1") and (r.get("text") or "").strip()]
     if a.pinyin_only:
         keep = [r for r in keep if r.get("has_pinyin") == "1"]
     if not keep:
@@ -131,8 +136,8 @@ def main() -> None:
     #     label/ 那张图正是老师用来读出这条文字的图, 拿它当样本接近同义反复,
     #     容易让模型在简单样本上刷分, 冲淡真正要学的那一半。
     #   两种都训一遍, 在验证集上比字准确率, 用数说话。
-    img_dir = a.pairs / "input"     # ★ 主样本用 input/ —— **带拼音**的那套
-    lab_dir = a.pairs / "label"
+    img_dir = a.pairs / ("seg_input" if a.segments else "input")
+    lab_dir = a.pairs / ("seg_label" if a.segments else "label")
 
     def dump(rs, name):
         p = out_dir / name
