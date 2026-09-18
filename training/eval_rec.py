@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import csv
 import random
+import re
 import sys
 from pathlib import Path
 
@@ -192,25 +193,53 @@ def main() -> None:
             parts.sort()
             r["base"] = " ".join(t for _, t in parts)
 
-        def score_b(rs):
+        # ★★★ 第二个对照: 把现成 OCR 输出里的**拼音段直接删掉**再比。
+        #
+        #   因为一定会有人问(经理大概率会问):
+        #       "既然拼音读出来是拉丁字母, 那我把拉丁的去掉不就完了? 干嘛训模型?"
+        #
+        #   页面级别试过, 不成立(读出的字段数 2.0 -> 2.0, 一点没变好)。
+        #   但段级别没试过, 所以这里量一下, 把这条路**用数堵死或者让开**。
+        latin_run = re.compile(r"[a-zA-ZÀ-ɏ]{2,}")
+        for r in recs:
+            r["base_strip"] = re.sub(r"\s{2,}", " ",
+                                     latin_run.sub("", r.get("base", ""))).strip()
+
+        def cer(rs, key):
+            """返回 (字错率, 全对率)。★ 字错率**可以超过 100%** ——
+            读出来的比真值还多(把拼音也读出来了), 编辑距离就会大于真值长度。
+            这时候硬报"准确率"会是负数, 反而看不懂, 所以直接报错率。"""
             if not rs:
                 return 0.0, 0.0
-            ed = sum(edit_distance(r.get("base", ""), r["gt"]) for r in rs)
+            ed = sum(edit_distance(r.get(key, ""), r["gt"]) for r in rs)
             tot = sum(max(1, len(r["gt"])) for r in rs)
-            ex = sum(1 for r in rs if r.get("base", "") == r["gt"])
-            return 1 - ed / tot, ex / len(rs)
+            ex = sum(1 for r in rs if r.get(key, "") == r["gt"])
+            return ed / tot, ex / len(rs)
 
         groups = [("ALL", recs)]
         if any(r["pin"] is not None for r in recs):
             groups.append(("with pinyin", [r for r in recs if r["pin"] is True]))
             groups.append(("no pinyin", [r for r in recs if r["pin"] is False]))
-        print(f"    {'group':<14}{'n':>7}   {'rapidocr':>10}  {'ours':>10}   diff")
+
+        print("    字错率 CER, **越低越好**; 超过 100% 表示读出来的比真值还多")
+        print(f"    {'group':<13}{'n':>7} {'rapidocr':>10}{'+去拉丁':>10}{'ours':>9}")
         for name, sub in groups:
             if not sub:
                 continue
-            ba, _bx = score_b(sub)
-            oa, _ox, n2 = score(sub)
-            print(f"    {name:<14}{n2:>7,}   {ba:>9.2%}  {oa:>9.2%}   {oa-ba:+.2%}")
+            b, _ = cer(sub, "base")
+            s, _ = cer(sub, "base_strip")
+            o = sum(edit_distance(r["hyp"], r["gt"]) for r in sub) / max(
+                1, sum(max(1, len(r["gt"])) for r in sub))
+            print(f"    {name:<13}{len(sub):>7,} {b:>9.1%}{s:>10.1%}{o:>9.1%}")
+        print()
+        print("    exact match")
+        for name, sub in groups:
+            if not sub:
+                continue
+            _, bx = cer(sub, "base")
+            _, sx = cer(sub, "base_strip")
+            ox = sum(1 for r in sub if r["hyp"] == r["gt"]) / len(sub)
+            print(f"    {name:<13}{len(sub):>7,} {bx:>9.1%}{sx:>10.1%}{ox:>9.1%}")
 
     # ---------- 核对图 ----------
     if a.sheet:
