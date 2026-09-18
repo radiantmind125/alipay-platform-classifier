@@ -45,6 +45,9 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=4000)
     ap.add_argument("--sheet", type=int, default=16)
     ap.add_argument("--batch", type=int, default=32)
+    ap.add_argument("--errors-only", action="store_true",
+                    help="核对图只放**读错的**。★ 用来查那些'错'里有多少其实是"
+                         "**真值自己错了**而模型读对了 —— 实测这种不少")
     ap.add_argument("--baseline", action="store_true",
                     help="★★★★★ 同一批图再用现成 rapidocr 读一遍做对照。"
                          "这才是要交出去的那个数: 同样带拼音的图, 它读成什么, 我们读成什么")
@@ -248,9 +251,12 @@ def main() -> None:
         wrong = [r for r in recs if r["hyp"] != r["gt"]]
         right = [r for r in recs if r["hyp"] == r["gt"]]
         random.seed(3)
-        pick = (random.sample(right, min(a.sheet // 2, len(right)))
-                + random.sample(wrong, min(a.sheet - a.sheet // 2, len(wrong))))
-        random.shuffle(pick)
+        if a.errors_only:
+            pick = random.sample(wrong, min(a.sheet, len(wrong)))
+        else:
+            pick = (random.sample(right, min(a.sheet // 2, len(right)))
+                    + random.sample(wrong, min(a.sheet - a.sheet // 2, len(wrong))))
+            random.shuffle(pick)
         ims, W = [], 0
         for r in pick:
             im = cv2.imdecode(np.fromfile(r["path"], np.uint8), cv2.IMREAD_COLOR)
@@ -280,7 +286,7 @@ def main() -> None:
                         font=font, fill=(0, 130, 0) if good else (190, 0, 0))
                 y += h
             out = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-        dst = a.data / "_check_rec.png"
+        dst = a.data / ("_check_rec_errors.png" if a.errors_only else "_check_rec.png")
         cv2.imencode(".png", out)[1].tofile(str(dst))
         print()
         print(f"  sheet -> {dst}")
