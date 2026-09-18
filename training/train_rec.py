@@ -365,6 +365,12 @@ def main() -> None:
         for gt, hyp in samples[:3]:
             mark = "  " if gt == hyp else "x "
             print(f"      {mark}真: {gt[:26]:<28} 出: {hyp[:26]}")
+        # ★ 指标落盘。控制台的中文在服务器上会显示成乱码, 贴回来读不了;
+        #   而且窗口一关就什么都没了。落一份**纯 ASCII**的, 事后还查得到。
+        with (out_dir / "train_log.txt").open("a", encoding="utf-8") as f:
+            f.write("epoch {}\tloss {:.4f}\tchar_acc {:.4f}\texact {:.4f}"
+                    "\tsecs {:.0f}\n".format(ep, run / max(1, seen), acc, exact,
+                                             time.time() - t0))
         if acc > best:
             best = acc
             torch.save({"model": model.state_dict(), "chars": chars},
