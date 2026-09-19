@@ -65,6 +65,9 @@ def main() -> None:
                          "(拼音在框外)读出来的字拼起来能找到几个字段")
     ap.add_argument("--dump", type=Path, default=None,
                     help="把每张图三边的文字都存下来, 事后好做失败归类")
+    ap.add_argument("--no-baseline", action="store_true",
+                    help="★ 跳过现成 OCR 那一半。它整页只有 0.18 张/秒, 400 张要 37 分钟; "
+                         "而判'我们对天花板'根本用不着它。想把某个字段量准就用这个跑大样本")
     ap.add_argument("--seed", type=int, default=17)
     a = ap.parse_args()
     if not a.model and not a.onnx:
@@ -89,11 +92,13 @@ def main() -> None:
             ceil_by_src = {k: " ".join(v) for k, v in agg.items()}
 
     rec = Recognizer(a.model, a.onnx)
-    try:
-        from rapidocr_onnxruntime import RapidOCR
-        ocr = RapidOCR(det_limit_type="min", det_limit_side_len=64)
-    except ImportError:
-        ocr = None
+    ocr = None
+    if not a.no_baseline:
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+            ocr = RapidOCR(det_limit_type="min", det_limit_side_len=64)
+        except ImportError:
+            ocr = None
 
     import json
     dump_fh = a.dump.open("w", encoding="utf-8") if a.dump else None
@@ -176,15 +181,18 @@ def main() -> None:
     print()
     if ceil:
         print("  ---- 每个字段各自被谁读到 (占这批图的比例) ----")
-        print(f"    {'field':<10}{'ceiling':>9}{'ours':>8}{'rapidocr':>10}")
+        # ★ 没跑现成 OCR 的时候**不要打那一列**。打个 0% 会被读成"它一个都没读到",
+        #   而实际是"根本没量"。没量的东西打成 0 是误导, 比不打更糟。
+        head = f"    {'field':<10}{'ceiling':>9}{'ours':>8}"
+        print(head + (f"{'rapidocr':>10}" if base else "      (未跑现成 OCR)"))
         n_img = len(files)
         for f in FIELDS_15:
-            print(f"    {f:<10}{hit_c[f]/n_img:>8.0%}{hit_o[f]/n_img:>8.0%}"
-                  f"{hit_b[f]/n_img:>9.0%}")
+            line = f"    {f:<10}{hit_c[f]/n_img:>8.0%}{hit_o[f]/n_img:>8.0%}"
+            print(line + (f"{hit_b[f]/n_img:>9.0%}" if base else ""))
         print()
     if ours22:
-        print(f"  (22 字段表: ours {np.median(ours22):.1f}  "
-              f"rapidocr {np.median(base22) if base22 else float('nan'):.1f})")
+        tail = (f"  rapidocr {np.median(base22):.1f}" if base22 else "")
+        print(f"  (22 字段表: ours {np.median(ours22):.1f}{tail})")
     print()
     print("  ---- 参照 ----")
     print("    最早报过: 带拼音 2.0 / 不带拼音 9.0 个字段")
