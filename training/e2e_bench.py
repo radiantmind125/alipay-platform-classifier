@@ -32,8 +32,12 @@ import sys
 import time
 from pathlib import Path
 
+import re
+
 import cv2
 import numpy as np
+
+HAN = re.compile(r"[一-鿿]")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from erase_pinyin import EXTS  # noqa: E402
@@ -105,6 +109,7 @@ def main() -> None:
     ours, base, t_ours, t_base = [], [], 0.0, 0.0
     ours22, base22 = [], []
     ceil = []
+    txt_all_o, txt_all_b, txt_all_c = [], [], []
     # 每个字段各自被谁找到了 —— 经理那边是按字段抽的, 这个比总数有用
     hit_o = {f: 0 for f in FIELDS_15}
     hit_b = {f: 0 for f in FIELDS_15}
@@ -116,11 +121,13 @@ def main() -> None:
         txt_o = " ".join(s["text"] for s in segs)
         ours.append(found(txt_o))
         ours22.append(found(txt_o, FIELDS_15 + FIELDS_EXTRA))
+        txt_all_o.append(txt_o)
         for f in FIELDS_15:
             hit_o[f] += f in txt_o
         if ceil_by_src:
             tc = ceil_by_src.get(p.name, "")
             ceil.append(found(tc))
+            txt_all_c.append(tc)
             for f in FIELDS_15:
                 hit_c[f] += f in tc
 
@@ -132,6 +139,7 @@ def main() -> None:
             txt_b = " ".join((t or "") for _b, t, _c in (res or []))
             base.append(found(txt_b))
             base22.append(found(txt_b, FIELDS_15 + FIELDS_EXTRA))
+            txt_all_b.append(txt_b)
             for f in FIELDS_15:
                 hit_b[f] += f in txt_b
         if dump_fh:
@@ -178,6 +186,23 @@ def main() -> None:
               f"   <- 同图不带拼音时的上限")
         print(f"    ours / ceiling = {o.mean()/max(1e-9,c.mean()):.2f}"
               f"   (1.00 就是拼音这道坎填平了)")
+    # ★★★★★ 再报一个**按汉字数**的。
+    #   数字段名这个判据是给白图回单定的 —— 蓝图页面上本来就没几个那些字段
+    #   (实测可用行里只有 16% 含回单字段名, 剩下是促销、徽章、姓名、金额)。
+    #   在蓝图上光看字段数会得出"两边都是 1.0, 差不多"的错觉,
+    #   而实际差距在**读出多少字**上。两个判据都报, 别只看一个。
+    han_o = sum(len(HAN.findall(t)) for t in txt_all_o)
+    print()
+    print(f"  ---- 按读出的汉字数(蓝图用这个看) ----")
+    print(f"    ours      {han_o/len(files):>7.1f} 字/张")
+    if txt_all_c:
+        han_c = sum(len(HAN.findall(t)) for t in txt_all_c)
+        print(f"    ceiling   {han_c/len(files):>7.1f} 字/张"
+              f"   ours/ceiling = {han_o/max(1,han_c):.2f}")
+    if txt_all_b:
+        han_b = sum(len(HAN.findall(t)) for t in txt_all_b)
+        print(f"    rapidocr  {han_b/len(files):>7.1f} 字/张"
+              f"   ours/rapidocr = {han_o/max(1,han_b):.2f}")
     print()
     if ceil:
         print("  ---- 每个字段各自被谁读到 (占这批图的比例) ----")
