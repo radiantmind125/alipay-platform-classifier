@@ -49,15 +49,28 @@ def main() -> None:
     ap.add_argument("--segments", action="store_true",
                     help="★★★★★ 用 split_segments.py 切好的**段**, 而不是整行。"
                          "识别器的单位是段不是行 —— 整行 26:1, 段 3.8:1")
+    ap.add_argument("--also", type=Path, nargs="*", default=[],
+                    help="★ 再并进来几个配对目录(比如蓝图那一份), 一起出一份训练集。"
+                         "每一份的图路径按**它自己的**目录解析, 不会指错地方")
     ap.add_argument("--seed", type=int, default=42)
     a = ap.parse_args()
 
-    man = a.pairs / ("_segments.csv" if a.segments else "_pairs_labeled.csv")
-    if not man.exists():
-        print(f"清单不在: {man}")
-        print("   先跑 " + ("split_segments.py" if a.segments else "fill_pinyin_labels.py"))
-        return
-    rows = list(csv.DictReader(man.open(encoding="utf-8-sig")))
+    name = "_segments.csv" if a.segments else "_pairs_labeled.csv"
+    rows = []
+    for d in [a.pairs, *a.also]:
+        man = d / name
+        if not man.exists():
+            print(f"清单不在: {man}")
+            print("   先跑 " + ("split_segments.py" if a.segments else "fill_pinyin_labels.py"))
+            return
+        got = list(csv.DictReader(man.open(encoding="utf-8-sig")))
+        # ★★ 每一行记住自己是从哪个目录来的。并多份的时候, 图路径必须按
+        #    **各自的**目录解析 —— 统一按第一个目录拼, 后面那份的图就全指错了,
+        #    而且不会报错, 只会训出一堆读不到的图。
+        for r in got:
+            r["_dir"] = str(d)
+        rows.extend(got)
+        print(f"  {d.name}: {len(got):,} 行")
     if not rows:
         print("清单是空的")
         return
@@ -136,16 +149,17 @@ def main() -> None:
     #     label/ 那张图正是老师用来读出这条文字的图, 拿它当样本接近同义反复,
     #     容易让模型在简单样本上刷分, 冲淡真正要学的那一半。
     #   两种都训一遍, 在验证集上比字准确率, 用数说话。
-    img_dir = a.pairs / ("seg_input" if a.segments else "input")
-    lab_dir = a.pairs / ("seg_label" if a.segments else "label")
+    sub_i = "seg_input" if a.segments else "input"
+    sub_l = "seg_label" if a.segments else "label"
 
     def dump(rs, name):
         p = out_dir / name
         with p.open("w", encoding="utf-8", newline="\n") as f:
             for r in rs:
-                f.write(f"{img_dir / r['file']}\t{r['text']}\n")
+                base = Path(r.get("_dir") or a.pairs)
+                f.write(f"{base / sub_i / r['file']}\t{r['text']}\n")
                 if a.both_views:
-                    f.write(f"{lab_dir / r['file']}\t{r['text']}\n")
+                    f.write(f"{base / sub_l / r['file']}\t{r['text']}\n")
         return p
 
     pt, pv = dump(train, "train.txt"), dump(val, "val.txt")
