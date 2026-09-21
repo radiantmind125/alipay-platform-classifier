@@ -48,12 +48,20 @@ def main() -> None:
     ap.add_argument("--errors-only", action="store_true",
                     help="核对图只放**读错的**。★ 用来查那些'错'里有多少其实是"
                          "**真值自己错了**而模型读对了 —— 实测这种不少")
+    ap.add_argument("--only", default="",
+                    help="★ 只量路径里含这个词的样本。白图用 pinyin-pairs\seg_input, "
+                         "蓝图用 pinyin-pairs-blue —— 合训之后要分开看哪种图准, "
+                         "光看总数是被占九成的白图带着走的")
     ap.add_argument("--baseline", action="store_true",
                     help="★★★★★ 同一批图再用现成 rapidocr 读一遍做对照。"
                          "这才是要交出去的那个数: 同样带拼音的图, 它读成什么, 我们读成什么")
     a = ap.parse_args()
 
     va = load_list(a.data / "val.txt")
+    if a.only:
+        n0 = len(va)
+        va = [(p_, t) for p_, t in va if a.only in p_]
+        print(f"  只量含 {a.only!r} 的: {len(va):,}/{n0:,}")
     if not va:
         print("val.txt 是空的")
         return
