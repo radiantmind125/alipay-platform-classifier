@@ -82,6 +82,14 @@ def main() -> None:
     # ★ 段清单里没有 usable 列 —— 它本来就是从可用的行里切出来的
     keep = [r for r in rows
             if (a.segments or r.get("usable") == "1") and (r.get("text") or "").strip()]
+    # ★★★ check_alignment.py --drop 标出来的错配行, 这里筛掉。
+    #   错配是"图是这一段、文字是另一段的" —— 这种样本模型**永远学不会**,
+    #   只会往梯度里灌噪声。实测白图上占 1.6%, 而且正是训练里那几条
+    #   二十轮都学不会的(20 像素宽的图配了 18 个字的文字)。
+    n_bad = sum(1 for r in keep if r.get("bad") == "1")
+    if n_bad:
+        keep = [r for r in keep if r.get("bad") != "1"]
+        print(f"  筛掉错配的 {n_bad:,} 条 (check_alignment 标的)")
     if a.pinyin_only:
         keep = [r for r in keep if r.get("has_pinyin") == "1"]
     if not keep:
