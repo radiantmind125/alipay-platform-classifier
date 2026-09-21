@@ -52,6 +52,10 @@ def main() -> None:
     ap.add_argument("--also", type=Path, nargs="*", default=[],
                     help="★ 再并进来几个配对目录(比如蓝图那一份), 一起出一份训练集。"
                          "每一份的图路径按**它自己的**目录解析, 不会指错地方")
+    ap.add_argument("--cap", type=int, default=0,
+                    help="★ 每个配对目录最多取这么多段(按原图整张取, 不打散)。"
+                         "拿来做对照实验: 把白图砍到和蓝图一样多, 再看白图能到多少 —— "
+                         "这样才分得清蓝图弱是**数据少**还是**本来就难**")
     ap.add_argument("--seed", type=int, default=42)
     a = ap.parse_args()
 
@@ -69,8 +73,27 @@ def main() -> None:
         #    而且不会报错, 只会训出一堆读不到的图。
         for r in got:
             r["_dir"] = str(d)
+        if a.cap and len(got) > a.cap:
+            # ★ 按**原图**整张取, 不按段随机取。按段取会把同一张图的段
+            #   分到训练和验证两边, 验证集就等于在考背过的题。
+            bysrc = {}
+            for r in got:
+                bysrc.setdefault(r["source"], []).append(r)
+            srcs = sorted(bysrc)
+            random.Random(a.seed).shuffle(srcs)
+            picked, n = [], 0
+            for sname in srcs:
+                if n >= a.cap:
+                    break
+                picked.extend(bysrc[sname])
+                n += len(bysrc[sname])
+            n_src = len({r["source"] for r in picked})
+            print(f"  {d.name}: {len(got):,} 行  ->  砍到 {len(picked):,} 行"
+                  f"  (原图 {len(bysrc):,} 张里取了 {n_src:,} 张)")
+            got = picked
+        else:
+            print(f"  {d.name}: {len(got):,} 行")
         rows.extend(got)
-        print(f"  {d.name}: {len(got):,} 行")
     if not rows:
         print("清单是空的")
         return
