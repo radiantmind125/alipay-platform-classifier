@@ -48,21 +48,34 @@ from pathlib import Path
 
 HAN = re.compile(r"[一-鿿]")
 RATIO = 10          # 高频要比低频多这么多倍
-MAX_RARE = 500      # 低频那个超过这么多次就不当它是错的
+
+# 低频那个超过这么多**就不当它是错的**。
+#
+# ★★★★★ 这个门槛必须**按语料大小按比例算**, 不能写死一个数。
+#   原来写死 500, 是照白图 12.7 万行定的 —— 占 0.39% 的行, 确实算罕见。
+#   但蓝图只有约 2 万可用行, 同样的 500 就占到 2.5%, **那已经是个常用词了**。
+#   照搬过去会把蓝图的常用词当成"读错的"去纠正, 把真数据改坏。
+#
+#   同一个数在两个语料里含义完全不同 —— 绝对阈值跨数据集不成立。
+MAX_RARE_FRAC = 0.004      # 占可用行的比例
+MAX_RARE_FLOOR = 20        # 语料再小也不低于这个, 不然一两次的偶然词也当真
 MIN_LEN = 2
 
 
-def load_counts(pairs: Path) -> Counter:
+def load_counts(pairs: Path):
+    """返回 (词频, 可用行数)。行数拿来按比例定门槛。"""
     lex: Counter = Counter()
+    n_rows = 0
     man = pairs / "_pairs_labeled.csv"
     for r in csv.DictReader(man.open(encoding="utf-8-sig")):
         if r.get("usable") != "1":
             continue
+        n_rows += 1
         for t in (r.get("text") or "").split(" "):
             t = t.strip()
             if len(t) >= MIN_LEN and HAN.search(t):
                 lex[t] += 1
-    return lex
+    return lex, n_rows
 
 
 def find_pairs(lex: Counter, ratio: int, max_rare: int) -> dict:
@@ -96,19 +109,22 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pairs", type=Path, required=True)
     ap.add_argument("--ratio", type=int, default=RATIO)
-    ap.add_argument("--max-rare", type=int, default=MAX_RARE)
+    ap.add_argument("--max-rare", type=int, default=0,
+                    help="不给就按可用行数的 0.4% 自动定(最低 20)")
     ap.add_argument("--apply", action="store_true",
                     help="真改 _segments.csv。不给就只看不动")
     ap.add_argument("--top", type=int, default=20)
     a = ap.parse_args()
 
-    lex = load_counts(a.pairs)
-    fix = find_pairs(lex, a.ratio, a.max_rare)
+    lex, n_rows = load_counts(a.pairs)
+    max_rare = a.max_rare or max(MAX_RARE_FLOOR, int(MAX_RARE_FRAC * n_rows))
+    fix = find_pairs(lex, a.ratio, max_rare)
     inst = sum(lex[w] for w in fix)
     print("=" * 58)
     print("  CLEAN LABELS  (ASCII only - safe to paste)")
     print("=" * 58)
-    print(f"  词表 {len(lex):,}")
+    print(f"  可用行 {n_rows:,}   词表 {len(lex):,}")
+    print(f"  罕见门槛 {max_rare}  (按可用行的 {MAX_RARE_FRAC:.1%} 自动定的)")
     print(f"  判成老师读错的 {len(fix):,} 个词,  涉及标签实例 {inst:,} 条")
     print()
     print(f"  {'次数':>7}  {'读错的':<14} ->  {'正确的'}")
@@ -116,7 +132,6 @@ def main() -> None:
         print(f"  {lex[w]:>7}  {w:<14} ->  {fix[w]}")
     print()
     # 数字那条闸拦下了多少 —— 报出来让人看见它确实在干活
-    loose = find_pairs(lex, a.ratio, a.max_rare)
     blocked = []
     buckets = defaultdict(list)
     for w, n in lex.items():
@@ -129,7 +144,7 @@ def main() -> None:
         v.sort(key=lambda t: -t[1])
         top, tn, pos = v[0]
         for w, n, _i in v[1:]:
-            if n > a.max_rare or tn < a.ratio * max(1, n):
+            if n > max_rare or tn < a.ratio * max(1, n):
                 continue
             if not (HAN.match(w[pos]) and HAN.match(top[pos])):
                 blocked.append((w, top, n))
