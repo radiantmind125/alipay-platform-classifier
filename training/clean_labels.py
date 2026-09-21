@@ -94,15 +94,42 @@ def find_pairs(lex: Counter, ratio: int, max_rare: int) -> dict:
         for w, n, _i in v[1:]:
             if n > max_rare or tn < ratio * max(1, n):
                 continue
-            # ★★★★★ 硬闸: 不一样的那个字必须**两边都是汉字**。
-            #   数字不一样的绝对不能动 —— 立即领取4积分 和 立即领取1积分
-            #   是两笔不同的奖励, 不是读错。
-            if not (HAN.match(w[pos]) and HAN.match(top[pos])):
+            # ★★★★★ 硬闸, 两条一起看:
+            #   1. **纠过去的那个字必须是汉字**
+            #   2. **被纠的那个字不能是数字或字母**
+            #
+            #   为什么这么定(蓝图上实测出来的):
+            #       —键领   -> 一键领    — 是 一 的误读, 该纠。目标是汉字, 来源是标点 -> 放行
+            #       学分+5U -> 学分+50   目标是数字 0, 不是汉字 -> 挡住
+            #       3元     -> 一元      来源是数字 3 -> 挡住。3 元和一元是两个金额!
+            #       通知IA  -> 通知TA    目标是字母 -> 挡住
+            #
+            #   原来只写"两边都得是汉字", 把 —键领 这种也挡了(25 条)。
+            #   现在这两条既放行了它, 又照样挡住所有带数字的。
+            if not HAN.match(top[pos]):
+                continue
+            if w[pos].isalnum() and not HAN.match(w[pos]):
                 continue
             # 同一个错词可能匹配到多个"正确词", 留最高频那个
             if w not in fix or lex[fix[w]] < tn:
                 fix[w] = top
-    return fix
+
+    # ★★★ 纠到底, 别只纠一步。实测蓝图上出现过这一串:
+    #       色弗领  ->  色费领  ->  免费领
+    #   只纠一步就停在 色费领 上, 而它**本身也是错的**。
+    #   顺着链一路走到不在表里为止。设个上限防死循环(互相指的情况)。
+    out = {}
+    for w, t in fix.items():
+        seen = {w}
+        for _ in range(8):
+            if t in fix and t not in seen:
+                seen.add(t)
+                t = fix[t]
+            else:
+                break
+        if t != w:
+            out[w] = t
+    return out
 
 
 def main() -> None:
@@ -146,7 +173,9 @@ def main() -> None:
         for w, n, _i in v[1:]:
             if n > max_rare or tn < a.ratio * max(1, n):
                 continue
-            if not (HAN.match(w[pos]) and HAN.match(top[pos])):
+            # ★ 这里的判据必须和 find_pairs 里**一模一样**, 否则报出来的
+            #   "被拦下的" 和实际拦下的对不上, 看报告的人会被误导。
+            if (not HAN.match(top[pos])) or (w[pos].isalnum() and not HAN.match(w[pos])):
                 blocked.append((w, top, n))
     print(f"  ★ 被'必须是汉字'那条闸拦下的 {len(blocked):,} 组 —— 这些**不能改**:")
     for w, top, n in sorted(blocked, key=lambda t: -t[2])[:8]:
