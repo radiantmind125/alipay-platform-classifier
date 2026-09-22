@@ -49,8 +49,20 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pairs", type=Path, required=True)
     ap.add_argument("--also", type=Path, nargs="*", default=[])
-    ap.add_argument("--lo", type=float, default=0.25,
-                    help="宽字比低于中位的这个倍数算离谱")
+    # ★★★★★ 下界从 0.25 收到 0.40 —— 0.25 太松, 漏掉了大量错配。
+    #
+    #   蓝图第二批的核对图上, 16 段里有 4 段明显错配(图是小图标碎片, 文字是
+    #   `支付宝打车` 这种), 但检测只标出 4.87%。查下来就是下界太松:
+    #       支付宝打车 5 个字挤在约 60 像素里 = 12px/字
+    #       而下界是 0.25 x 46.5 = 11.6 —— **刚好漏过去**
+    #
+    #   收到 0.40 之后下界变成 18.6, 这类就挡得住了。
+    #
+    # ★ 代价量过: 白图上从 0.25 收到 0.40, 丢掉的从 0.25% 涨到 0.31%,
+    #   多丢的那一条是 `2026070120004`(13 位订单号挤在 73 像素里), 本来就是坏的。
+    #   **收紧几乎不花钱, 因为真文字段离这条线很远。**
+    ap.add_argument("--lo", type=float, default=0.40,
+                    help="宽字比低于中位的这个倍数算离谱。0.40 是量出来的, 见上面注释")
     ap.add_argument("--hi", type=float, default=4.0)
     ap.add_argument("--drop", action="store_true",
                     help="把离谱的行在 _segments.csv 里标成 bad=1, 训练时可筛掉")
