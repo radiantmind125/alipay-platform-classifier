@@ -42,6 +42,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
+import re
 import os
 import random
 import sys
@@ -56,6 +58,8 @@ from erase_pinyin import local_background, text_mask  # noqa: E402
 
 # 比这么宽的空白才算"段与段之间"(按字高的倍数)。
 # 实测 1.6~2.4 倍之间对得上的比例都在 81%, 不敏感, 取中间。
+HAN = re.compile(r"[一-鿿]")
+
 GAP_RATIO = 1.8
 
 PAD = 4          # 每段左右各留几像素
@@ -109,8 +113,98 @@ def segments(label_img: np.ndarray) -> list[tuple[int, int]]:
     return [(a, b) for a, b in out if (b - a) >= h * 0.4]
 
 
+def _units(t: str) -> float:
+    """这段文字大概占几个字宽。汉字算 1, 半角算 0.5。"""
+    return sum(1.0 if HAN.match(c) else 0.5 for c in t)
+
+
+def calibrate_px_per_unit(rows, pairs: Path, sample: int = 400) -> float:
+    """量"一个字宽大概多少像素" —— 只拿**段数本来就对得上**的行来量。
+
+    ★★★★★ 不能用行高当一个字宽。试过, 差了一倍:
+       `计入收支` 那一行行高约 40, 但四个字只占 88 像素, 每字 22。
+       因为行的上下边界是**成员中位**, 而右边那个开关又高又大, 把行高撑起来了。
+       拿撑起来的行高当字宽, 算出来的"预期宽度"是实际的两倍,
+       于是两个候选都显得"太窄", 谁也选不出来。
+
+    ★ 段数本来就对得上的行是可信的 —— 它们的 宽度/字数 就是真实的字宽。
+    """
+    vals = []
+    for r in rows[: sample * 4]:
+        if len(vals) >= sample:
+            break
+        try:
+            lab = cv2.imdecode(np.fromfile(str(pairs / "label" / r["file"]),
+                                           np.uint8), cv2.IMREAD_COLOR)
+            if lab is None:
+                continue
+            parts = r["text"].split(" ")
+            segs = segments(lab)
+            if len(segs) != len(parts):
+                continue
+            for (x0, x1), t in zip(segs, parts):
+                u = _units(t)
+                if u > 0:
+                    vals.append((x1 - x0) / u)
+        except Exception:                    # noqa: BLE001
+            continue
+    return float(np.median(vals)) if vals else 40.0
+
+
+def drop_one_extra(segs, parts, px_per_unit):
+    """几何段比文字段**正好多一个**时, 试着丢掉一个再配。丢不准就返回 None。
+
+    ★★★★★ 为什么非做不可: 这一类占了丢弃行的大头, 而且是**成类丢**的。
+       实测 `计入收支` 那一行 —— 左边四个字, 右边一个开关 ——
+       4,286 行里 **400/400 全部对不上**, 无一例外:
+
+           文字 1 段 / 图上 2 段   宽度 [163, 96]
+
+       右边那个 96 像素的是**开关**, 有墨但不是字。于是整行被丢,
+       最后 17.9 万段里含"计入收支"的只剩 **1 条**。
+       模型等于从没学过这个词, 整页验收里它的命中率在 37%~57% 之间乱跳 ——
+       那不是退步, 是**从来就没有过信号**。
+
+    怎么挑丢哪个
+    ------------
+    一段文字有几个字, 它的图就该有多宽。逐个试着丢掉某一段,
+    算剩下的配对有多贴合这个预期, 取最贴合的那种。
+
+    ★ "一个字宽"必须**从数据里量**(见 calibrate_px_per_unit), 不能拿行高凑 ——
+      行高是被行里最高的元件撑起来的, 开关、图标一掺进去就偏一倍。
+
+    ★★ 但**丢得不干脆就不丢**: 最好的那种要明显好过次好的(差一倍以上),
+       否则宁可整行扔掉。错配的样本比没有更糟 —— 这条已经吃过亏。
+    """
+    if len(segs) != len(parts) + 1 or px_per_unit <= 0:
+        return None
+    want = [_units(t) for t in parts]
+    if any(u <= 0 for u in want):
+        return None
+
+    def cost(sel):
+        c = 0.0
+        for (x0, x1), u in zip(sel, want):
+            ratio = (x1 - x0) / (u * px_per_unit)
+            c += abs(math.log(max(ratio, 1e-3)))
+        return c
+
+    scored = []
+    for i in range(len(segs)):
+        sel = segs[:i] + segs[i + 1:]
+        scored.append((cost(sel), i, sel))
+    scored.sort(key=lambda t: t[0])
+    best, second = scored[0], scored[1]
+    # 最好的要明显好过次好的, 而且本身得够贴合
+    if best[0] > 0.55 * len(parts):
+        return None
+    if second[0] < best[0] * 2.0:
+        return None
+    return best[2]
+
+
 def process(args) -> list[dict]:
-    rec, pairs, out_dir = args
+    rec, pairs, out_dir, px_per_unit = args
     try:
         lab = cv2.imdecode(np.fromfile(str(Path(pairs) / "label" / rec["file"]),
                                        np.uint8), cv2.IMREAD_COLOR)
@@ -118,8 +212,12 @@ def process(args) -> list[dict]:
             return []
         parts = rec["text"].split(" ")
         segs = segments(lab)
+        if len(segs) == len(parts) + 1:
+            fixed = drop_one_extra(segs, parts, px_per_unit)
+            if fixed is not None:
+                segs = fixed
         if len(segs) != len(parts):
-            return []                       # ★ 对不上就整行丢掉, 不猜
+            return []                       # ★ 还对不上就整行丢掉, 不猜
 
         inp = cv2.imdecode(np.fromfile(str(Path(pairs) / "input" / rec["file"]),
                                        np.uint8), cv2.IMREAD_COLOR)
@@ -176,12 +274,13 @@ def main() -> None:
 
     out_dir = a.out or a.pairs
     out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"要切 {len(rows):,} 行,  {a.workers} 个进程")
+    ppu = calibrate_px_per_unit(rows, a.pairs)
+    print(f"要切 {len(rows):,} 行,  {a.workers} 个进程,  量出来一个字宽 {ppu:.1f} 像素")
 
     allseg: list[dict] = []
     with ProcessPoolExecutor(max_workers=a.workers) as ex:
         for i, got in enumerate(ex.map(process,
-                                       [(r, str(a.pairs), str(out_dir)) for r in rows],
+                                       [(r, str(a.pairs), str(out_dir), ppu) for r in rows],
                                        chunksize=64), 1):
             allseg.extend(got)
             if i % 20000 == 0:
