@@ -79,6 +79,11 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=17)
     ap.add_argument("--save", type=Path, default=None,
                     help="存对比图: 判成注音的块涂红, 肉眼看有没有啃到汉字")
+    # ★ 默认只存前 12 张, 而**要看的偏偏是暴涨的那几张**, 多半不在前 12 里。
+    ap.add_argument("--only-blown", action="store_true",
+                    help="只存块数暴涨的那几张 —— 要看的就是它们")
+    ap.add_argument("--blow", type=float, default=1.8,
+                    help="涨到多少倍算暴涨。1.8 是随手定的, 看分布再调")
     a = ap.parse_args()
 
     files = sorted(p for p in a.src.iterdir() if p.suffix.lower() in EXTS)
@@ -96,6 +101,7 @@ def main() -> None:
     tot = {"old_g": 0, "new_g": 0, "old_r": 0, "new_r": 0,
            "old_wp": 0, "new_wp": 0}
     gain_rows, lose_rows, blew_up = 0, 0, []
+    ratios: list[tuple[float, str, int, int]] = []
     ok = 0
     for i, p in enumerate(files, 1):
         img = cv2.imdecode(np.fromfile(str(p), np.uint8), cv2.IMREAD_COLOR)
@@ -112,9 +118,13 @@ def main() -> None:
         elif nwp < owp:
             lose_rows += 1
         # ★ 注音块数暴涨 = 很可能把正文也判进去了, 单独记下来看图
-        if og > 0 and ng > og * 1.8:
+        ratio = ng / og if og else 0.0
+        if og > 0:
+            ratios.append((ratio, p.name, og, ng))
+        blown = og > 0 and ratio > a.blow
+        if blown:
             blew_up.append((p.name, og, ng))
-        if a.save and i <= 12:
+        if a.save and (blown if a.only_blown else i <= 12):
             # ★ 红色 = 判成注音(也就是**会被擦掉**的那些块)。
             #   老新各存一张, 对着看新判法多涂红了哪些 —— 多涂在拼音上才对,
             #   多涂到汉字上就是要啃字了。
@@ -141,6 +151,20 @@ def main() -> None:
     print()
     print(f"  ★ 有拼音的行变多的图 {gain_rows} 张, 变少的 {lose_rows} 张")
     print()
+    # ★★★★★ 1.8 倍这条线是**随手定的**。先看看分布:
+    #   要是绝大多数图都贴近 1.0, 只有一两张冲到 2 倍以上, 那是真的异常;
+    #   要是从 1.0 到 2.0 连成一片, 那这条线本身就没意义, 得换判法。
+    if ratios:
+        ratios.sort(reverse=True)
+        qs = [ratios[int(len(ratios) * f)][0]
+              for f in (0.0, 0.05, 0.25, 0.5, 0.75)]
+        print("  注音块数 新/老 的分布(从大到小):")
+        print(f"    最大 {qs[0]:.2f}   95分位 {qs[1]:.2f}   75分位 {qs[2]:.2f}"
+              f"   中位 {qs[3]:.2f}   25分位 {qs[4]:.2f}")
+        print("    最高的几张:")
+        for r, nm, o, n in ratios[:5]:
+            print(f"      {r:>5.2f}x  {o:>5} -> {n:>5}   {nm[:44]}")
+        print()
     if blew_up:
         print(f"  ★★★★★ 注音块数暴涨(超过 1.8 倍)的有 {len(blew_up)} 张 ——")
         print("     **很可能把正文也判成注音了**, 这些必须看图:")
