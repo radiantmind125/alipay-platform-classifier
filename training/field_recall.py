@@ -139,22 +139,36 @@ def main() -> None:
 
     misses = {}
     tot_present = tot_ours = tot_ceil = 0
+    tot_onlyb = 0
+    onlyb_by_field = {}
     for fd in FIELDS_15:
         pres, o_hit, c_hit, miss = 0, 0, 0, []
-        won = 0
+        won, only_b = 0, []
         for r in recs:
             ours = (r.get("ours") or "").replace(" ", "")
             ceil = (r.get("ceiling") or "").replace(" ", "")
-            in_o, in_c = fd in ours, fd in ceil
-            if not (in_o or in_c):
+            base = (r.get("base") or "").replace(" ", "")
+            in_o, in_c, in_b = fd in ours, fd in ceil, fd in base
+            # ★★★★★ 并集里**必须**带上 base。
+            #   天花板是拿**我们自己切出来的行**去 OCR 的, 行检测漏掉的行
+            #   天花板同样看不见 —— 两边一起漏, 那个字段就从分母里悄悄消失了,
+            #   于是我们的召回看着永远是 100%。
+            #   base 是现成 OCR 整页读的, **版面是它自己做的**, 和我们无关,
+            #   所以它能照出我们行检测的漏。
+            if not (in_o or in_c or in_b):
                 continue
             pres += 1
             o_hit += in_o
             c_hit += in_c
             if in_o and not in_c:
                 won += 1
+            if in_b and not in_o and not in_c:
+                only_b.append(r)      # ← 独立版面看到了, 我们这条线整个没看到
             if not in_o:
                 miss.append(r)
+        tot_onlyb += len(only_b)
+        if only_b:
+            onlyb_by_field[fd] = only_b
         if pres == 0:
             print(f"  {fd:<10}{0:>7}{'-':>10}{'-':>10}{'-':>8}{'-':>6}"
                   f"   <- 这批图上根本没有")
@@ -174,6 +188,41 @@ def main() -> None:
     print()
     print("  ★ '页上有'那一列才是真分母。e2e_bench 那张表的分母是全部 400 张,")
     print("    所以那里的 18% 和这里的召回**不是一回事**。")
+    print()
+
+    # ★★★★★ 这一段才是判"还有多少可捡"的关键
+    has_base = any((r.get("base") or "").strip() for r in recs)
+    print("=" * 74)
+    if not has_base:
+        print("  【这一跑没有独立版面的旁证 —— 上面的召回是**虚高**的】")
+        print("=" * 74)
+        print("  天花板是拿我们自己切出来的行去 OCR 的, 和我们**共用行检测**。")
+        print("  行检测整个漏掉的行, 天花板也看不见, 那个字段就从分母里消失了。")
+        print("  所以上面那个 100% 的准确说法是:")
+        print("      **我们把版面找到的字段基本都读对了**")
+        print("  而不是:")
+        print("      我们把页面上的字段都找到了")
+        print()
+        print("  要量后者, 得让现成 OCR **整页自己做版面**读一遍当旁证:")
+        print("    去掉 --no-baseline, 加 --dump, 再跑这个脚本")
+        print("    (现成 OCR 整页只有 0.18 张/秒, 所以 --n 取 150 就够)")
+    else:
+        print("  【独立版面旁证: 现成 OCR 整页自己做版面, 它看到而我们没看到的】")
+        print("=" * 74)
+        print("  现成 OCR 的版面和我们无关, 所以它能照出**我们行检测的漏**。")
+        print()
+        if not tot_onlyb:
+            print("  ★★★★★ 一条都没有 —— 独立版面也没找到我们漏掉的字段。")
+            print("     说明行检测这一层**没有明显的漏**, 上面的召回可以当真。")
+        else:
+            print(f"  ★★ 共 {tot_onlyb} 条: 它读到了, 我们和天花板都没读到。")
+            print("     这些是**我们行检测漏掉的**, 补识别数据没用, 要动版面。")
+            print()
+            for fd, lst in sorted(onlyb_by_field.items(),
+                                  key=lambda kv: -len(kv[1])):
+                print(f"    {fd:<10}{len(lst):>4} 条")
+                for r in lst[:a.show]:
+                    print(f"               例 {r.get('file')}")
     print()
 
     print("=" * 74)
