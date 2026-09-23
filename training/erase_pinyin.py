@@ -41,6 +41,9 @@ DIFF_THRESHOLD = 28            # 和 pinyin_probe / TextRegion 一致
 ANNOT_HEIGHT_RATIO = 0.6       # 注音行相对下面那行的高度上限
 ANNOT_GAP_RATIO = 0.5          # 注音行和下面那行的间距上限
 MIN_RUN = 4                    # 同一高度上至少要凑成这么多个才算一排拼音
+# ★ 局部判据只对**比正文大这么多倍**的块启用。正常大小的块一律走老判据,
+#   这样白图(已经 96.31%)几乎不受影响, 而赚头在大标题上照样能拿到。
+LOCAL_BIG_MIN = 1.3
 
 
 def local_background(gray: np.ndarray) -> np.ndarray:
@@ -119,9 +122,18 @@ def annotation_labels(mask: np.ndarray, local_ratio: bool = False):
             for _, bx, by, bw, bh in buckets.get(k, ()):
                 if by < y:
                     continue
-                # ★ 新判法在这里把"小"改成**相对配对的那个大块**, 而不是相对整页
-                if local_ratio and h > 0.55 * bh:
-                    continue
+                # ★ 新判法在这里把"小"改成**相对配对的那个大块**, 而不是相对整页。
+                #
+                # ★★★★★ 但**只对明显比正文大的块**这么判。
+                #   第一版是不管大小一律用局部判据, 结果白图代价很大:
+                #       白图 判成注音的块 +17.4%, 认出有拼音的行只 +2.1%, 4 张块数暴涨
+                #       蓝图 判成注音的块 +38.1%, 认出有拼音的行   +21.4%, 1 张暴涨
+                #   白图本来就 96.31%, **没什么可赚, 全是可赔的**。
+                #   赚在大标题上, 那就只对大标题放宽, 正常大小的块**一个都不动**。
+                if local_ratio:
+                    ref = bh if bh > LOCAL_BIG_MIN * big_h else big_h
+                    if h > 0.55 * ref:
+                        continue
                 if min(x + w, bx + bw) - max(x, bx) <= 0.5 * min(w, bw):
                     continue
                 gap = by - (y + h)
