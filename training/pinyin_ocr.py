@@ -127,14 +127,25 @@ def layout(img: np.ndarray) -> list[dict]:
 
 class Recognizer:
     def __init__(self, model: Path | None, onnx: Path | None):
+        # ★★★★★ 模型和字表**必须配套**。字表换了(哪怕字数一样), 解出来是
+        #   一堆看着像话的乱码, **不报错**。交付出去之后这种错最难查 ——
+        #   别人只会觉得"这模型不准", 不会想到是两个文件没配对。
+        #   所以在这里**主动核一次**, 对不上就直接抛错, 不让它往下跑。
+        self._checked = False
         if onnx:
             import onnxruntime as ort
+            cs_path = onnx.parent / "charset.txt"
+            if not cs_path.exists():
+                raise FileNotFoundError(
+                    f"字表不在: {cs_path}\n"
+                    f"  模型和 charset.txt 必须放在同一个目录, 而且是同一次训练出来的")
             self.sess = ort.InferenceSession(str(onnx),
                                              providers=["CPUExecutionProvider"])
-            chars = [c for c in (onnx.parent / "charset.txt").read_text(
+            chars = [c for c in cs_path.read_text(
                 encoding="utf-8").split("\n") if c]
             self.cs = Charset(chars)
             self.kind = "onnx"
+            self._where = f"{onnx.name} + {cs_path.name}"
         else:
             import torch
             from train_rec import CRNN
@@ -145,6 +156,8 @@ class Recognizer:
             self.net.eval()
             self.torch = torch
             self.kind = "torch"
+            # ★ torch 那一路字表是**存在权重文件里**的, 天然配套, 不会错配
+            self._where = f"{model.name} (字表在权重里)"
 
     def __call__(self, crops: list[np.ndarray], batch: int = 32) -> list[str]:
         texts: list[str] = []
@@ -168,6 +181,26 @@ class Recognizer:
             else:
                 with self.torch.no_grad():
                     logits = self.net(self.torch.from_numpy(x)).numpy()
+            # ★★★★★ 第一次推理时核一下模型输出的类别数和字表对不对得上。
+            #   放在这里而不是加载时, 是因为 onnx 的输出形状可能是动态的,
+            #   静态读未必读得到; 真跑一次拿到的形状**一定是准的**。
+            #   只核一次, 不影响速度。
+            if not self._checked:
+                self._checked = True
+                n_out = int(logits.shape[-1])
+                # ★★ 注意 len(Charset) **本身已经算上 CTC 空白符了**
+                #   (Charset.__len__ 返回 len(chars)+1), 而模型是
+                #   CRNN(len(cs)) 建的, 所以两者应当**正好相等**, 不要再加 1。
+                #   我第一版写成 len(cs)+1, 那样每次推理都会误报, 整条链都跑不动。
+                n_need = len(self.cs)
+                if n_out != n_need:
+                    raise RuntimeError(
+                        f"模型和字表对不上, 解出来会是乱码, 已经停下。\n"
+                        f"  用的是   {self._where}\n"
+                        f"  模型输出 {n_out} 类\n"
+                        f"  字表     {len(self.cs.chars)} 个字, 加上 CTC 空白符"
+                        f"应当是 {n_need} 类\n"
+                        f"  ★ 这两个文件必须是**同一次训练**出来的, 一起拷贝")
             ids = logits.argmax(2)
             for k, j in enumerate(idx):
                 res[j] = self.cs.decode(ids[k][: max(1, widths[k] // 4)])
