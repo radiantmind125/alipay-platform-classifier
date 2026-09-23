@@ -109,6 +109,11 @@ def main() -> None:
     ours, base, t_ours, t_base = [], [], 0.0, 0.0
     ours22, base22 = [], []
     ceil = []
+    # ★★★★★ 清单里没有这张图的时候**不能**把它当 0 算进天花板 ——
+    #   那张图天花板记 0 字段 0 字, 而 ours 照常读照常记分, 等于白送我们分,
+    #   缺得越多我们看着越好看。记下哪些图有清单, 比值只在这些图上算。
+    #   (白图实测 400 张里缺 2 张, 天花板被拽低 0.6 字/张; 蓝图一张不缺。)
+    cov = []
     txt_all_o, txt_all_b, txt_all_c = [], [], []
     # 每个字段各自被谁找到了 —— 经理那边是按字段抽的, 这个比总数有用
     hit_o = {f: 0 for f in FIELDS_15}
@@ -126,6 +131,7 @@ def main() -> None:
             hit_o[f] += f in txt_o
         if ceil_by_src:
             tc = ceil_by_src.get(p.name, "")
+            cov.append(p.name in ceil_by_src)
             ceil.append(found(tc))
             txt_all_c.append(tc)
             for f in FIELDS_15:
@@ -179,13 +185,21 @@ def main() -> None:
         tie = int((o == b).sum())
         print(f"    ours better on {win}/{len(files)} images, "
               f"tie {tie}, worse {len(files)-win-tie}")
+    cov_m = np.array(cov, dtype=bool) if cov else None
+    n_miss = int((~cov_m).sum()) if cov_m is not None else 0
     if ceil:
         c = np.array(ceil)
         print(f"  {'ceiling':<12}{np.median(c):>8.1f}{c.mean():>8.2f}"
               f"{c.min():>6}{c.max():>6}{(c == 0).sum():>7}"
               f"   <- 同图不带拼音时的上限")
-        print(f"    ours / ceiling = {o.mean()/max(1e-9,c.mean()):.2f}"
-              f"   (1.00 就是拼音这道坎填平了)")
+        if n_miss:
+            print(f"    ★★ {n_miss} 张不在配对清单里 —— 天花板给它们记 0 而我们照常记分,")
+            print(f"       白送我们分, 所以下面的比值**只在另外 "
+                  f"{int(cov_m.sum())} 张上算**")
+        print(f"    ours / ceiling = "
+              f"{o[cov_m].mean()/max(1e-9,c[cov_m].mean()):.2f}"
+              f"   (1.00 就是拼音这道坎填平了)"
+              f"{'  [已剔除缺清单的]' if n_miss else ''}")
     # ★★★★★ 再报一个**按汉字数**的。
     #   数字段名这个判据是给白图回单定的 —— 蓝图页面上本来就没几个那些字段
     #   (实测可用行里只有 16% 含回单字段名, 剩下是促销、徽章、姓名、金额)。
@@ -196,9 +210,13 @@ def main() -> None:
     print(f"  ---- 按读出的汉字数(蓝图用这个看) ----")
     print(f"    ours      {han_o/len(files):>7.1f} 字/张")
     if txt_all_c:
-        han_c = sum(len(HAN.findall(t)) for t in txt_all_c)
-        print(f"    ceiling   {han_c/len(files):>7.1f} 字/张"
-              f"   ours/ceiling = {han_o/max(1,han_c):.2f}")
+        # ★ 和字段比一样, 汉字比也只在有清单的图上算
+        n_cov = max(1, int(cov_m.sum()))
+        han_c = sum(len(HAN.findall(t)) for t, k in zip(txt_all_c, cov) if k)
+        han_o_c = sum(len(HAN.findall(t)) for t, k in zip(txt_all_o, cov) if k)
+        print(f"    ceiling   {han_c/n_cov:>7.1f} 字/张"
+              f"   ours/ceiling = {han_o_c/max(1,han_c):.2f}"
+              f"{'  [已剔除缺清单的]' if n_miss else ''}")
     if txt_all_b:
         han_b = sum(len(HAN.findall(t)) for t in txt_all_b)
         print(f"    rapidocr  {han_b/len(files):>7.1f} 字/张"

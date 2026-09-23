@@ -114,8 +114,10 @@ def main() -> None:
     print()
     if outside:
         gap = c_in - c_all
-        print(f"  ★★ 两者差 {gap:.1f} 字/张。e2e_bench 报的天花板**低了这么多**,")
-        print(f"     我们那个 1.05 得按 {c_in:.1f} 重算才作数。")
+        print(f"  ★★ 两者差 {gap:.1f} 字/张({gap/max(1e-9,c_in):.1%})。"
+              f"e2e_bench 报的天花板**低了这么多**,")
+        print(f"     ours/ceiling 那个比值得按 {c_in:.1f} 重算才作数。")
+        print(f"     (e2e_bench 已经改成自动剔除缺清单的图, 重跑一遍就是对的)")
     else:
         print("  ★ 没有缺图, e2e_bench 报的天花板可以直接用。")
     print()
