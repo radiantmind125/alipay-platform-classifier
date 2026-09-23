@@ -73,7 +73,7 @@ def main() -> None:
             print(f"  清单不在: {man}")
             continue
         rows = list(csv.DictReader(man.open(encoding="utf-8-sig")))
-        keep, ppu = [], []
+        keep = []
         for r in rows:
             t = (r.get("text") or "").strip()
             if not t or r.get("bad") == "1":
@@ -82,19 +82,41 @@ def main() -> None:
             w = int(r["x1"]) - int(r["x0"])
             if u <= 0 or w <= 0:
                 continue
-            keep.append((r, t, u, w))
-            ppu.append(w / u)
+            # ★★★★★ 必须按**这一段自己的字号**归一, 不能拿整页中位当基准。
+            #   第一版就是拿整页中位比的, 结果把**大字号的完整文字**全判成了"缺字":
+            #       4898x 账单详情   3670x -100.00   2810x 添加   455x 全部账单
+            #   这些一个字都不缺, 只是标题和金额的字号本来就大, 宽/字自然高。
+            #   于是报出 14.70%, 而真实的量级是 0.29% —— **差了五十倍**。
+            #   按段高分桶再比, 就把字号这个因素消掉了。
+            h = 0
+            if r.get("y0") is not None and r.get("y1") is not None:
+                try:
+                    h = int(r["y1"]) - int(r["y0"])
+                except (TypeError, ValueError):
+                    h = 0
+            keep.append((r, t, u, w, h))
         if not keep:
             print(f"  {d.name}: 没有可用的段")
             continue
-        med = float(np.median(ppu))
+
+        has_h = sum(1 for _r, _t, _u, _w, h in keep if h > 0) > len(keep) * 0.9
+        med_by = {}
+        if has_h:
+            # 按段高分桶(每 8 像素一桶), 每桶各自算中位
+            bucket = {}
+            for _r, _t, u, w, h in keep:
+                bucket.setdefault(h // 8, []).append(w / u)
+            med_by = {k: float(np.median(v)) for k, v in bucket.items()
+                      if len(v) >= 30}
+        med = float(np.median([w / u for _r, _t, u, w, _h in keep]))
 
         susp, field_hit = [], []
-        for r, t, u, w in keep:
+        for r, t, u, w, h in keep:
+            ref = med_by.get(h // 8, med) if has_h else med
             cur = w / u
             nxt = w / (u + 1.0)
-            # 偏宽, 且"再加一个字"之后更贴近中位
-            if cur > med * 1.35 and abs(nxt - med) < abs(cur - med):
+            # 偏宽, 且"再加一个字"之后更贴近**同字号**的中位
+            if cur > ref * 1.35 and abs(nxt - ref) < abs(cur - ref):
                 susp.append((r, t, cur))
                 # 这一段的文字要是某个字段名的真子串, 那基本可以坐实
                 if any(t != f and t in f for f in FIELDS):
@@ -104,10 +126,12 @@ def main() -> None:
         print("-" * 72)
         print(f"  {d.name}")
         print(f"    可用段            {n:>9,}")
-        print(f"    宽/字 中位        {med:>9.1f} px")
-        print(f"    ★ 疑似少一个字     {len(susp):>9,}  ({len(susp)/n:.2%})")
-        print(f"      其中是字段名真子串 {len(field_hit):>7,}"
-              f"   <- 这些基本可以坐实")
+        print(f"    宽/字 中位        {med:>9.1f} px"
+              f"{'   (按段高分了 %d 个字号桶)' % len(med_by) if med_by else ''}")
+        print(f"    疑似少一个字       {len(susp):>9,}  ({len(susp)/n:.2%})"
+              f"   <- **宽判**, 大字号的完整文字也会混进来")
+        print(f"    ★ 其中是字段名真子串 {len(field_hit):>7,}"
+              f"  ({len(field_hit)/n:.2%})   <- **这个才是能当数用的**")
         print()
         if field_hit:
             print(f"    坐实的那些长什么样(前 {a.show} 种):")
@@ -121,12 +145,15 @@ def main() -> None:
         print()
 
     print("-" * 72)
-    print("  ★★★★★ 怎么用这个数决定要不要重出训练数据:")
-    print("     疑似**低于 1%**    -> 不值得花 58 小时重跑, 推理端 pad 4 already 够了")
-    print("     疑似**高于 3%**    -> 值得重出, 而且白蓝都受益")
-    print("     中间              -> 只重出蓝图(6 小时), 白图先不动")
+    print("  ★★★★★ 只能拿**字段名真子串**那一行去做决定。")
+    print("     上面那个'疑似'是宽判, 大字号的完整文字(账单详情、-100.00、添加)")
+    print("     会大量混进来 —— 第一版就是这么报出 14.70% 的, 真实量级 0.29%。")
     print()
-    print("  ★ 这是**下界** —— 掉字之后宽度恰好还落在正常区间的那些数不出来。")
+    print("     坐实的**低于 1%**  -> 不值得花 58 小时重跑, 推理端 pad 4 已经够了")
+    print("     坐实的**高于 3%**  -> 值得重出, 而且白蓝都受益")
+    print()
+    print("  ★ 这是**下界**: 只数得出'截断之后仍然是字段名子串'的那些,")
+    print("    商家名、金额那类截断了也认不出来。")
 
 
 if __name__ == "__main__":
