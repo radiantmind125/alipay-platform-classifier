@@ -59,8 +59,13 @@ def text_mask(gray: np.ndarray, bg: np.ndarray) -> np.ndarray:
     return (cv2.absdiff(gray, bg) > DIFF_THRESHOLD).astype(np.uint8)
 
 
-def annotation_labels(mask: np.ndarray):
+def annotation_labels(mask: np.ndarray, local_ratio: bool = False):
     """逐**连通块**判哪些是注音字。
+
+    ★★★★★ `local_ratio` 默认 **False**, 也就是**行为和以前一字不差**。
+       打开之后才换成"和配对的那个大块比"的新判法 —— 见下面 small/cand 那一段。
+       这么加是为了能 A/B, **不要**在量过之前把默认值改掉:
+       白图现在拼音检测 96.31%, 动坏了赔不起。
 
     返回 (标签图, 注音块的标签号, 总块数, 汉字块的外接框列表)。
 
@@ -84,9 +89,22 @@ def annotation_labels(mask: np.ndarray):
     big_h = float(np.percentile(hs, 75))          # 汉字那一档
     if big_h < 8:
         return labels, [], len(comps), []
-    small = [c for c in comps if c[4] <= 0.55 * big_h]
+    # ★★★★★ 老判法: "小"是和**整页**的 big_h(高度 75 分位)比。
+    #   大标题的拼音**按整页看并不小** —— 标题字 60 像素高, 它的拼音 25 像素,
+    #   而整页 big_h 才 30, 0.55*30=16.5, 25 比它大, 于是不算"小",
+    #   甚至可能 >= 0.8*big_h 直接被当成正文。**这就是大标题拼音漏掉的原因。**
+    #   实测漏的样本全是大号标题和按钮: zhangdanxiangqing 账单详情,
+    #   zhuanzhangchenggong 回首页, zaizhuanyibi 再转一笔。
+    #   白图漏 3.69%, 蓝图漏 17.51%(蓝图版面被大标题主导, 所以特别多)。
+    #
+    # ★ 新判法(local_ratio=True): 候选放宽, 大小关系改成和**配对的那个大块**比,
+    #   在下面配对循环里判 h <= 0.55 * bh。这样 25 对 60 就成立了。
+    if local_ratio:
+        cand = [c for c in comps if c[4] < big_h * 1.2]
+    else:
+        cand = [c for c in comps if c[4] <= 0.55 * big_h]
     big = [c for c in comps if c[4] >= 0.8 * big_h]
-    if len(small) < 20 or len(big) < 20:
+    if len(cand) < 20 or len(big) < 20:
         return labels, [], len(comps), []
 
     buckets: dict[int, list] = {}
@@ -95,11 +113,14 @@ def annotation_labels(mask: np.ndarray):
             buckets.setdefault(k, []).append(b)
 
     hit_labels = []
-    for idx, x, y, w, h in small:
+    for idx, x, y, w, h in cand:
         for k in range(x // 50, (x + w) // 50 + 1):
             done = False
             for _, bx, by, bw, bh in buckets.get(k, ()):
                 if by < y:
+                    continue
+                # ★ 新判法在这里把"小"改成**相对配对的那个大块**, 而不是相对整页
+                if local_ratio and h > 0.55 * bh:
                     continue
                 if min(x + w, bx + bw) - max(x, bx) <= 0.5 * min(w, bw):
                     continue
@@ -126,7 +147,7 @@ def annotation_labels(mask: np.ndarray):
     #   所以只留"同一高度上凑得成一排"的那些。
     groups: dict[int, list] = {}
     for idx in hit_labels:
-        c = next(x for x in small if x[0] == idx)
+        c = next(x for x in cand if x[0] == idx)
         cy = c[2] + c[4] // 2
         key = cy // max(4, int(big_h * 0.25))      # 按高度分桶
         groups.setdefault(key, []).append(idx)
