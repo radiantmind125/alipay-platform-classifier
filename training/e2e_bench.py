@@ -1,4 +1,4 @@
-"""端到端验收: 整张拼音截图, 我们这条链 vs 现成 OCR, 谁把字段读出来得多。
+﻿"""端到端验收: 整张拼音截图, 我们这条链 vs 现成 OCR, 谁把字段读出来得多。
 
 为什么用"数字段名"这个判据
 --------------------------
@@ -119,7 +119,17 @@ def main() -> None:
     hit_o = {f: 0 for f in FIELDS_15}
     hit_b = {f: 0 for f in FIELDS_15}
     hit_c = {f: 0 for f in FIELDS_15}
+    n_bad = 0
     for i, p in enumerate(files, 1):
+        # ★★ 图库里有坏文件, cv2.imdecode 解出来是 None。
+        #   之前没防, 直接把 None 递给 rapidocr, 整个跑崩在第 74 张
+        #   (白图那次 150 张只跑完 73 张)。
+        #   ★ 要**整张跳过**, 不能只跳过 baseline —— 否则三边比的不是同一批图。
+        probe = cv2.imdecode(np.fromfile(str(p), np.uint8), cv2.IMREAD_COLOR)
+        if probe is None:
+            n_bad += 1
+            print(f"    坏图跳过: {p.name}", flush=True)
+            continue
         t0 = time.time()
         segs = read_image(p, rec)
         t_ours += time.time() - t0
@@ -138,7 +148,7 @@ def main() -> None:
                 hit_c[f] += f in tc
 
         if ocr is not None:
-            img = cv2.imdecode(np.fromfile(str(p), np.uint8), cv2.IMREAD_COLOR)
+            img = probe          # ★ 上面已经解过了, 不用再解一遍
             t0 = time.time()
             res, _ = ocr(img, use_cls=False)
             t_base += time.time() - t0
@@ -169,8 +179,12 @@ def main() -> None:
     print("=" * 58)
     print("  E2E BENCH  (ASCII only - safe to paste)")
     print("=" * 58)
-    print(f"  images {len(files)}   fields tracked {len(FIELDS_15)} "
+    # ★ 跳过坏图之后, 分母得用**真正跑过的张数**, 不能再用 len(files)
+    n_ok = len(ours)
+    print(f"  images {n_ok}   fields tracked {len(FIELDS_15)} "
           f"(最早那次用的同一份)")
+    if n_bad:
+        print(f"  ★ 另有 {n_bad} 张坏图(解不出来), 三边都跳过了")
     print()
     print(f"  {'':<12}{'median':>8}{'mean':>8}{'min':>6}{'max':>6}{'zero':>7}")
     print(f"  {'ours':<12}{np.median(o):>8.1f}{o.mean():>8.2f}"
@@ -183,8 +197,8 @@ def main() -> None:
         print(f"  ★ ours / rapidocr  =  {o.mean()/max(1e-9,b.mean()):.2f}x")
         win = int((o > b).sum())
         tie = int((o == b).sum())
-        print(f"    ours better on {win}/{len(files)} images, "
-              f"tie {tie}, worse {len(files)-win-tie}")
+        print(f"    ours better on {win}/{n_ok} images, "
+              f"tie {tie}, worse {n_ok-win-tie}")
     cov_m = np.array(cov, dtype=bool) if cov else None
     n_miss = int((~cov_m).sum()) if cov_m is not None else 0
     if ceil:
@@ -208,7 +222,7 @@ def main() -> None:
     han_o = sum(len(HAN.findall(t)) for t in txt_all_o)
     print()
     print(f"  ---- 按读出的汉字数(蓝图用这个看) ----")
-    print(f"    ours      {han_o/len(files):>7.1f} 字/张")
+    print(f"    ours      {han_o/max(1,n_ok):>7.1f} 字/张")
     if txt_all_c:
         # ★ 和字段比一样, 汉字比也只在有清单的图上算
         n_cov = max(1, int(cov_m.sum()))
@@ -219,7 +233,7 @@ def main() -> None:
               f"{'  [已剔除缺清单的]' if n_miss else ''}")
     if txt_all_b:
         han_b = sum(len(HAN.findall(t)) for t in txt_all_b)
-        print(f"    rapidocr  {han_b/len(files):>7.1f} 字/张"
+        print(f"    rapidocr  {han_b/max(1,n_ok):>7.1f} 字/张"
               f"   ours/rapidocr = {han_o/max(1,han_b):.2f}")
     print()
     if ceil:
@@ -228,7 +242,7 @@ def main() -> None:
         #   而实际是"根本没量"。没量的东西打成 0 是误导, 比不打更糟。
         head = f"    {'field':<10}{'ceiling':>9}{'ours':>8}"
         print(head + (f"{'rapidocr':>10}" if base else "      (未跑现成 OCR)"))
-        n_img = len(files)
+        n_img = n_ok
         for f in FIELDS_15:
             line = f"    {f:<10}{hit_c[f]/n_img:>8.0%}{hit_o[f]/n_img:>8.0%}"
             print(line + (f"{hit_b[f]/n_img:>9.0%}" if base else ""))
@@ -243,10 +257,10 @@ def main() -> None:
     print("       用同一份 15 字段表、原厂默认配置重量, 得到的是 4.0。")
     print("       所以页面级别的差距是 4 比 9 左右, 不是 2 比 9。报数要按 4 报。")
     print()
-    print(f"  speed   ours {len(files)/max(t_ours,1e-9):.2f} img/s"
+    print(f"  speed   ours {n_ok/max(t_ours,1e-9):.2f} img/s"
           f"   (生产是 CPU, 底线 1 张/秒)")
     if base:
-        print(f"          rapidocr {len(files)/max(t_base,1e-9):.2f} img/s")
+        print(f"          rapidocr {n_ok/max(t_base,1e-9):.2f} img/s")
 
 
 if __name__ == "__main__":

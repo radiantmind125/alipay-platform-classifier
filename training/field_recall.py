@@ -84,7 +84,16 @@ def classify(field: str, rec: dict) -> tuple[str, str]:
     # 1) 拼接问题: 整页文字是用空格连起来的, 字段被切成两段就匹配不上
     if field in ours.replace(" ", ""):
         return "切开了", ""
-    # 2) 识别问题: 有某一段长得很像
+    # 2) ★★★★★ 裁切截断: 我们读出来的是字段名的**真子串**, 掉了头一个或末一个字。
+    #    实测 '账单详情'->'账单详', '订单号'->'单号' —— 这**不是认错字**,
+    #    是切段的边界把头尾吃掉了。修法是放宽边界, **不用补数据重训**,
+    #    和 '付款方式'->'付默方式' 那种真认错字完全两回事。
+    #    之前一律归进"读错N个字", 把便宜的和贵的混在一起了。
+    for s in rec.get("segs") or []:
+        t = (s.get("t") or "").strip()
+        if t and t != field and t in field and len(t) >= len(field) - 2:
+            return "裁切掉了字", t
+    # 3) 识别问题: 有某一段长得很像
     best, bt = 99, ""
     for s in rec.get("segs") or []:
         t = (s.get("t") or "").strip()
@@ -216,13 +225,35 @@ def main() -> None:
             print("     说明行检测这一层**没有明显的漏**, 上面的召回可以当真。")
         else:
             print(f"  ★★ 共 {tot_onlyb} 条: 它读到了, 我们和天花板都没读到。")
-            print("     这些是**我们行检测漏掉的**, 补识别数据没用, 要动版面。")
             print()
+            # ★★★★★ 这一类**不能一律算作"行检测漏了"**。
+            #   实测白图上 账单详情 的 3 条在这里, 但按原因分是"读错2个字 2 +
+            #   读错1个字 1" —— 我们**看见了那一行**, 只是读错, 天花板也读错,
+            #   现成 OCR 读对了。那是识别问题, 不是版面问题。
+            #   只有归到"没看见"的才是真的版面漏。
+            blind, seen = 0, 0
+            files_blind = set()
             for fd, lst in sorted(onlyb_by_field.items(),
                                   key=lambda kv: -len(kv[1])):
-                print(f"    {fd:<10}{len(lst):>4} 条")
+                cats = {}
+                for r in lst:
+                    c, _ = classify(fd, r)
+                    cats[c] = cats.get(c, 0) + 1
+                    if c == "没看见":
+                        blind += 1
+                        files_blind.add(r.get("file"))
+                    else:
+                        seen += 1
+                line = "  ".join(f"{c} {n}" for c, n in
+                                 sorted(cats.items(), key=lambda kv: -kv[1]))
+                print(f"    {fd:<10}{len(lst):>4} 条   {line}")
                 for r in lst[:a.show]:
                     print(f"               例 {r.get('file')}")
+            print()
+            print(f"  ★★★★★ 拆开看: 真正**版面没看见**的 {blind} 条"
+                  f"(涉及 {len(files_blind)} 张图), "
+                  f"看见了但读错的 {seen} 条")
+            print("     前者才要动行检测。后者补数据就行, 便宜得多。")
     print()
 
     print("=" * 74)
@@ -253,6 +284,7 @@ def main() -> None:
     print(f"  全部漏掉的 {tot_miss} 条, 按原因:")
     for c, n in sorted(grand.items(), key=lambda kv: -kv[1]):
         fix = {"切开了": "改拼接, 不用重训",
+               "裁切掉了字": "放宽切段边界, **不用重训**, 最便宜",
                "读错1个字": "补这个字段的数据, 要重训",
                "读错2个字": "补这个字段的数据, 要重训",
                "没看见": "要动行检测, 风险最大"}.get(c, "")
