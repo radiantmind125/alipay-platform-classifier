@@ -73,7 +73,16 @@ def main() -> None:
                     help="★ 跳过现成 OCR 那一半。它整页只有 0.18 张/秒, 400 张要 37 分钟; "
                          "而判'我们对天花板'根本用不着它。想把某个字段量准就用这个跑大样本")
     ap.add_argument("--seed", type=int, default=17)
+    # ★★ 底边多留几像素。实测 8 能把 `订单号` 那一类全读回来(8/8),
+    #   但那只是一个字段的 8 个样本 —— 它影响**每一段**, 所以要 A/B:
+    #   --bot-pad 0 是老行为, 拿来和 8 比整体有没有被拖坏。
+    ap.add_argument("--bot-pad", type=int, default=None,
+                    help="喂给模型的图底下多留几像素; 不给就用 pinyin_ocr 里的默认值")
     a = ap.parse_args()
+    if a.bot_pad is not None:
+        import pinyin_ocr
+        pinyin_ocr.INPUT_BOT_PAD = a.bot_pad
+        print(f"  [底边多留 {a.bot_pad} 像素]")
     if not a.model and not a.onnx:
         print("要给 --model 或 --onnx")
         return

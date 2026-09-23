@@ -48,6 +48,29 @@ from make_pinyin_pairs import (FALLBACK_SHIFT_RATIO, LABEL_PAD,  # noqa: E402
 from split_segments import MIN_SEG_W, PAD, segments  # noqa: E402
 from train_rec import IMG_H, MIN_W, MAX_W, Charset, prep  # noqa: E402
 
+# ★★★★★ 喂给模型的图, 底下要比行边界**再多留 8 像素**。
+#
+#   怎么量出来的: `订单号` 被读成 `单号` 那 8 例, 同一个段左/右/上/下
+#   各多留 8、16、32 试了一遍:
+#
+#       原样   0/8      左+8   0/8     左+16  1/8     <- 左边不是原因
+#       上+16  0/8      上+32  0/8                    <- 上边更糟, 出的是乱字
+#       下+8   8/8  <-- 全中                          <- 就是下边
+#       下+16  6/8      四边+16 4/8                   <- 留多了反而变坏
+#
+#   ★★ 8 是**最优值不是下限**。留到 16 反而掉, 因为会把下一行的东西带进来。
+#   ★★ 上边**千万别放宽** —— 上+32 读出来是 '淘购' '福' '键' 这种,
+#      那是**上一行的字**。行挨得很紧, 上边界一松就串行。
+#
+#   为什么行边界会切到字: 行的上下界取的是成员**中位**(不是并集),
+#   `订` 这种带勾带捺的字, 笔画伸到中位线底下, 就被切掉了。
+#
+# ★★★★★ 注意这是**推理这一侧的补救**。根子在 y_label 和 y_input 共用同一个
+#   底边 lb —— 底边切掉 `订`, 连 label 也是 OCR 出来的 `单号`,
+#   于是训练时那一对就是 (缺字的图 -> '单号')。**模型是照着错标签学的。**
+#   下一次重新出训练数据时, 底边要一起放宽, 否则标签还是错的。
+INPUT_BOT_PAD = 8
+
 
 def layout(img: np.ndarray) -> list[dict]:
     """把一张图拆成段。返回 [{row, seg, x0, x1, y_label, y_input, has_pinyin}]。
@@ -83,8 +106,11 @@ def layout(img: np.ndarray) -> list[dict]:
             b = min(img.shape[1], x1 + PAD + 1)
             if b - a < MIN_SEG_W:
                 continue
+            # ★ 只放宽**喂给模型**那一份的底边; y_label 不动,
+            #   免得和已经出好的训练标签对不上
             out.append({"row": ri, "seg": si, "x0": a, "x1": b,
-                        "y_label": (la, lb), "y_input": (ia, lb),
+                        "y_label": (la, lb),
+                        "y_input": (ia, min(H, lb + INPUT_BOT_PAD)),
                         "has_pinyin": bool(above)})
     return out
 
