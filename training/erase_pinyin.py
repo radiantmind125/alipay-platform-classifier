@@ -58,8 +58,24 @@ def local_background(gray: np.ndarray) -> np.ndarray:
     return cv2.resize(s, (W, H), interpolation=cv2.INTER_LINEAR)
 
 
-def text_mask(gray: np.ndarray, bg: np.ndarray) -> np.ndarray:
-    return (cv2.absdiff(gray, bg) > DIFF_THRESHOLD).astype(np.uint8)
+def text_mask(gray: np.ndarray, bg: np.ndarray,
+              diff_thr: int | None = None) -> np.ndarray:
+    """和底色差超过阈值的算墨。
+
+    ★★★★★ 阈值是**绝对值**, 这带来一个后果: 对比度越高, 笔画在掩膜里越**胖**。
+       白底深字差约 170, 蓝底白字差也有 100 多, 但蓝底那边笔画边缘的
+       抗锯齿像素同样过得了 28 这条线, 于是笔画被撑粗,
+       **拼音和它底下那个汉字(只隔 1~3 像素)就粘成了同一个连通块**。
+
+       粘上之后这一坨又高又大, 既不算"小块", 底下也没有可配对的大块,
+       于是**结构上就不可能被判成注音**。实测蓝图顶部蓝色渐变区那两带
+       annotation 数是 0, 而同一张图底下白卡片区的拼音全都认出来了。
+
+    ★ `diff_thr` 默认 None = 用 DIFF_THRESHOLD, **行为和以前一字不差**。
+      给了值才换阈值, 这么加是为了能 A/B。白图现在 96.31%, 不要贸然改默认。
+    """
+    thr = DIFF_THRESHOLD if diff_thr is None else diff_thr
+    return (cv2.absdiff(gray, bg) > thr).astype(np.uint8)
 
 
 def annotation_labels(mask: np.ndarray, local_ratio: bool = False):
