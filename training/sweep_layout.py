@@ -19,7 +19,8 @@ r"""端到端比较**版面开关**的几种设定 —— 拿每页真正读出�
     thr<N>   版面掩膜阈值 = N                 例: thr52
     lr<K>    版面用 local_ratio, LOCAL_BIG_MIN = K/10   例: lr13 lr11 lr10
     xa       拼音带带横向范围(LAYOUT_XAWARE)
-    lrw      local_ratio 只在非蓝底页头的页上开(LAYOUT_LR_SKIP_BLUE)
+    lrw      local_ratio 只在非蓝底页头的页上开(LAYOUT_LR_SKIP_BLUE)  ← 2026-09-24 起是默认
+    nolr     2026-09-24 以前的默认(完全不用 local_ratio), 拿来和老数对照
     用 + 组合, 例: lr10+xa
 现状(什么都不改)总是自动放第一个当对照。
 
@@ -73,17 +74,25 @@ def _one(part: str) -> dict:
     m = re.fullmatch(r"thr(\d+)", part)
     if m:
         return {"LAYOUT_MASK_THR": int(m.group(1))}
+    # ★ 每个设定都把自己涉及的开关**写全**, 不依赖当前默认值 ——
+    #   默认值改过一次(lrw 成了默认)之后, lr10 要是不写 SKIP_BLUE, 意思就悄悄变了
     m = re.fullmatch(r"lr(\d+)", part)
     if m:
-        return {"LAYOUT_LOCAL_RATIO": True, "LOCAL_BIG_MIN": int(m.group(1)) / 10}
+        # local_ratio 全开(蓝图也开)
+        return {"LAYOUT_LOCAL_RATIO": True, "LAYOUT_LR_SKIP_BLUE": False,
+                "LOCAL_BIG_MIN": int(m.group(1)) / 10}
     if part == "xa":
         return {"LAYOUT_XAWARE": True}
     if part == "lrw":
         # local_ratio 只在非蓝底页头的页上开(LOCAL_BIG_MIN 用默认值;
         # 服务器上 lr13 和 lr10 在白图上结果完全一样)
         return {"LAYOUT_LOCAL_RATIO": True, "LAYOUT_LR_SKIP_BLUE": True}
+    if part == "nolr":
+        # 2026-09-24 以前的默认: 完全不用 local_ratio
+        return {"LAYOUT_LOCAL_RATIO": False, "LAYOUT_LR_SKIP_BLUE": False}
     raise SystemExit(f"不认识的设定: {part!r}  "
-                     f"(支持 thr<阈值>, lr<LOCAL_BIG_MIN x 10>, lrw, xa, 可以用 + 组合如 lr10+xa)")
+                     f"(支持 thr<阈值>, lr<LOCAL_BIG_MIN x 10>, lrw, nolr, xa, "
+                     f"可以用 + 组合如 lr10+xa)")
 
 
 def parse_variant(tok: str) -> tuple[str, dict]:
@@ -99,9 +108,14 @@ def parse_variant(tok: str) -> tuple[str, dict]:
 def current_label() -> str:
     thr = pinyin_ocr.LAYOUT_MASK_THR
     thr = DIFF_THRESHOLD if thr is None else thr
-    lr = "开" if pinyin_ocr.LAYOUT_LOCAL_RATIO else "关"
+    if not pinyin_ocr.LAYOUT_LOCAL_RATIO:
+        lr = "lr关"
+    elif pinyin_ocr.LAYOUT_LR_SKIP_BLUE:
+        lr = "lrw"
+    else:
+        lr = "lr开"
     xa = ",xa开" if pinyin_ocr.LAYOUT_XAWARE else ""
-    return f"现状(thr{thr},lr{lr}{xa})"
+    return f"现状(thr{thr},{lr}{xa})"
 
 
 def load_ceiling(pairs: Path | None) -> dict[str, str]:

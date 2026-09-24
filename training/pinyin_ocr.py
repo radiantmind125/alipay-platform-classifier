@@ -81,9 +81,12 @@ from train_rec import IMG_H, MIN_W, MAX_W, Charset, prep  # noqa: E402
 #   下一次重新出训练数据时, 底边要一起放宽, 否则标签里那批错的还在。
 INPUT_BOT_PAD = 4
 
-# ★★★ 下面两个是**只拿来做 A/B 的开关**, 默认值 = 以前的行为, 一字不差
-#   (80 张图逐字节比过 mask / annotation / layout, 20 张比过整条 read_image)。
-#   sweep_layout.py 会临时改它们、跑完再还原。**量过之前不要改默认值。**
+# ★★★ 下面几个是版面开关。sweep_layout.py 会临时改它们、跑完再还原。
+#   **量过之前不要改默认值** —— 改默认值要拿服务器上的交付模型、白蓝各 400 张逐页配对量过。
+#
+#   现在的默认: LAYOUT_LOCAL_RATIO=True + LAYOUT_LR_SKIP_BLUE=True
+#   (就是 sweep_layout 里的 lrw), 2026-09-24 定的, 依据见 LAYOUT_LR_SKIP_BLUE 的说明。
+#   要退回以前的行为, 把这两个都改回 False。
 
 # 版面那一步(找拼音带、切行)用的掩膜阈值。None = 沿用 DIFF_THRESHOLD(28)。
 #
@@ -102,7 +105,8 @@ LAYOUT_MASK_THR: int | None = None
 #   erase_pinyin.LOCAL_BIG_MIN 一起试(那个默认 1.3, 而顶部汉字只有
 #   big_h 的 1.1~1.25 倍, 正好够不上)。
 #   ★ 它只改拼音带, **不改 big**, 所以对版面的扰动比改阈值小得多。
-LAYOUT_LOCAL_RATIO: bool = False
+#   ★ 默认开, 但要和下面的 LAYOUT_LR_SKIP_BLUE 一起看: 蓝底页头的页上是关的。
+LAYOUT_LOCAL_RATIO: bool = True
 
 # 开了 LAYOUT_LOCAL_RATIO 时, **蓝底页头的页(转账成功页)上跳过它**。False = 不跳。
 #
@@ -118,7 +122,17 @@ LAYOUT_LOCAL_RATIO: bool = False
 #
 #   判"蓝底页头"用的是这一程所有分析都在用的同一条规则:
 #   页面 5%~20% 高度那一段的平均颜色 B > 150 且 B > R + 60。
-LAYOUT_LR_SKIP_BLUE: bool = False
+#
+# ★★★★★ 2026-09-24 服务器实测这个组合(lrw), 9/23 交付模型, 逐页配对:
+#       白图 398 张  7.078 -> 7.171 (+0.093)  27 页好 1 页差  显著  没有字段被点名
+#                   账单详情 多23丢1  全部账单 多17丢0  读不出 5->5  空白段 0.56->0.53
+#       蓝图 400 张  1.698 -> 1.698           0 页好 0 页差         读不出 54->54
+#   蓝图不是逐字节一样: 蓝图那个文件夹里有几张没判成蓝底页头(多半是翻拍照片那类
+#   非回单, 页头拍到的是手机边框或桌布), 开了 local_ratio, 段数 27.4->27.3,
+#   回首页 多读出 1 页, **400 页里没有一页的字段有变化**。
+#   速度: 白图 398 张 190 秒 -> 199 秒, 仍约 2 张/秒。
+#   ★ +0.093 **全在页面标题和按钮上**(账单详情、全部账单), 不在金额订单号这类内容上。
+LAYOUT_LR_SKIP_BLUE: bool = True
 
 
 def _blue_header(img: np.ndarray) -> bool:
