@@ -81,6 +81,29 @@ from train_rec import IMG_H, MIN_W, MAX_W, Charset, prep  # noqa: E402
 #   下一次重新出训练数据时, 底边要一起放宽, 否则标签里那批错的还在。
 INPUT_BOT_PAD = 4
 
+# ★★★ 下面两个是**只拿来做 A/B 的开关**, 默认值 = 以前的行为, 一字不差
+#   (80 张图逐字节比过 mask / annotation / layout, 20 张比过整条 read_image)。
+#   sweep_layout.py 会临时改它们、跑完再还原。**量过之前不要改默认值。**
+
+# 版面那一步(找拼音带、切行)用的掩膜阈值。None = 沿用 DIFF_THRESHOLD(28)。
+#
+# ★★★★★ 已经量过: **提高这个阈值不是修蓝图拼音检测的办法**, 别再往这上面试。
+#   详见 erase_pinyin.text_mask 的说明。要点:
+#     - 蓝图顶部拼音认不出, 主因是大小那一关, 不是粘连; 阈值调高 big_h 变小, 反而更糟
+#     - 当初那一页是白字描黑边, 黑边离底色约 106, 阈值 100 以下都拆不开
+#     - 它还会让整页重新排版: 行、行边界、喂给模型的图、切段全跟着变
+#       (切段自己的阈值没变, 但它拿到的那张裁图变了), 底边还会往上缩,
+#       等于把 INPUT_BOT_PAD 那次修好的 订 又部分切回去
+LAYOUT_MASK_THR: int | None = None
+
+# 版面那一步的注音判法要不要用 local_ratio(和配对的那个大块比, 不和整页比)。
+#   False = 以前的行为。拿来端到端试**大小那一关**: 蓝图顶部的字比卡片字大
+#   25~40%, 顶部拼音卡在 0.55~0.8 倍 big_h 的空档里。配合
+#   erase_pinyin.LOCAL_BIG_MIN 一起试(那个默认 1.3, 而顶部汉字只有
+#   big_h 的 1.1~1.25 倍, 正好够不上)。
+#   ★ 它只改拼音带, **不改 big**, 所以对版面的扰动比改阈值小得多。
+LAYOUT_LOCAL_RATIO: bool = False
+
 
 def layout(img: np.ndarray) -> list[dict]:
     """把一张图拆成段。返回 [{row, seg, x0, x1, y_label, y_input, has_pinyin}]。
@@ -89,9 +112,9 @@ def layout(img: np.ndarray) -> list[dict]:
     """
     H = img.shape[0]
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
-    mask = text_mask(gray, local_background(gray))
+    mask = text_mask(gray, local_background(gray), diff_thr=LAYOUT_MASK_THR)
     _n, _lab, st, _c = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    _labels, kept, _cnt, big = annotation_labels(mask)
+    _labels, kept, _cnt, big = annotation_labels(mask, local_ratio=LAYOUT_LOCAL_RATIO)
     bands = _pinyin_bands(kept, st, big)
     rows = _rows(big, bands)
     if not rows:
