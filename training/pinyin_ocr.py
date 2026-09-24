@@ -104,6 +104,32 @@ LAYOUT_MASK_THR: int | None = None
 #   ★ 它只改拼音带, **不改 big**, 所以对版面的扰动比改阈值小得多。
 LAYOUT_LOCAL_RATIO: bool = False
 
+# 开了 LAYOUT_LOCAL_RATIO 时, **蓝底页头的页(转账成功页)上跳过它**。False = 不跳。
+#
+# ★★★★★ 为什么(服务器 9/23 交付模型, 各 400 张逐页配对):
+#       白图  local_ratio  +0.093 字段/张  27 页好 1 页差  账单详情 多23丢1  全部账单 多17丢0
+#       蓝图  local_ratio  -0.018         2 页好 9 页差  转账成功 多1丢9   回首页 多6丢32
+#   同一个修法, 白图的大标题读好了, 蓝图的大标题读坏了。
+#   蓝图坏在**训练和推理的几何对不上**: 出训练数据时蓝图大标题的拼音没认出来,
+#   模型学到的是"拼音被切掉一截"的标题; local_ratio 把拼音认全了, 整条大拼音框进来,
+#   缩到固定高之后汉字变小, 就读错(图上看过)。LAYOUT_XAWARE 修掉了串栏那一部分
+#   (回首页 从丢 32 页变成多 71 页), 但 转账成功 还是丢 8 页 —— 剩下的就是这个几何错位。
+#   所以在蓝图上干脆不开, 白图照开。
+#
+#   判"蓝底页头"用的是这一程所有分析都在用的同一条规则:
+#   页面 5%~20% 高度那一段的平均颜色 B > 150 且 B > R + 60。
+LAYOUT_LR_SKIP_BLUE: bool = False
+
+
+def _blue_header(img: np.ndarray) -> bool:
+    """页头是不是蓝底(转账成功页)。规则和分析时分白图蓝图用的完全一样。"""
+    if img.ndim != 3:
+        return False
+    H = img.shape[0]
+    b, _g, r = img[int(H * 0.05):int(H * 0.20)].reshape(-1, 3).mean(0)
+    return bool(b > 150 and b > r + 60)
+
+
 # 拼音带要不要**带横向范围**。False = 以前的行为(整页宽的横条)。
 #
 # ★★★★★ 为什么要有: _pinyin_bands 返回的带只有纵向 [(y0, y1)], 没有横向。
@@ -227,7 +253,8 @@ def layout(img: np.ndarray) -> list[dict]:
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
     mask = text_mask(gray, local_background(gray), diff_thr=LAYOUT_MASK_THR)
     _n, _lab, st, _c = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    _labels, kept, _cnt, big = annotation_labels(mask, local_ratio=LAYOUT_LOCAL_RATIO)
+    use_lr = LAYOUT_LOCAL_RATIO and not (LAYOUT_LR_SKIP_BLUE and _blue_header(img))
+    _labels, kept, _cnt, big = annotation_labels(mask, local_ratio=use_lr)
     if LAYOUT_XAWARE:
         return _layout_xaware(img, st, kept, big)
     bands = _pinyin_bands(kept, st, big)

@@ -19,6 +19,7 @@ r"""端到端比较**版面开关**的几种设定 —— 拿每页真正读出�
     thr<N>   版面掩膜阈值 = N                 例: thr52
     lr<K>    版面用 local_ratio, LOCAL_BIG_MIN = K/10   例: lr13 lr11 lr10
     xa       拼音带带横向范围(LAYOUT_XAWARE)
+    lrw      local_ratio 只在非蓝底页头的页上开(LAYOUT_LR_SKIP_BLUE)
     用 + 组合, 例: lr10+xa
 现状(什么都不改)总是自动放第一个当对照。
 
@@ -64,6 +65,7 @@ KNOBS = {
     "LAYOUT_LOCAL_RATIO": (pinyin_ocr, "LAYOUT_LOCAL_RATIO"),
     "LOCAL_BIG_MIN": (erase_pinyin, "LOCAL_BIG_MIN"),
     "LAYOUT_XAWARE": (pinyin_ocr, "LAYOUT_XAWARE"),
+    "LAYOUT_LR_SKIP_BLUE": (pinyin_ocr, "LAYOUT_LR_SKIP_BLUE"),
 }
 
 
@@ -76,8 +78,12 @@ def _one(part: str) -> dict:
         return {"LAYOUT_LOCAL_RATIO": True, "LOCAL_BIG_MIN": int(m.group(1)) / 10}
     if part == "xa":
         return {"LAYOUT_XAWARE": True}
+    if part == "lrw":
+        # local_ratio 只在非蓝底页头的页上开(LOCAL_BIG_MIN 用默认值;
+        # 服务器上 lr13 和 lr10 在白图上结果完全一样)
+        return {"LAYOUT_LOCAL_RATIO": True, "LAYOUT_LR_SKIP_BLUE": True}
     raise SystemExit(f"不认识的设定: {part!r}  "
-                     f"(支持 thr<阈值>, lr<LOCAL_BIG_MIN x 10>, xa, 可以用 + 组合如 lr10+xa)")
+                     f"(支持 thr<阈值>, lr<LOCAL_BIG_MIN x 10>, lrw, xa, 可以用 + 组合如 lr10+xa)")
 
 
 def parse_variant(tok: str) -> tuple[str, dict]:
