@@ -18,6 +18,8 @@ r"""端到端比较**版面开关**的几种设定 —— 拿每页真正读出�
 --------------------------------
     thr<N>   版面掩膜阈值 = N                 例: thr52
     lr<K>    版面用 local_ratio, LOCAL_BIG_MIN = K/10   例: lr13 lr11 lr10
+    xa       拼音带带横向范围(LAYOUT_XAWARE)
+    用 + 组合, 例: lr10+xa
 现状(什么都不改)总是自动放第一个当对照。
 
 用法
@@ -61,26 +63,39 @@ KNOBS = {
     "LAYOUT_MASK_THR": (pinyin_ocr, "LAYOUT_MASK_THR"),
     "LAYOUT_LOCAL_RATIO": (pinyin_ocr, "LAYOUT_LOCAL_RATIO"),
     "LOCAL_BIG_MIN": (erase_pinyin, "LOCAL_BIG_MIN"),
+    "LAYOUT_XAWARE": (pinyin_ocr, "LAYOUT_XAWARE"),
 }
+
+
+def _one(part: str) -> dict:
+    m = re.fullmatch(r"thr(\d+)", part)
+    if m:
+        return {"LAYOUT_MASK_THR": int(m.group(1))}
+    m = re.fullmatch(r"lr(\d+)", part)
+    if m:
+        return {"LAYOUT_LOCAL_RATIO": True, "LOCAL_BIG_MIN": int(m.group(1)) / 10}
+    if part == "xa":
+        return {"LAYOUT_XAWARE": True}
+    raise SystemExit(f"不认识的设定: {part!r}  "
+                     f"(支持 thr<阈值>, lr<LOCAL_BIG_MIN x 10>, xa, 可以用 + 组合如 lr10+xa)")
 
 
 def parse_variant(tok: str) -> tuple[str, dict]:
     tok = tok.strip()
-    m = re.fullmatch(r"thr(\d+)", tok)
-    if m:
-        return tok, {"LAYOUT_MASK_THR": int(m.group(1))}
-    m = re.fullmatch(r"lr(\d+)", tok)
-    if m:
-        return tok, {"LAYOUT_LOCAL_RATIO": True,
-                     "LOCAL_BIG_MIN": int(m.group(1)) / 10}
-    raise SystemExit(f"不认识的设定: {tok!r}  (支持 thr<阈值>, lr<LOCAL_BIG_MIN x 10>)")
+    knobs: dict = {}
+    for part in tok.split("+"):
+        if not part:
+            raise SystemExit(f"不认识的设定: {tok!r}")
+        knobs.update(_one(part))
+    return tok, knobs
 
 
 def current_label() -> str:
     thr = pinyin_ocr.LAYOUT_MASK_THR
     thr = DIFF_THRESHOLD if thr is None else thr
     lr = "开" if pinyin_ocr.LAYOUT_LOCAL_RATIO else "关"
-    return f"现状(thr{thr},lr{lr})"
+    xa = ",xa开" if pinyin_ocr.LAYOUT_XAWARE else ""
+    return f"现状(thr{thr},lr{lr}{xa})"
 
 
 def load_ceiling(pairs: Path | None) -> dict[str, str]:

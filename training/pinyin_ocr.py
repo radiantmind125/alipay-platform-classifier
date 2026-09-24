@@ -44,7 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from erase_pinyin import (EXTS, annotation_labels, local_background,  # noqa: E402
                           text_mask)
 from make_pinyin_pairs import (FALLBACK_SHIFT_RATIO, LABEL_PAD,  # noqa: E402
-                               MIN_ROW_H, _pinyin_bands, _rows)
+                               MIN_ROW_H, OVERLAP, _pinyin_bands, _rows)
 from split_segments import MIN_SEG_W, PAD, segments  # noqa: E402
 from train_rec import IMG_H, MIN_W, MAX_W, Charset, prep  # noqa: E402
 
@@ -104,6 +104,119 @@ LAYOUT_MASK_THR: int | None = None
 #   ★ 它只改拼音带, **不改 big**, 所以对版面的扰动比改阈值小得多。
 LAYOUT_LOCAL_RATIO: bool = False
 
+# 拼音带要不要**带横向范围**。False = 以前的行为(整页宽的横条)。
+#
+# ★★★★★ 为什么要有: _pinyin_bands 返回的带只有纵向 [(y0, y1)], 没有横向。
+#   于是 layout 里"这一行上面有没有拼音"、_rows 里"哪些块在拼音带里不参与聚行",
+#   **全都只看高度不看左右**。页面上左右两处东西高低错开时就串了:
+#     - 蓝图右上的 回首页 比居中的 转账成功 高一截, 回首页 的拼音带被算成
+#       转账成功"上面的拼音", 喂给模型的图上边界往上冲 37~44 像素, 字被缩小,
+#       读成 '转账' ':中' '中'
+#     - 转账成功 的拼音带正好横在 回首页 汉字的高度上, _rows 把 回首页 的
+#       汉字当拼音排除掉, 这一行整个没了
+#   白图大标题 账单详情(左) 全部账单(右) 高度一样, 带重合, 所以没事 ——
+#   这就是 local_ratio 在白图上大赢、在蓝图上反而丢 转账成功 的原因(服务器实测)。
+#
+#   annotation_labels 当初就是为了"左右两栏基线不在同一高度"才改成逐连通块判的,
+#   到了聚带这一步又被压回整页宽的横条。这个开关把横向范围补回来。
+#   只作用在推理这一侧; 出训练数据的 make_pinyin_pairs **不变**。
+LAYOUT_XAWARE: bool = False
+# 同一纵向组里, 相邻两个拼音块横向隔得比 这么多倍块高 还远, 就断成两条带。
+#   音节之间一般只隔 0.5~2 个块高, 左右两栏之间隔几百像素
+XBAND_GAP_K = 3.0
+# 判"这个大块是不是被某条拼音带压住"时, 带左右各放宽这么多倍块高 ——
+#   盖住一行拼音末尾那个带声调和下伸、落进 big 的高音节
+XBAND_MARGIN_K = 2.0
+
+
+def _xbands(boxes: list[tuple[int, int, int, int]]) -> list[tuple]:
+    """判成拼音的块聚成带, 带**有横向范围**。返回 [(x0, x1, y0, y1, 块高中位)]。
+
+    纵向怎么聚和 _pinyin_bands 一字不差(按纵向重叠); 聚完每一组再按横向间隔断开。
+    """
+    if not boxes:
+        return []
+    groups: list[list] = []
+    for bx in sorted(boxes, key=lambda b: (b[1], b[1] + b[3])):
+        a, bb = bx[1], bx[1] + bx[3]
+        for g in groups:
+            inter = min(g[1], bb) - max(g[0], a)
+            shorter = min(g[1] - g[0], bb - a)
+            if shorter > 0 and inter >= OVERLAP * shorter:
+                g[0] = min(g[0], a)
+                g[1] = max(g[1], bb)
+                g[2].append(bx)
+                break
+        else:
+            groups.append([a, bb, [bx]])
+
+    def ext(mem):
+        return (min(m[0] for m in mem), max(m[0] + m[2] for m in mem),
+                min(m[1] for m in mem), max(m[1] + m[3] for m in mem),
+                float(np.median([m[3] for m in mem])))
+
+    out = []
+    for _gy0, _gy1, mem in groups:
+        mem.sort(key=lambda m: m[0])
+        gap = XBAND_GAP_K * max(1.0, float(np.median([m[3] for m in mem])))
+        cur = [mem[0]]
+        for m in mem[1:]:
+            if m[0] - max(c[0] + c[2] for c in cur) > gap:
+                out.append(ext(cur))
+                cur = [m]
+            else:
+                cur.append(m)
+        out.append(ext(cur))
+    return out
+
+
+def _layout_xaware(img: np.ndarray, st, kept, big) -> list[dict]:
+    """layout 的后半段, 拼音带带横向范围。只在 LAYOUT_XAWARE=True 时走这里。"""
+    H = img.shape[0]
+    kb = [(int(st[i][0]), int(st[i][1]), int(st[i][2]), int(st[i][3]))
+          for i in kept if i < len(st)]
+    xb = _xbands(kb)
+
+    def under_band(box) -> bool:
+        x, y, w, h = box
+        cy = y + h // 2
+        for bx0, bx1, by0, by1, hm in xb:
+            m = XBAND_MARGIN_K * hm
+            if by0 <= cy <= by1 and x < bx1 + m and x + w > bx0 - m:
+                return True
+        return False
+
+    # ★ 聚行还是用共用的 _rows, 只是先按横向把"被拼音带压住的块"挑掉, 再传空的带进去
+    rows = _rows([b for b in big if not under_band(b)], ())
+    if not rows:
+        return []
+    char_h = float(np.median([b - a for a, b in rows]))
+    fallback = int(round(FALLBACK_SHIFT_RATIO * char_h))
+
+    out = []
+    for ri, (y0, y1) in enumerate(rows):
+        above = [bd for bd in xb if bd[3] <= y0 + 2 and (y0 - bd[3]) < (y1 - y0)]
+        la = max(0, y0 - LABEL_PAD)
+        if above:
+            la = min(y0, max(la, max(bd[3] for bd in above) + 1))
+        lb = min(H, y1 + LABEL_PAD)
+        if lb - la < MIN_ROW_H:
+            continue
+        lab_crop = img[la:lb, :]
+        for si, (x0, x1) in enumerate(segments(lab_crop)):
+            a = max(0, x0 - PAD)
+            b = min(img.shape[1], x1 + PAD + 1)
+            if b - a < MIN_SEG_W:
+                continue
+            # ★ 上边界**逐段**定: 只认横向压在这一段上面的拼音带
+            mine = [bd for bd in above if bd[0] < b and bd[1] > a]
+            ia = max(0, (min(bd[2] for bd in mine) - 1) if mine else (y0 - fallback))
+            out.append({"row": ri, "seg": si, "x0": a, "x1": b,
+                        "y_label": (la, lb),
+                        "y_input": (ia, min(H, lb + INPUT_BOT_PAD)),
+                        "has_pinyin": bool(mine)})
+    return out
+
 
 def layout(img: np.ndarray) -> list[dict]:
     """把一张图拆成段。返回 [{row, seg, x0, x1, y_label, y_input, has_pinyin}]。
@@ -115,6 +228,8 @@ def layout(img: np.ndarray) -> list[dict]:
     mask = text_mask(gray, local_background(gray), diff_thr=LAYOUT_MASK_THR)
     _n, _lab, st, _c = cv2.connectedComponentsWithStats(mask, connectivity=8)
     _labels, kept, _cnt, big = annotation_labels(mask, local_ratio=LAYOUT_LOCAL_RATIO)
+    if LAYOUT_XAWARE:
+        return _layout_xaware(img, st, kept, big)
     bands = _pinyin_bands(kept, st, big)
     rows = _rows(big, bands)
     if not rows:
