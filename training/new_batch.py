@@ -102,6 +102,68 @@ def months(names) -> Counter:
     return c
 
 
+def days(names) -> list[str]:
+    out = []
+    for n in names:
+        m = DATE.search(n)
+        if m:
+            out.append(f"{m.group(1)}-{m.group(2)}-{m.group(3)}")
+    return sorted(out)
+
+
+def _sha1(path: str) -> str:
+    import hashlib
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _detail(new_imgs, old_imgs, fresh, overlap, a) -> None:
+    """同名的是不是真的同一张图(逐字节比), 以及日期精确到天。
+
+    ★★ "同名 = 同一张图"只是推断。文件名里是凭证号 + 时间戳, 按理同名就是同一张,
+       但要是重新截过图、重新压缩过, 同名底下可能是不一样的内容。
+       要跟经理说"传上来的基本都是老图", 得先逐字节比过。
+    """
+    print("  ---- 细看 ----")
+    dn, do, dv = days(fresh), days(os.path.basename(p) for p in old_imgs), days(overlap)
+    for tag, d in (("老目录", do), ("新目录里同名的", dv), ("真新的", dn)):
+        if d:
+            print(f"  {tag:<14}日期 {d[0]} 到 {d[-1]}   ({len(d):,} 张)")
+    if dn:
+        c = Counter(dn)
+        print("  真新的按天:")
+        for k in sorted(c):
+            print(f"    {k}   {c[k]:>6,}")
+    print()
+
+    if overlap:
+        old_by_name = {}
+        for p in old_imgs:
+            old_by_name.setdefault(os.path.basename(p), p)
+        new_by_name = {}
+        for p in new_imgs:
+            new_by_name.setdefault(os.path.basename(p), p)
+        random.seed(a.seed)
+        names = random.sample(overlap, min(a.hash_sample, len(overlap)))
+        same = diff = 0
+        example = None
+        for n in names:
+            pn, po = new_by_name[n], old_by_name[n]
+            if os.path.getsize(pn) == os.path.getsize(po) and _sha1(pn) == _sha1(po):
+                same += 1
+            else:
+                diff += 1
+                if example is None:
+                    example = (n, os.path.getsize(pn), os.path.getsize(po))
+        print(f"  同名的随机抽 {len(names)} 对逐字节比:  一模一样 {same} 对,  不一样 {diff} 对")
+        if example:
+            print(f"    不一样的例子: {example[0]}   新 {example[1]:,} 字节  老 {example[2]:,} 字节")
+        print()
+
+
 def cmd_inventory(a) -> None:
     print("=" * 72)
     print(f"  NEW BATCH INVENTORY  (ASCII only - safe to paste)")
@@ -143,6 +205,9 @@ def cmd_inventory(a) -> None:
     if known:
         print(f"  (老目录的日期范围: {known[0]} 到 {known[-1]})")
     print()
+
+    if a.detail:
+        _detail(new_imgs, old_imgs, fresh, overlap, a)
 
     # 抽样解码: 读不读得出来、蓝底白底各多少
     random.seed(a.seed)
@@ -292,6 +357,9 @@ def main() -> None:
     p1.add_argument("--old", type=Path, required=True)
     p1.add_argument("--sample", type=int, default=300, help="抽多少张看页头颜色")
     p1.add_argument("--seed", type=int, default=17)
+    p1.add_argument("--detail", action="store_true",
+                    help="同名的抽样逐字节比, 日期精确到天")
+    p1.add_argument("--hash-sample", type=int, default=200)
     p2 = sub.add_parser("summary", help="pick_pinyin 打完分之后汇总拼音图数")
     p2.add_argument("--scan", type=Path, required=True, help="pick_pinyin 的 --out 那个 jsonl")
     p2.add_argument("--new", type=Path, required=True)
