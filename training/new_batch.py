@@ -227,6 +227,128 @@ def cmd_inventory(a) -> None:
     print("=" * 72)
 
 
+def _scan_tree(root: Path):
+    """递归列图片, 顺带拿修改时间。用 scandir: Windows 上 DirEntry.stat() 不用再单独查一次盘。"""
+    stack = [root]
+    while stack:
+        d = stack.pop()
+        try:
+            it = os.scandir(d)
+        except OSError:
+            continue
+        with it:
+            for e in it:
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        stack.append(Path(e.path))
+                    elif os.path.splitext(e.name)[1].lower() in EXTS:
+                        yield e.path, e.name, e.stat().st_mtime
+                except OSError:
+                    continue
+
+
+def cmd_survey(a) -> None:
+    """把几个下载目录底下**所有子目录**都过一遍: 每个子目录多少张、文件名日期到几号、
+    什么时候下载的(修改时间)、有多少是我们图库里没有的。
+
+    ★ 为什么要看两种日期:
+        文件名里的日期  = 这张截图是哪天的
+        文件修改时间    = 这个文件是哪天下载下来的
+      "下载的是九月的"可能指**九月下载的**, 也可能指**九月的图**, 两个都打出来就分得清。
+    """
+    import datetime as _dt
+
+    lib_names: set[str] = set()
+    lib_days: list[str] = []
+    for d in a.library:
+        if not d.exists():
+            print(f"  图库目录不在: {d}")
+            return
+        for _p, n, _m in _scan_tree(d):
+            lib_names.add(n)
+            m = DATE.search(n)
+            if m:
+                lib_days.append(f"{m.group(1)}-{m.group(2)}-{m.group(3)}")
+    lib_last = max(lib_days) if lib_days else "0000-00-00"
+
+    print("=" * 96)
+    print("  DOWNLOAD SURVEY  (ASCII only - safe to paste)")
+    print("=" * 96)
+    print(f"  我们的图库: {', '.join(str(d) for d in a.library)}   "
+          f"{len(lib_names):,} 张, 文件名日期 {min(lib_days) if lib_days else '-'} 到 {lib_last}")
+    print()
+
+    tot_new_after = 0
+    tot_sep = 0
+    where_sep: Counter = Counter()
+    for root in a.roots:
+        if not root.exists():
+            print(f"  目录不在: {root}")
+            continue
+        groups: dict[str, dict] = {}
+        for path, name, mt in _scan_tree(root):
+            rel = Path(path).parent.relative_to(root).parts[: a.depth]
+            key = "\\".join(rel) if rel else "."
+            g = groups.setdefault(key, {"n": 0, "new": 0, "mon": Counter(), "mon_new": Counter(),
+                                        "dmin": None, "dmax": None, "tmin": None, "tmax": None,
+                                        "after": 0, "unparsed": [], "new_paths": []})
+            g["n"] += 1
+            m = DATE.search(name)
+            day = f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else None
+            mon = day[:7] if day else "无日期"
+            g["mon"][mon] += 1
+            if day:
+                g["dmin"] = day if g["dmin"] is None or day < g["dmin"] else g["dmin"]
+                g["dmax"] = day if g["dmax"] is None or day > g["dmax"] else g["dmax"]
+            elif len(g["unparsed"]) < 3:
+                g["unparsed"].append(name)
+            g["tmin"] = mt if g["tmin"] is None or mt < g["tmin"] else g["tmin"]
+            g["tmax"] = mt if g["tmax"] is None or mt > g["tmax"] else g["tmax"]
+            if name not in lib_names:
+                g["new"] += 1
+                g["mon_new"][mon] += 1
+                if day and day > lib_last:
+                    g["after"] += 1
+                if len(g["new_paths"]) < 5000:
+                    g["new_paths"].append(path)
+            if mon.startswith("2026-09"):
+                tot_sep += 1
+                where_sep[f"{root}\\{key}"] += 1
+
+        print("-" * 96)
+        print(f"  {root}   ({len(groups)} 个子目录有图)")
+        print("-" * 96)
+        for key in sorted(groups):
+            g = groups[key]
+            fmt = lambda t: _dt.datetime.fromtimestamp(t).strftime("%m-%d")  # noqa: E731
+            print(f"  {key}")
+            print(f"      图片 {g['n']:>9,}   图库里没有的 {g['new']:>9,}   "
+                  f"其中比图库最后一天({lib_last})还新的 {g['after']:>8,}")
+            print(f"      文件名日期 {g['dmin'] or '-'} 到 {g['dmax'] or '-'}   "
+                  f"下载时间(修改时间) {fmt(g['tmin'])} 到 {fmt(g['tmax'])}")
+            print("      按月: " + "  ".join(f"{k} {v:,}" for k, v in sorted(g["mon"].items())))
+            if g["new"]:
+                print("      图库里没有的按月: "
+                      + "  ".join(f"{k} {v:,}" for k, v in sorted(g["mon_new"].items())))
+            if g["unparsed"]:
+                print(f"      文件名里没日期的例子: {', '.join(g['unparsed'])}")
+            if g["new"] and a.sample:
+                random.seed(a.seed)
+                s = random.sample(g["new_paths"], min(a.sample, len(g["new_paths"])))
+                k = Counter(page_kind(p) for p in s)
+                print(f"      图库里没有的抽 {len(s)} 张看页头: "
+                      + "  ".join(f"{x} {k[x]}" for x in ("蓝底", "白底", "其它", "读不出") if k[x]))
+            tot_new_after += g["after"]
+        print()
+
+    print("=" * 96)
+    print(f"  ★ 文件名是 2026 年 9 月的图, 所有目录加起来: {tot_sep:,} 张")
+    for w, c in where_sep.most_common(10):
+        print(f"      {w}   {c:,}")
+    print(f"  ★ 图库里没有、而且比图库最后一天({lib_last})还新的: {tot_new_after:,} 张")
+    print("=" * 96)
+
+
 def cmd_summary(a) -> None:
     rows = []
     with a.scan.open(encoding="utf-8") as f:
@@ -365,9 +487,18 @@ def main() -> None:
     p2.add_argument("--new", type=Path, required=True)
     p2.add_argument("--old", type=Path, default=None)
     p2.add_argument("--kind", choices=["blue", "white"], required=True)
+    p3 = sub.add_parser("survey", help="把下载目录底下所有子目录都过一遍: 日期、下载时间、图库里没有的")
+    p3.add_argument("--roots", type=Path, nargs="+", required=True)
+    p3.add_argument("--library", type=Path, nargs="+", required=True,
+                    help="我们已有的图库(拿来比同名), 例 E:\\BlueImages E:\\OtherImages")
+    p3.add_argument("--depth", type=int, default=2, help="按几层子目录分组")
+    p3.add_argument("--sample", type=int, default=60, help="图库里没有的每组抽几张看页头颜色")
+    p3.add_argument("--seed", type=int, default=17)
     a = ap.parse_args()
     if a.cmd == "inventory":
         cmd_inventory(a)
+    elif a.cmd == "survey":
+        cmd_survey(a)
     else:
         cmd_summary(a)
 
