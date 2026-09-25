@@ -368,6 +368,9 @@ def main() -> None:
                     help="★ 反过来复制**没有拼音**的那些(分数最低的), 用来做对照组。"
                          "对照组必须和拼音组来自**同一个库**, 否则比的是两批不同的图。")
     ap.add_argument("--chunk", type=int, default=200)
+    ap.add_argument("--skip-names-from", type=Path, default=None,
+                    help="这个目录里已经有同名文件的就不扫(比如老图挪去的 E:\\BlueImages)。"
+                         "新传的一批里要是混着老图, 省得把老图再扫一遍")
     a = ap.parse_args()
 
     if a.copy_to:
@@ -452,6 +455,14 @@ def main() -> None:
         print(f"★ 上次已经量过 {len(done):,} 张, 这次跳过它们。")
     print("正在列文件...")
     todo = [p for p in iter_images(a.root) if p not in done]
+    if a.skip_names_from:
+        if not a.skip_names_from.exists():
+            print(f"--skip-names-from 目录不在: {a.skip_names_from}")
+            return
+        seen = {os.path.basename(p) for p in iter_images(a.skip_names_from)}
+        before = len(todo)
+        todo = [p for p in todo if os.path.basename(p) not in seen]
+        print(f"★ {a.skip_names_from} 里已有同名的 {before - len(todo):,} 张, 不扫")
     print(f"这次要量 {len(todo):,} 张,  {a.workers} 个进程")
     if not todo:
         print("没有新的要量。")
