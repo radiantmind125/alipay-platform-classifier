@@ -380,6 +380,54 @@ def cmd_survey(a) -> None:
     print("=" * 96)
 
 
+def cmd_sheet(a) -> None:
+    """把某一类页头(蓝底/白底/其它)里过了分数线的图, 整页缩小贴成一张, 看看它们到底是什么页。
+
+    ★ 为什么要这个: pick_pinyin --band --sheet 贴的是**某个分数段**, 裁的是页面中间一截,
+      适合核"有没有拼音"。但 summary 里有一批页头既不是蓝底也不是白底的("其它"),
+      白图的阈值 0.06 从没在这类页上核过 —— 先得知道**它们是什么页**, 所以贴整页。
+    """
+    rows = []
+    with a.scan.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    rows.append(json.loads(line))
+                except Exception:               # noqa: BLE001
+                    continue
+    cand = [r for r in rows if r.get("score") is not None and r["score"] >= a.min_score]
+    picked = []
+    for r in sorted(cand, key=lambda r: -r["score"]):
+        if page_kind(r["path"]) == a.page:
+            picked.append(r)
+    print(f"  分数 >= {a.min_score} 的 {len(cand):,} 张里, 页头是'{a.page}'的 {len(picked):,} 张")
+    if not picked:
+        return
+    step = max(1, len(picked) // a.n)
+    picked = picked[::step][: a.n]
+    tiles = []
+    for r in picked:
+        im = cv2.imdecode(np.fromfile(r["path"], np.uint8), cv2.IMREAD_COLOR)
+        if im is None:
+            continue
+        w = a.width
+        im = cv2.resize(im, (w, max(1, int(im.shape[0] * w / im.shape[1]))))
+        cv2.putText(im, f"{r['score']:.3f}", (6, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                    (0, 0, 255), 2)
+        tiles.append(im)
+    hh = max(t.shape[0] for t in tiles)
+    tiles = [cv2.copyMakeBorder(t, 0, hh - t.shape[0], 0, 4, cv2.BORDER_CONSTANT,
+                                value=(255, 255, 255)) for t in tiles]
+    per = a.cols
+    while len(tiles) % per:
+        tiles.append(np.full_like(tiles[0], 255))
+    grid = np.vstack([np.hstack(tiles[i:i + per]) for i in range(0, len(tiles), per)])
+    a.out.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imencode(".png", grid)[1].tofile(str(a.out))
+    print(f"  贴了 {len(picked)} 张(按分数从高到低均匀抽) -> {a.out}")
+
+
 def cmd_summary(a) -> None:
     if not a.scan.exists():
         print(f"  名单文件还不在: {a.scan}")
@@ -550,11 +598,24 @@ def main() -> None:
     p3.add_argument("--depth", type=int, default=2, help="按几层子目录分组")
     p3.add_argument("--sample", type=int, default=60, help="图库里没有的每组抽几张看页头颜色")
     p3.add_argument("--seed", type=int, default=17)
+    p4 = sub.add_parser("sheet", help="某一类页头里过了分数线的图, 整页缩小贴成一张")
+    p4.add_argument("--scan", type=Path, required=True)
+    # ★ 也收英文写法: 命令行里打中文要看控制台编码, 英文最稳
+    p4.add_argument("--page", choices=["蓝底", "白底", "其它", "blue", "white", "other"],
+                    required=True)
+    p4.add_argument("--min-score", type=float, required=True)
+    p4.add_argument("--out", type=Path, required=True)
+    p4.add_argument("--n", type=int, default=12)
+    p4.add_argument("--cols", type=int, default=4)
+    p4.add_argument("--width", type=int, default=360)
     a = ap.parse_args()
     if a.cmd == "inventory":
         cmd_inventory(a)
     elif a.cmd == "survey":
         cmd_survey(a)
+    elif a.cmd == "sheet":
+        a.page = {"blue": "蓝底", "white": "白底", "other": "其它"}.get(a.page, a.page)
+        cmd_sheet(a)
     else:
         cmd_summary(a)
 
