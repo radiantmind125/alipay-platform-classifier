@@ -50,6 +50,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from erase_pinyin import EXTS  # noqa: E402
+import pinyin_probe as pp  # noqa: E402
 
 # 以前的数, 拿来对比
 OLD = {
@@ -428,6 +429,154 @@ def cmd_sheet(a) -> None:
     print(f"  贴了 {len(picked)} 张(按分数从高到低均匀抽) -> {a.out}")
 
 
+PROBE_FLAT = 0.15   # pinyin_probe.has_pinyin 默认的平坦占比下界(截图 / 照片的分界)
+
+
+def _flat_of(path: str):
+    """平坦占比, 算法和 pinyin_probe.measure 里一模一样。
+
+    measure 量不了的图(太小、字太少)也要知道它是截图还是照片, 所以单独再算一遍。
+    """
+    img = cv2.imdecode(np.fromfile(path, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if max(g.shape) > 1400:
+        sc = 1400 / max(g.shape)
+        g = cv2.resize(g, (int(g.shape[1] * sc), int(g.shape[0] * sc)),
+                       interpolation=cv2.INTER_NEAREST)
+    return float(np.bincount(g.ravel(), minlength=256).max()) / g.size
+
+
+def _probe_init():
+    try:
+        cv2.setNumThreads(1)
+    except Exception:                           # noqa: BLE001
+        pass
+
+
+def _probe_one(item):
+    """一张图: pinyin_probe 原样判一遍, 再补上平坦占比和页头颜色。"""
+    path, score = item
+    r = {"path": path, "score": score}
+    try:
+        d = pp.measure(path)
+    except Exception:                           # noqa: BLE001
+        d = None
+    if d:
+        r.update(flat=d["flat"], ratio=d["pinyin_ratio"], stacked=d["stacked"],
+                 probe=bool(pp.has_pinyin(d)))
+    else:
+        try:
+            f = _flat_of(path)
+        except Exception:                       # noqa: BLE001
+            f = None
+        r.update(flat=None if f is None else round(f, 4), ratio=None, stacked=None,
+                 probe=False)
+    try:
+        r["page"] = page_kind(path)
+    except Exception:                           # noqa: BLE001
+        r["page"] = "读不出"
+    if r["flat"] is None:
+        r["cls"] = "unread"
+    elif r["probe"]:
+        r["cls"] = "probe"
+    elif r["flat"] >= PROBE_FLAT:
+        r["cls"] = "shot"
+    else:
+        r["cls"] = "photo"
+    return r
+
+
+def cmd_probe(a) -> None:
+    r"""过了分数线的图, 再用 pinyin_probe 原样判一遍, 分出"老白图池的定义"和拍屏照片。
+
+    ★★★★★ 为什么要这一步: 白图的阈值 0.06 是在 D:\download2\pinyin_hits 上核的(9/16, 12/12),
+      而 pinyin_hits 是 pinyin_probe 先从 OtherImages 里筛出来的(比例 >= 0.35、压住数 >= 15、
+      平坦占比 >= 0.15, 最后一条挡拍屏和照片)。也就是说以前的白图 = pinyin_probe 判有拼音 且 分数 >= 0.06,
+      **0.06 从来没在原始目录上核过**。9 月那批直接在原始目录上按 0.06 数,
+      0.06~0.10 那段 12 张里只有 3 张有拼音, 其余是拍屏、照片、没拼音的回单。
+
+    ★ pinyin_probe 最后一次改判据是 9/14 10:00(42a946c), 归集 pinyin_hits 在那之后,
+      所以这里原样调它 = 和老白图池同一个定义。
+
+    分四类:
+        probe   pinyin_probe 判有拼音             <- 老白图池的定义
+        shot    是截图(平坦占比 >= 0.15), 但 pinyin_probe 不认
+        photo   不是截图(平坦占比 < 0.15): 拍屏、照片
+        unread  读不出
+    ★ 蓝底页有渐变, 平坦占比偏低: 本机 150 张已知有拼音的蓝底截图, 最低 0.124, 有 4 张 < 0.15。
+      所以蓝图这边 photo 那一类里会混进少量真截图, 只当参考, 不拿它筛蓝图。
+    """
+    rows = []
+    with a.scan.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    rows.append(json.loads(line))
+                except Exception:               # noqa: BLE001
+                    continue
+    cand = [(r["path"], r["score"]) for r in rows
+            if r.get("score") is not None and r["score"] >= a.min_score]
+    miss = [p for p, _ in cand if not os.path.exists(p)]
+    print(f"  名单 {len(rows):,} 条, 分数 >= {a.min_score} 的 {len(cand):,} 张")
+    if miss:
+        print(f"  ★ 其中 {len(miss):,} 张文件已经不在了, 例: {miss[0]}")
+        if len(miss) > 0.01 * max(1, len(cand)):
+            print("  超过 1%, 名单和目录对不上, 不出数。")
+            return
+    n_work = a.workers if a.workers > 0 else max(1, (os.cpu_count() or 2) - 1)
+    out = []
+    if n_work > 1 and len(cand) > 50:
+        import multiprocessing as mp
+        with mp.Pool(n_work, initializer=_probe_init) as pool:
+            for i, r in enumerate(pool.imap_unordered(_probe_one, cand, chunksize=8), 1):
+                out.append(r)
+                if i % 500 == 0:
+                    print(f"  ...{i:,} / {len(cand):,}", flush=True)
+    else:
+        _probe_init()
+        out = [_probe_one(c) for c in cand]
+    out.sort(key=lambda r: -r["score"])
+
+    a.out.parent.mkdir(parents=True, exist_ok=True)
+    files = {"all": a.out}
+    for k in ("probe", "shot", "photo"):
+        files[k] = a.out.with_name(f"{a.out.stem}_{k}{a.out.suffix}")
+    for k, p in files.items():
+        with p.open("w", encoding="utf-8") as f:
+            for r in out:
+                if k == "all" or r["cls"] == k:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    CL = ("probe", "shot", "photo", "unread")
+    head = "probe判有拼音  截图但probe不认  拍屏或照片  读不出"
+    edges = sorted({a.min_score} | {e for e in (0.10, 0.15, 0.20, 0.25, 0.35) if e > a.min_score})
+    edges.append(1.01)
+    print()
+    print(f"    分数段          合计   {head}")
+    for lo, hi in zip(edges, edges[1:]):
+        seg = [r for r in out if lo <= r["score"] < hi]
+        c = Counter(r["cls"] for r in seg)
+        print(f"    {lo:.2f} - {hi:.2f}  {len(seg):>7,}   " +
+              "  ".join(f"{c[k]:>12,}" for k in CL))
+    c = Counter(r["cls"] for r in out)
+    print(f"    合计         {len(out):>7,}   " + "  ".join(f"{c[k]:>12,}" for k in CL))
+    print()
+    print("  按页头颜色:")
+    for pk in ("蓝底", "白底", "其它", "读不出"):
+        seg = [r for r in out if r["page"] == pk]
+        if seg:
+            cc = Counter(r["cls"] for r in seg)
+            print(f"    {pk:<6}{len(seg):>7,}   " + "  ".join(f"{cc[k]:>12,}" for k in CL))
+    print()
+    print(f"  ★ 老白图池的定义(pinyin_probe 判有拼音 且 分数 >= {a.min_score}): {c['probe']:,} 张")
+    for k in ("all", "probe", "shot", "photo"):
+        print(f"    {k:<6}-> {files[k]}")
+    print("  ★★ 数完还是要按分数段贴图核。上面几个文件都能直接给 pick_pinyin --band --sheet 用。")
+
+
 def cmd_summary(a) -> None:
     if not a.scan.exists():
         print(f"  名单文件还不在: {a.scan}")
@@ -608,11 +757,18 @@ def main() -> None:
     p4.add_argument("--n", type=int, default=12)
     p4.add_argument("--cols", type=int, default=4)
     p4.add_argument("--width", type=int, default=360)
+    p5 = sub.add_parser("probe", help="过了分数线的再用 pinyin_probe 原样判一遍: 老白图池的定义、拍屏")
+    p5.add_argument("--scan", type=Path, required=True)
+    p5.add_argument("--min-score", type=float, required=True)
+    p5.add_argument("--out", type=Path, required=True)
+    p5.add_argument("--workers", type=int, default=0, help="0 = 核数减一")
     a = ap.parse_args()
     if a.cmd == "inventory":
         cmd_inventory(a)
     elif a.cmd == "survey":
         cmd_survey(a)
+    elif a.cmd == "probe":
+        cmd_probe(a)
     elif a.cmd == "sheet":
         a.page = {"blue": "蓝底", "white": "白底", "other": "其它"}.get(a.page, a.page)
         cmd_sheet(a)
