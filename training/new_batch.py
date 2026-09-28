@@ -628,6 +628,48 @@ def cmd_holdout(a) -> None:
     print("  测试图的日期: " + "  ".join(f"{k} {v}" for k, v in sorted(days.items())))
 
 
+LABEL_KIND_EN = {"可用": "usable", "混着拼音": "pinyin-mixed", "纯拉丁(拼音漏进来了)": "all-latin",
+                 "空": "empty", "太短": "too-short"}
+
+
+def cmd_labels_done(a) -> None:
+    """几个配对目录的标签是不是都读完了。全读完退出码 0, 有一个没读完就是 1。
+
+    ★ 为什么要这个: 后台读标签是一个接一个跑的, "进程没了"可能是跑完了, 也可能是半路断了。
+      没读完就往下切段、洗标签, 出来的数是半截的, 还看不出来。
+      所以后面的命令用它的退出码把关: 不是 0 就不往下跑。
+    ★ 只打 ASCII, 服务器控制台是 GBK, 中文贴回来是乱码。
+    """
+    import csv
+    ok = True
+    print("=" * 64)
+    print("  LABELS DONE?  (ASCII only - safe to paste)")
+    print("=" * 64)
+    for d in a.pairs:
+        man, lab = d / "_pairs.csv", d / "_pairs_labeled.csv"
+        if not man.exists():
+            print(f"  {d.name:<32} _pairs.csv MISSING")
+            ok = False
+            continue
+        with man.open(encoding="utf-8-sig") as f:
+            n = sum(1 for _ in csv.DictReader(f))
+        if not lab.exists():
+            print(f"  {d.name:<32} 0 / {n:,}   _pairs_labeled.csv MISSING")
+            ok = False
+            continue
+        with lab.open(encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+        done = [r for r in rows if (r.get("kind") or "").strip()]
+        k = Counter(LABEL_KIND_EN.get(r["kind"], "other") for r in done)
+        full = len(rows) == n and len(done) == n
+        ok = ok and full
+        print(f"  {d.name:<32} {len(done):>7,} / {n:<7,} {'DONE' if full else 'NOT DONE'}")
+        print("      " + "  ".join(f"{kk} {v / max(1, len(done)):.1%}" for kk, v in k.most_common()))
+    print()
+    print("  ALL DONE" if ok else "  ★ NOT ALL DONE -> stop here, the next steps will not run")
+    sys.exit(0 if ok else 1)
+
+
 def cmd_summary(a) -> None:
     if not a.scan.exists():
         print(f"  名单文件还不在: {a.scan}")
@@ -818,11 +860,15 @@ def main() -> None:
     p6.add_argument("--out", type=Path, required=True)
     p6.add_argument("--n", type=int, required=True)
     p6.add_argument("--seed", type=int, default=17)
+    p7 = sub.add_parser("labels-done", help="几个配对目录的标签是不是都读完了, 没读完退出码 1")
+    p7.add_argument("--pairs", type=Path, nargs="+", required=True)
     a = ap.parse_args()
     if a.cmd == "inventory":
         cmd_inventory(a)
     elif a.cmd == "survey":
         cmd_survey(a)
+    elif a.cmd == "labels-done":
+        cmd_labels_done(a)
     elif a.cmd == "holdout":
         cmd_holdout(a)
     elif a.cmd == "probe":
