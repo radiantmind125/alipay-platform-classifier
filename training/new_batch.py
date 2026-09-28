@@ -41,6 +41,7 @@ import json
 import os
 import random
 import re
+import shutil
 import sys
 from collections import Counter
 from pathlib import Path
@@ -577,6 +578,56 @@ def cmd_probe(a) -> None:
     print("  ★★ 数完还是要按分数段贴图核。上面几个文件都能直接给 pick_pinyin --band --sheet 用。")
 
 
+def cmd_holdout(a) -> None:
+    r"""从归集目录里按固定种子随机挑 N 张, 挪到测试目录, 训练永远不碰它们。
+
+    ★★★★★ 为什么要这一步: e2e_bench 是从 --src 里随机抽图量的, 以前 --src 给的就是训练用的那个目录,
+      所以以前整页那几个数, 九成五量的是**训练时见过的图**。
+      9 月这批是现在的模型**从没见过**的, 而且是新一个月的 —— 正好拿来量真本事:
+          1. 现在交出去的模型在没见过的 9 月图上什么水平
+          2. 加了 9 月数据重训之后, 同一批没见过的图上涨没涨
+      所以**先挪出来再裁图**, 从源头上保证测试图进不了训练。
+
+    ★ 挪的是我们自己归集的拷贝(hits_*), 原图一张不动。清单 _manifest.csv 跟着分开,
+      挪之前的原样留一份 _manifest_before_holdout.csv。
+    """
+    if not a.src.is_dir():
+        print(f"  目录不在: {a.src}")
+        return
+    if a.out.exists() and any(a.out.iterdir()):
+        print(f"  ★ {a.out} 已经有东西了, 不再挪(免得挪两次)。")
+        return
+    files = sorted(p for p in a.src.iterdir() if p.is_file() and p.suffix.lower() in EXTS)
+    if a.n <= 0 or a.n >= len(files):
+        print(f"  目录里 {len(files):,} 张, 要挪 {a.n} 张, 不合理")
+        return
+    pick = random.Random(a.seed).sample(files, a.n)
+    names = {p.name for p in pick}
+    a.out.mkdir(parents=True, exist_ok=True)
+    for p in pick:
+        shutil.move(str(p), str(a.out / p.name))
+    man = a.src / "_manifest.csv"
+    if man.exists():
+        import csv
+        with man.open(encoding="utf-8-sig", newline="") as f:
+            rows = list(csv.reader(f))
+        head, body = rows[0], rows[1:]
+        shutil.copy2(man, a.src / "_manifest_before_holdout.csv")
+        for dst, keep in ((a.out / "_manifest.csv", True), (man, False)):
+            with dst.open("w", encoding="utf-8-sig", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(head)
+                w.writerows(r for r in body if r and ((r[0] in names) == keep))
+    days = Counter()
+    for n in names:
+        m = DATE.search(n)
+        days[f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else "无日期"] += 1
+    left = sum(1 for p in a.src.iterdir() if p.is_file() and p.suffix.lower() in EXTS)
+    print(f"  挪了 {len(names):,} 张 -> {a.out}")
+    print(f"  训练用的还剩 {left:,} 张 在 {a.src}")
+    print("  测试图的日期: " + "  ".join(f"{k} {v}" for k, v in sorted(days.items())))
+
+
 def cmd_summary(a) -> None:
     if not a.scan.exists():
         print(f"  名单文件还不在: {a.scan}")
@@ -762,11 +813,18 @@ def main() -> None:
     p5.add_argument("--min-score", type=float, required=True)
     p5.add_argument("--out", type=Path, required=True)
     p5.add_argument("--workers", type=int, default=0, help="0 = 核数减一")
+    p6 = sub.add_parser("holdout", help="按固定种子挑 N 张挪到测试目录, 训练不碰")
+    p6.add_argument("--src", type=Path, required=True)
+    p6.add_argument("--out", type=Path, required=True)
+    p6.add_argument("--n", type=int, required=True)
+    p6.add_argument("--seed", type=int, default=17)
     a = ap.parse_args()
     if a.cmd == "inventory":
         cmd_inventory(a)
     elif a.cmd == "survey":
         cmd_survey(a)
+    elif a.cmd == "holdout":
+        cmd_holdout(a)
     elif a.cmd == "probe":
         cmd_probe(a)
     elif a.cmd == "sheet":
