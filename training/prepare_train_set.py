@@ -32,6 +32,64 @@ from pathlib import Path
 HAN = re.compile(r"[\u4e00-\u9fff]")
 
 
+def keep_val_sources(keep: list[dict], a) -> set | None:
+    """\u6309\u4e0a\u4e00\u6b21\u7684 val.txt \u5b9a\u8fd9\u6b21\u7684\u9a8c\u8bc1\u96c6\u539f\u56fe\u3002
+
+    \u2605\u2605\u2605\u2605\u2605 \u4e3a\u4ec0\u4e48\u8981\u8fd9\u4e2a: \u9a8c\u8bc1\u96c6\u662f"\u539f\u56fe\u6392\u5e8f\u3001\u6309\u79cd\u5b50\u6253\u4e71\u3001\u53d6\u524d 5%"\u3002\u52a0\u8fdb\u65b0\u76ee\u5f55\u4ee5\u540e\u539f\u56fe\u53d8\u591a,
+      \u6253\u4e71\u7684\u7ed3\u679c\u6574\u4e2a\u53d8\u4e86, \u8001\u76ee\u5f55\u90a3 5% \u6362\u4e86\u4e00\u6279 \u2014\u2014 \u4e00\u90e8\u5206\u4e0a\u6b21\u9a8c\u8bc1\u8fc7\u7684\u56fe\u8fd9\u6b21\u8fdb\u4e86\u8bad\u7ec3,
+      \u4e00\u90e8\u5206\u4e0a\u6b21\u8bad\u8fc7\u7684\u56fe\u8fd9\u6b21\u8fdb\u4e86\u9a8c\u8bc1\u3002\u65b0\u6a21\u578b\u5728\u8fd9\u6837\u7684\u9a8c\u8bc1\u96c6\u4e0a\u7684\u5206\u6570, \u548c\u8001\u6a21\u578b\u4e0a\u6b21\u7684\u5206\u6570
+      **\u4e0d\u662f\u91cf\u7684\u540c\u4e00\u6279\u4e1c\u897f**, \u6bd4\u4e0d\u4e86(9/23 \u84dd\u56fe"\u9000\u4e86\u4e09\u4e2a\u70b9"\u5c31\u662f\u8fd9\u4e48\u6765\u7684\u5047\u8c61)\u3002
+
+    \u529e\u6cd5: \u4e0a\u6b21 val.txt \u91cc\u6bcf\u4e00\u884c\u5bf9\u56de\u5b83\u7684\u539f\u56fe,
+        \u4e0a\u6b21\u51fa\u73b0\u8fc7\u7684\u76ee\u5f55  \u9a8c\u8bc1\u96c6 = \u4e0a\u6b21\u90a3\u6279\u539f\u56fe, \u4e00\u5f20\u4e0d\u591a\u4e00\u5f20\u4e0d\u5c11
+        \u8fd9\u6b21\u65b0\u52a0\u7684\u76ee\u5f55    \u6309 --val-ratio \u53e6\u5212(\u6309\u539f\u56fe, \u56fa\u5b9a\u79cd\u5b50)
+    \u8fd9\u6837\u8001\u76ee\u5f55\u7684\u9a8c\u8bc1\u96c6\u548c\u4e0a\u6b21\u5b8c\u5168\u4e00\u6837, \u65b0\u65e7\u4e24\u4e2a\u6a21\u578b\u90fd\u6ca1\u8bad\u8fc7\u5b83\u4eec, \u6309\u76ee\u5f55\u4e00\u6bd4\u5c31\u662f\u540c\u4e00\u6279\u4e1c\u897f\u3002
+
+    val.txt \u4e00\u884c\u662f  <\u76ee\u5f55>\\seg_input\\<\u6bb5\u6587\u4ef6\u540d> <TAB> \u6587\u5b57, \u6309(\u76ee\u5f55\u540d, \u6bb5\u6587\u4ef6\u540d)\u5bf9\u56de\u6e05\u5355\u91cc\u7684\u884c,
+    \u4e0d\u6309\u6574\u6761\u8def\u5f84\u5bf9 \u2014\u2014 \u76d8\u7b26\u3001\u5927\u5c0f\u5199\u3001\u659c\u6760\u65b9\u5411\u4e0d\u4e00\u6837\u90fd\u4e0d\u5f71\u54cd\u3002
+    """
+    want = set()
+    for line in a.keep_val.open(encoding="utf-8"):
+        p = line.split("\t", 1)[0].strip()
+        if p:
+            q = Path(p.replace("\\", "/"))
+            want.add((q.parent.parent.name.lower(), q.name))
+    if not want:
+        print(f"  \u2605 {a.keep_val} \u91cc\u4e00\u884c\u90fd\u6ca1\u6709")
+        return None
+    hit_keys = set()
+    forced = set()
+    for r in keep:
+        k = (Path(r["_dir"]).name.lower(), r["file"])
+        if k in want:
+            hit_keys.add(k)
+            forced.add(r["source"])
+    old_dirs = {k[0] for k in want}
+    print(f"  --keep-val: \u4e0a\u6b21\u9a8c\u8bc1\u96c6 {len(want):,} \u6bb5, \u8fd9\u6b21\u6e05\u5355\u91cc\u5bf9\u4e0a {len(hit_keys):,} \u6bb5, "
+          f"\u5bf9\u56de\u539f\u56fe {len(forced):,} \u5f20")
+    miss = len(want) - len(hit_keys)
+    if miss:
+        print(f"  \u2605 \u6709 {miss:,} \u6bb5\u5bf9\u4e0d\u4e0a(\u4e0a\u6b21\u4e4b\u540e\u8fd9\u4e9b\u6bb5\u88ab\u7b5b\u6389\u6216\u8005\u91cd\u5207\u8fc7)")
+        if miss > 0.02 * len(want):
+            print("  \u2605\u2605 \u8d85\u8fc7 2%, \u4e0a\u6b21\u7684\u9a8c\u8bc1\u96c6\u548c\u73b0\u5728\u7684\u6e05\u5355\u5bf9\u4e0d\u4e0a, \u4e0d\u5f80\u4e0b\u505a\u3002")
+            return None
+    val_srcs = set(forced)
+    by_dir: dict[str, set] = {}
+    for r in keep:
+        by_dir.setdefault(Path(r["_dir"]).name.lower(), set()).add(r["source"])
+    for d, ss in sorted(by_dir.items()):
+        if d in old_dirs:
+            n_old = len(ss & forced)
+            print(f"    {d:<28} \u539f\u56fe {len(ss):>6,}  \u9a8c\u8bc1 {n_old:>5,}  (\u7167\u4e0a\u6b21)")
+        else:
+            lst = sorted(ss)
+            random.Random(a.seed).shuffle(lst)
+            n = max(1, int(len(lst) * a.val_ratio))
+            val_srcs |= set(lst[:n])
+            print(f"    {d:<28} \u539f\u56fe {len(ss):>6,}  \u9a8c\u8bc1 {n:>5,}  (\u65b0\u76ee\u5f55, \u6309 {a.val_ratio:.0%} \u53e6\u5212)")
+    return val_srcs
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pairs", type=Path, required=True)
@@ -57,6 +115,9 @@ def main() -> None:
                          "拿来做对照实验: 把白图砍到和蓝图一样多, 再看白图能到多少 —— "
                          "这样才分得清蓝图弱是**数据少**还是**本来就难**")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--keep-val", type=Path, default=None,
+                    help="上一次训练的 val.txt。那次验证集里的原图这次还放验证集, "
+                         "新目录另按 --val-ratio 划; 新旧模型才能在同一批没见过的段上比")
     a = ap.parse_args()
 
     name = "_segments.csv" if a.segments else "_pairs_labeled.csv"
@@ -129,10 +190,16 @@ def main() -> None:
     # ★★★★★ 关键在这。按行划会把同一张截图的行分到训练和验证两边,
     #   那验证集等于在考已经背过的题。
     srcs = sorted({r["source"] for r in keep})
-    random.seed(a.seed)
-    random.shuffle(srcs)
-    n_val = max(1, int(len(srcs) * a.val_ratio))
-    val_srcs = set(srcs[:n_val])
+    if not a.keep_val:
+        random.seed(a.seed)
+        random.shuffle(srcs)
+        n_val = max(1, int(len(srcs) * a.val_ratio))
+        val_srcs = set(srcs[:n_val])
+    else:
+        val_srcs = keep_val_sources(keep, a)
+        if val_srcs is None:
+            return
+        n_val = len(val_srcs)
     train = [r for r in keep if r["source"] not in val_srcs]
     val = [r for r in keep if r["source"] in val_srcs]
     print(f"  原图 {len(srcs):,} 张  ->  训练 {len(srcs)-n_val:,} 张 / 验证 {n_val:,} 张")
