@@ -381,6 +381,10 @@ def cmd_survey(a) -> None:
 
 
 def cmd_summary(a) -> None:
+    if not a.scan.exists():
+        print(f"  名单文件还不在: {a.scan}")
+        print("  -> 打分还没开始(或者 --out 写的不是这个路径)。先把打分那一步跑起来。")
+        return
     rows = []
     with a.scan.open(encoding="utf-8") as f:
         for line in f:
@@ -442,8 +446,11 @@ def cmd_summary(a) -> None:
     n_fresh_imgs = sum(1 for p in new_imgs if os.path.basename(p) not in old_names)
     n_fresh_rows = sum(1 for r in rows if os.path.basename(r["path"]) not in old_names)
     print(f"  新目录图片 {len(new_imgs):,} 张, 其中真新的 {n_fresh_imgs:,} 张;  "
-          f"名单里 {len(rows):,} 条"
-          f"{'  <- 还没扫完' if n_fresh_rows < n_fresh_imgs else ''}")
+          f"名单里 {len(rows):,} 条")
+    if n_fresh_rows < n_fresh_imgs:
+        pct = n_fresh_rows / n_fresh_imgs if n_fresh_imgs else 0
+        print(f"  ★ **还没扫完**: 真新的已扫 {n_fresh_rows:,} / {n_fresh_imgs:,} ({pct:.0%}),"
+              f" 下面的数是到目前为止的")
     print(f"  量到分数的 {len(ok):,}    读不出/太小 {sum(bad.values()):,}"
           + (f"  ({', '.join(f'{k} {v}' for k, v in bad.items())})" if bad else ""))
     print(f"  其中真新的(老目录里没有同名) {len(fresh):,}")
