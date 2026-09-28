@@ -132,6 +132,37 @@ def _detail(new_imgs, old_imgs, fresh, overlap, a) -> None:
     for tag, d in (("老目录", do), ("新目录里同名的", dv), ("真新的", dn)):
         if d:
             print(f"  {tag:<14}日期 {d[0]} 到 {d[-1]}   ({len(d):,} 张)")
+    print()
+
+    # ★★★ 按**下载日期**(文件修改时间)分开看。
+    #   同一个目录里可能叠着好几次上传(上一次的还没挪走, 这一次又传进来),
+    #   只看"图库里没有的"会把几次混在一起。每次上传是不同的一天写进来的,
+    #   按修改时间一分, 就知道**这一次**到底加了什么。
+    import datetime as _dt
+    old_names = {os.path.basename(p) for p in old_imgs}
+    by_day: dict[str, dict] = {}
+    for _p, name, mt in _scan_tree(a.new):
+        k = _dt.datetime.fromtimestamp(mt).strftime("%Y-%m-%d")
+        g = by_day.setdefault(k, {"n": 0, "old": 0, "fd": [], "mon_new": Counter()})
+        g["n"] += 1
+        m = DATE.search(name)
+        d = f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else None
+        if d:
+            g["fd"].append(d)
+        if name in old_names:
+            g["old"] += 1
+        else:
+            g["mon_new"][d[:7] if d else "无日期"] += 1
+    print("  按下载日期(修改时间)分:")
+    print(f"    {'下载日期':<12}{'张数':>10}{'图库里有':>10}{'图库里没有':>11}   图本身的日期(文件名)")
+    for k in sorted(by_day):
+        g = by_day[k]
+        fd = sorted(g["fd"])
+        rng = f"{fd[0]} 到 {fd[-1]}" if fd else "-"
+        print(f"    {k:<12}{g['n']:>10,}{g['old']:>10,}{g['n'] - g['old']:>11,}   {rng}")
+        if g["n"] - g["old"]:
+            print("        图库里没有的按月: "
+                  + "  ".join(f"{x} {v:,}" for x, v in sorted(g["mon_new"].items())))
     if dn:
         c = Counter(dn)
         print("  真新的按天:")
@@ -435,6 +466,22 @@ def cmd_summary(a) -> None:
         print(f"    >= {t:.2f}   {h:>8,} 张   占 {pct:.2%}{cmp}{tag}")
     print()
 
+    # ★★ 按下载日期分: 目录里叠着几次上传时, 每一次各自多少张、多少拼音图
+    import datetime as _dt
+    mt_of = {norm(p): mt for p, _n, mt in _scan_tree(a.new)}
+    per_day: dict[str, list] = {}
+    for r in fresh:
+        mt = mt_of.get(norm(r["path"]))
+        k = _dt.datetime.fromtimestamp(mt).strftime("%Y-%m-%d") if mt else "?"
+        per_day.setdefault(k, []).append(r["score"])
+    if len(per_day) > 1 or a.by_day:
+        print("  按下载日期(修改时间)分, 真新的里:")
+        for k in sorted(per_day):
+            sc = per_day[k]
+            print(f"    {k}   {len(sc):>8,} 张   "
+                  + "   ".join(f">= {t:.2f} 的 {sum(1 for s in sc if s >= t):,} 张" for t in thrs))
+        print()
+
     # 分数段: 主阈值上面那一段最容易混进假的, 单独看数
     edges = sorted(set([main_t, 0.15, 0.20, 0.25, 0.35, 1.01]))
     edges = [e for e in edges if e >= main_t]
@@ -487,6 +534,8 @@ def main() -> None:
     p2.add_argument("--new", type=Path, required=True)
     p2.add_argument("--old", type=Path, default=None)
     p2.add_argument("--kind", choices=["blue", "white"], required=True)
+    p2.add_argument("--by-day", action="store_true",
+                    help="就算只有一个下载日期也按下载日期分开打")
     p3 = sub.add_parser("survey", help="把下载目录底下所有子目录都过一遍: 日期、下载时间、图库里没有的")
     p3.add_argument("--roots", type=Path, nargs="+", required=True)
     p3.add_argument("--library", type=Path, nargs="+", required=True,
