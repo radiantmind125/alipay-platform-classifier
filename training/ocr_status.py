@@ -95,7 +95,13 @@ def main() -> None:
     if log.exists():
         print()
         print(f"  _ocr.log          {log.stat().st_size:>9,} bytes")
-        txt = log.read_text(encoding="utf-8", errors="replace")
+        # ★ PowerShell 5.1 的 `*>` 写日志用的是 UTF-16(带 BOM), 按 UTF-8 读出来
+        #   每个字符中间夹一个空字节, 贴回来是 `5 0 0 / 3 , 8 7 4`。按 BOM 认一下
+        raw = log.read_bytes()
+        if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+            txt = raw.decode("utf-16", errors="replace")
+        else:
+            txt = raw.decode("utf-8-sig", errors="replace")
         # 只挑带数字的进度行, 中文全滤掉
         prog = [l for l in txt.splitlines() if "/" in l and any(c.isdigit() for c in l)]
         print(f"  progress lines    {len(prog):>9,}")
