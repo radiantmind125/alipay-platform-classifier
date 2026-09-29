@@ -51,6 +51,11 @@ def walk_stats(root: Path, nlink_probe: int = 200) -> dict:
         with it:
             for e in it:
                 try:
+                    # ★ 目录联接(junction)在 Python 3.12 里 is_dir(follow_symlinks=False) 也是 True,
+                    #   跟进去会把别处的东西算进来, 指向上层的还会绕圈。不跟, 记个数
+                    if getattr(e, "is_junction", lambda: False)():
+                        flags.add("junction")
+                        continue
                     if e.is_dir(follow_symlinks=False):
                         low = e.name.lower()
                         if low == ".git":
