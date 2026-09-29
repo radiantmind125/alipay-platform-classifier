@@ -122,7 +122,8 @@ def _sha1(path: str) -> str:
     return h.hexdigest()
 
 
-def _detail(new_imgs, old_imgs, fresh, overlap, a) -> None:
+def _detail(new_imgs, old_imgs, fresh, overlap, a, seen=frozenset(), overlap_seen=(),
+            seen_where=None) -> None:
     """同名的是不是真的同一张图(逐字节比), 以及日期精确到天。
 
     ★★ "同名 = 同一张图"只是推断。文件名里是凭证号 + 时间戳, 按理同名就是同一张,
@@ -145,7 +146,7 @@ def _detail(new_imgs, old_imgs, fresh, overlap, a) -> None:
     by_day: dict[str, dict] = {}
     for _p, name, mt in _scan_tree(a.new):
         k = _dt.datetime.fromtimestamp(mt).strftime("%Y-%m-%d")
-        g = by_day.setdefault(k, {"n": 0, "old": 0, "fd": [], "mon_new": Counter()})
+        g = by_day.setdefault(k, {"n": 0, "old": 0, "seen": 0, "fd": [], "mon_new": Counter()})
         g["n"] += 1
         m = DATE.search(name)
         d = f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else None
@@ -153,17 +154,27 @@ def _detail(new_imgs, old_imgs, fresh, overlap, a) -> None:
             g["fd"].append(d)
         if name in old_names:
             g["old"] += 1
+        elif name in seen:
+            g["seen"] += 1
         else:
             g["mon_new"][d[:7] if d else "无日期"] += 1
     print("  按下载日期(修改时间)分:")
-    print(f"    {'下载日期':<12}{'张数':>10}{'图库里有':>10}{'图库里没有':>11}   图本身的日期(文件名)")
+    if seen:
+        print(f"    {'下载日期':<12}{'张数':>10}{'图库里有':>10}{'上一批处理过':>12}{'真新的':>10}"
+              "   图本身的日期(文件名)")
+    else:
+        print(f"    {'下载日期':<12}{'张数':>10}{'图库里有':>10}{'图库里没有':>11}   图本身的日期(文件名)")
     for k in sorted(by_day):
         g = by_day[k]
         fd = sorted(g["fd"])
         rng = f"{fd[0]} 到 {fd[-1]}" if fd else "-"
-        print(f"    {k:<12}{g['n']:>10,}{g['old']:>10,}{g['n'] - g['old']:>11,}   {rng}")
-        if g["n"] - g["old"]:
-            print("        图库里没有的按月: "
+        nf = g["n"] - g["old"] - g["seen"]
+        if seen:
+            print(f"    {k:<12}{g['n']:>10,}{g['old']:>10,}{g['seen']:>12,}{nf:>10,}   {rng}")
+        else:
+            print(f"    {k:<12}{g['n']:>10,}{g['old']:>10,}{nf:>11,}   {rng}")
+        if nf:
+            print("        真新的按月: "
                   + "  ".join(f"{x} {v:,}" for x, v in sorted(g["mon_new"].items())))
     if dn:
         c = Counter(dn)
@@ -196,6 +207,24 @@ def _detail(new_imgs, old_imgs, fresh, overlap, a) -> None:
             print(f"    不一样的例子: {example[0]}   新 {example[1]:,} 字节  老 {example[2]:,} 字节")
         print()
 
+    # ★★ 和上一批同名的, 是不是同一份文件。上一批的原图删了, 只有我们拷走的那些(拼音图、测试图)还在,
+    #   所以只能在"有拷贝的"里面抽。一样 = 经理重新导出时原样又导了一遍; 不一样 = 重新压缩过
+    #   (凭证号 + 时间戳一样, 还是同一张单子, 照样算见过, 但要知道)
+    if overlap_seen and seen_where:
+        new_by_name = {}
+        for p in new_imgs:
+            new_by_name.setdefault(os.path.basename(p), p)
+        have = [n for n in overlap_seen if n in seen_where]
+        print(f"  和上一批同名的 {len(overlap_seen):,} 张里, 我们手上有拷贝的 {len(have):,} 张")
+        if have:
+            random.seed(a.seed)
+            names = random.sample(have, min(a.hash_sample, len(have)))
+            same = sum(1 for n in names
+                       if os.path.getsize(new_by_name[n]) == os.path.getsize(seen_where[n])
+                       and _sha1(new_by_name[n]) == _sha1(seen_where[n]))
+            print(f"    抽 {len(names)} 对逐字节比:  一模一样 {same} 对,  不一样 {len(names) - same} 对")
+        print()
+
 
 def cmd_inventory(a) -> None:
     print("=" * 72)
@@ -211,10 +240,23 @@ def cmd_inventory(a) -> None:
     print("  正在列老目录...", flush=True)
     old_imgs, _o, _d = walk(a.old)
     old_names = {os.path.basename(p) for p in old_imgs}
+    # ★★ 上一批处理过的(原图可能已经被删了, 只剩扫描名单)也算见过 —— 见 seen_names.py
+    seen, seen_where = set(), {}
+    if a.seen:
+        from seen_names import load as load_seen
+        try:
+            seen, notes, seen_where = load_seen(a.seen)
+        except FileNotFoundError as e:
+            print(f"  {e}")
+            return
+        print("  上一批处理过的:")
+        for s in notes:
+            print(f"    {s}")
     new_names = [os.path.basename(p) for p in new_imgs]
     dup_in_new = sum(c - 1 for c in Counter(new_names).values() if c > 1)
     overlap = [n for n in new_names if n in old_names]
-    fresh = [n for n in new_names if n not in old_names]
+    overlap_seen = [n for n in new_names if n not in old_names and n in seen]
+    fresh = [n for n in new_names if n not in old_names and n not in seen]
 
     print()
     print(f"  新目录  图片 {len(new_imgs):>10,} 张    子目录 {ndir}")
@@ -224,7 +266,11 @@ def cmd_inventory(a) -> None:
     print(f"  老目录  图片 {len(old_imgs):>10,} 张   ({a.old})")
     print()
     print(f"  ★ 新目录里和老目录**同名**的   {len(overlap):>10,} 张   <- 不是新数据")
-    print(f"  ★ **真新的**(老目录里没有)     {len(fresh):>10,} 张")
+    if a.seen:
+        print(f"  ★ 和上一批处理过的同名的       {len(overlap_seen):>10,} 张   <- 处理过了, 也不是新数据")
+        print(f"  ★ **真新的**(两边都没有)       {len(fresh):>10,} 张")
+    else:
+        print(f"  ★ **真新的**(老目录里没有)     {len(fresh):>10,} 张")
     if dup_in_new:
         print(f"    新目录里自己重名的(不同子目录)  {dup_in_new:,} 张")
     print()
@@ -240,11 +286,12 @@ def cmd_inventory(a) -> None:
     print()
 
     if a.detail:
-        _detail(new_imgs, old_imgs, fresh, overlap, a)
+        _detail(new_imgs, old_imgs, fresh, overlap, a, seen, overlap_seen, seen_where)
 
     # 抽样解码: 读不读得出来、蓝底白底各多少
     random.seed(a.seed)
-    pool = [p for p in new_imgs if os.path.basename(p) not in old_names]
+    pool = [p for p in new_imgs
+            if os.path.basename(p) not in old_names and os.path.basename(p) not in seen]
     sample = random.sample(pool, min(a.sample, len(pool)))
     if sample:
         kinds = Counter(page_kind(p) for p in sample)
@@ -255,8 +302,8 @@ def cmd_inventory(a) -> None:
         print()
 
     # 预估打分要多久(以前 48.7 万张约 7 小时, 约 19 张/秒)
-    hrs = len(new_imgs) / 19 / 3600
-    print(f"  ★ 用 pick_pinyin 全部打分, 按以前的速度估约 {hrs:.1f} 小时(可中断续跑)")
+    hrs = len(fresh) / 19 / 3600
+    print(f"  ★ 用 pick_pinyin 只扫真新的 {len(fresh):,} 张, 按以前的速度估约 {hrs:.1f} 小时(可中断续跑)")
     print("=" * 72)
 
 
@@ -728,6 +775,16 @@ def cmd_summary(a) -> None:
     if a.old and a.old.exists():
         _imgs, _o, _d = walk(a.old)
         old_names = {os.path.basename(p) for p in _imgs}
+    # ★★ 上一批处理过的也不算真新的 —— 扫的时候跳过了它们, 这里不减掉的话,
+    #   "真新的"比"名单里的"多出一大截, 会被当成"还没扫完"
+    if a.seen:
+        from seen_names import load as load_seen
+        try:
+            s, _notes, _w = load_seen(a.seen)
+        except FileNotFoundError as e:
+            print(f"  {e}")
+            return
+        old_names |= s
 
     ok = [r for r in rows if r.get("score") is not None]
     bad = Counter(r.get("err") or "?" for r in rows if r.get("score") is None)
@@ -758,7 +815,9 @@ def cmd_summary(a) -> None:
         if o is not None and old["total"]:
             cmp = f"   (以前 {o:,}/{old['total']:,} = {o / old['total']:.2%})"
         elif o is not None:
-            cmp = f"   (以前挑出 {o:,} 张)"
+            # ★★ 白图以前那 7,159 是 pinyin_probe 先筛过的池子, 这里是原始目录, 口径不一样,
+            #   直接比会把拍屏、照片也算进去(9/28 那次 0.06~0.10 只有 3/12 是真的)
+            cmp = f"   (以前挑出 {o:,} 张, 那是 probe 筛过的; 要比先跑 new_batch.py probe)"
         tag = "  <- 主阈值" if t == main_t else ""
         print(f"    >= {t:.2f}   {h:>8,} 张   占 {pct:.2%}{cmp}{tag}")
     print()
@@ -826,11 +885,15 @@ def main() -> None:
     p1.add_argument("--detail", action="store_true",
                     help="同名的抽样逐字节比, 日期精确到天")
     p1.add_argument("--hash-sample", type=int, default=200)
+    p1.add_argument("--seen", type=Path, nargs="*", default=None,
+                    help="上一批处理过的: 扫描名单 .jsonl / 拷走的目录, 可以给好几个")
     p2 = sub.add_parser("summary", help="pick_pinyin 打完分之后汇总拼音图数")
     p2.add_argument("--scan", type=Path, required=True, help="pick_pinyin 的 --out 那个 jsonl")
     p2.add_argument("--new", type=Path, required=True)
     p2.add_argument("--old", type=Path, default=None)
     p2.add_argument("--kind", choices=["blue", "white"], required=True)
+    p2.add_argument("--seen", type=Path, nargs="*", default=None,
+                    help="上一批处理过的(和扫的时候 --skip-names-from 给的一样), 不算真新的")
     p2.add_argument("--by-day", action="store_true",
                     help="就算只有一个下载日期也按下载日期分开打")
     p3 = sub.add_parser("survey", help="把下载目录底下所有子目录都过一遍: 日期、下载时间、图库里没有的")
