@@ -271,6 +271,24 @@ def cmd_inventory(a) -> None:
         print(f"  ★ **真新的**(两边都没有)       {len(fresh):>10,} 张")
     else:
         print(f"  ★ **真新的**(老目录里没有)     {len(fresh):>10,} 张")
+    # ★★ 老图库里的图当时**真的扫过**吗。白图老池是 9/14 pinyin_probe 扫 OtherImages 筛的, 那时约 76.8 万张,
+    #   老图库现在 87.3 万 —— 可能有一截从没扫过。给了扫描记录(pinyin_full.csv 之类), 就把"和老图库同名的"
+    #   再分成"当时扫过的"和"老图库里有但从没扫过的"; 后者扫的时候不能跳过
+    if a.old_scanned:
+        from seen_names import load as load_seen
+        try:
+            scanned, notes2, _w2 = load_seen(a.old_scanned)
+        except FileNotFoundError as e:
+            print(f"  {e}")
+            return
+        print("  老图库当时的扫描记录:")
+        for s in notes2:
+            print(f"    {s}")
+        ov_sc = sum(1 for n in overlap if n in scanned)
+        print(f"  ★ 和老图库同名的 {len(overlap):,} 张里: 当时扫过 {ov_sc:,},  "
+              f"**老图库里有但从没扫过 {len(overlap) - ov_sc:,}**   <- 这些扫的时候不能跳过")
+        lib_un = sum(1 for n in old_names if n not in scanned)
+        print(f"    (整个老图库 {len(old_names):,} 张里, 扫描记录里没有的 {lib_un:,} 张)")
     if dup_in_new:
         print(f"    新目录里自己重名的(不同子目录)  {dup_in_new:,} 张")
     print()
@@ -887,6 +905,8 @@ def main() -> None:
     p1.add_argument("--hash-sample", type=int, default=200)
     p1.add_argument("--seen", type=Path, nargs="*", default=None,
                     help="上一批处理过的: 扫描名单 .jsonl / 拷走的目录, 可以给好几个")
+    p1.add_argument("--old-scanned", type=Path, nargs="*", default=None,
+                    help="老图库当时真正扫过的记录(例 pinyin_full.csv); 给了就把和老图库同名的再分成扫过/没扫过")
     p2 = sub.add_parser("summary", help="pick_pinyin 打完分之后汇总拼音图数")
     p2.add_argument("--scan", type=Path, required=True, help="pick_pinyin 的 --out 那个 jsonl")
     p2.add_argument("--new", type=Path, required=True)

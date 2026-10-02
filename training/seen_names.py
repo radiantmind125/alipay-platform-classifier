@@ -9,9 +9,10 @@ r"""已经处理过的图的文件名 —— 从目录、扫描名单(.jsonl)或
 
 ★ 按文件名认, 不按路径: 同一张图挪过目录、换过盘, 文件名不变(凭证号 + 时间戳)。
 
-支持三种来源, 可以混着给:
+支持四种来源, 可以混着给:
     目录     里面(含子目录)所有图片的文件名
     .jsonl   每行一个 JSON, 取 path 字段的文件名(pick_pinyin 的扫描名单)
+    .csv     按表头取 name / file / path / source 列(pinyin_probe 的 pinyin_full.csv 是 name 列)
     .txt     每行一个文件名或路径
 """
 from __future__ import annotations
@@ -65,6 +66,28 @@ def load(paths) -> tuple[set[str], list[str], dict[str, str]]:
                         names.add(_base(r["path"]))
                         n += 1
             notes.append(f"{p}  扫描名单, {n:,} 条" + (f"(坏行 {bad})" if bad else ""))
+        elif p.is_file() and p.suffix.lower() == ".csv":
+            # ★ 表格: 按表头找 name / file / path / source 列取文件名(pinyin_probe 的 --out
+            #   pinyin_full.csv 是 name 列)。没有这些表头就当第一行也是数据, 取第一列。
+            #   不能当 .txt 一整行取 —— 那样拿到的是 "名字,0.73,..." 整串, 一个都对不上
+            import csv
+            n = 0
+            with p.open(encoding="utf-8-sig", newline="") as fh:
+                rd = csv.reader(fh)
+                head = next(rd, None) or []
+                cols = [h.strip().lower() for h in head]
+                idx = next((cols.index(c) for c in ("name", "file", "path", "source") if c in cols), None)
+                col = cols[idx] if idx is not None else "第一列(没有表头)"
+                if idx is None:
+                    idx = 0
+                    if head and head[0].strip():
+                        names.add(_base(head[0].strip()))
+                        n += 1
+                for row in rd:
+                    if len(row) > idx and row[idx].strip():
+                        names.add(_base(row[idx].strip()))
+                        n += 1
+            notes.append(f"{p}  表格, 取 {col} 列, {n:,} 行")
         elif p.is_file():
             n = 0
             with p.open(encoding="utf-8-sig") as fh:
