@@ -368,6 +368,9 @@ def main() -> None:
                     help="★ 反过来复制**没有拼音**的那些(分数最低的), 用来做对照组。"
                          "对照组必须和拼音组来自**同一个库**, 否则比的是两批不同的图。")
     ap.add_argument("--chunk", type=int, default=200)
+    ap.add_argument("--heartbeat", type=int, default=0,
+                    help="每隔这么多秒把每个线程正在执行的代码行打到 stderr(日志)里, 查卡在哪一步用; "
+                         "开始出结果后自动停。0 = 不打")
     ap.add_argument("--skip-names-from", type=Path, nargs="+", default=None,
                     help="这些地方已经有同名的就不扫。可以给好几个, 目录(比如老图挪去的 E:\\BlueImages)"
                          "或者上一批的扫描名单 .jsonl(上一批原图删了, 只剩名单)都行")
@@ -453,8 +456,16 @@ def main() -> None:
     done = load_done(a.out)
     if done:
         print(f"★ 上次已经量过 {len(done):,} 张, 这次跳过它们。")
-    print("正在列文件...")
+    # ★ 准备阶段(列文件、读见过的名单)只有主进程在干活, 日志又是攒一大块才落盘 ——
+    #   卡在这里的时候从外面什么都看不出来(10/3 两个扫描都卡在这一段, 进程活着但一行没写)。
+    #   所以这几步每步都立刻 flush、报用时; --heartbeat 再定时把正在执行的代码行打出来
+    if a.heartbeat:
+        import faulthandler
+        faulthandler.dump_traceback_later(a.heartbeat, repeat=True)
+    t_prep = time.time()
+    print("正在列文件...", flush=True)
     todo = [p for p in iter_images(a.root) if p not in done]
+    print(f"  列出 {len(todo):,} 张, 用了 {time.time() - t_prep:.0f} 秒", flush=True)
     if a.skip_names_from:
         from seen_names import load as load_seen
         try:
@@ -463,11 +474,12 @@ def main() -> None:
             print(f"--skip-names-from: {e}")
             return
         for s in notes:
-            print(f"  见过的: {s}")
+            print(f"  见过的: {s}", flush=True)
+        print(f"  读完见过的名单, 到这里一共用了 {time.time() - t_prep:.0f} 秒", flush=True)
         before = len(todo)
         todo = [p for p in todo if os.path.basename(p) not in seen]
-        print(f"★ 见过的里已有同名的 {before - len(todo):,} 张, 不扫")
-    print(f"这次要量 {len(todo):,} 张,  {a.workers} 个进程")
+        print(f"★ 见过的里已有同名的 {before - len(todo):,} 张, 不扫", flush=True)
+    print(f"这次要量 {len(todo):,} 张,  {a.workers} 个进程   (准备用了 {time.time() - t_prep:.0f} 秒)", flush=True)
     if not todo:
         print("没有新的要量。")
         report(a.out, a.threshold)
@@ -485,6 +497,10 @@ def main() -> None:
     with a.out.open("a", encoding="utf-8") as f, \
             ProcessPoolExecutor(max_workers=a.workers) as ex:
         for rec in ex.map(score_one, todo, chunksize=a.chunk):
+            if n == 0:
+                print("  第一批结果出来了, 开始写名单", flush=True)
+                if a.heartbeat:
+                    faulthandler.cancel_dump_traceback_later()
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             n += 1
             if rec.get("score") is not None and rec["score"] >= a.threshold:
@@ -495,7 +511,7 @@ def main() -> None:
                 rate = n / el if el else 0
                 left = (len(todo) - n) / rate if rate else 0
                 print(f"  {n:,}/{len(todo):,}   挑出 {hits:,}   "
-                      f"{rate:.0f} 张/秒   还要 {left/60:.0f} 分钟")
+                      f"{rate:.0f} 张/秒   还要 {left/60:.0f} 分钟", flush=True)
     print(f"\n量完 {n:,} 张, 用了 {(time.time()-t0)/60:.1f} 分钟\n")
     report(a.out, a.threshold)
 
