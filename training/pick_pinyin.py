@@ -60,8 +60,16 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-import cv2
-import numpy as np
+# ★★★ 必须在 import numpy / cv2 **之前**。numpy 带的 OpenBLAS 一 import 就按 CPU 核数给每个线程
+#   预留内存(这台 24 核, 每个进程留 24 份)。扫描开二十几个工作进程, 再两个扫描一起跑,
+#   Windows 的提交内存就爆了: 10/3 工作进程 import cv2 报"页面文件太小，无法完成操作"、
+#   import numpy 报 MemoryError, 主进程干等, 一张没扫。打分只用逐张的 OpenCV 运算,
+#   用不着多线程矩阵库, 每个进程 1 个线程就够。setdefault: 外面另设了就听外面的
+for _k in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_k, "1")
+
+import cv2  # noqa: E402
+import numpy as np  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from erase_pinyin import EXTS, annotation_labels, local_background, text_mask  # noqa: E402

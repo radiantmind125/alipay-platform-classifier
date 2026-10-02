@@ -46,8 +46,13 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-import cv2
-import numpy as np
+# ★★★ 必须在 import numpy / cv2 之前: OpenBLAS 按核数给每个线程预留内存, probe 开进程池时
+#   每个工作进程都留 24 份, 会把 Windows 的提交内存撑爆(10/3 pick_pinyin 就是这么挂的, 见那边的注释)
+for _k in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_k, "1")
+
+import cv2  # noqa: E402
+import numpy as np  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from erase_pinyin import EXTS  # noqa: E402
