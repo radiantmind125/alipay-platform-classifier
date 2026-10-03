@@ -17,12 +17,22 @@ C# 版是 demo/TimelineCheck.cs, 两边逐步对应, 改一边要同步改另一
      只看一行会把字形差当成位置差。两行取靠左, 更接近文字真正的起点。
    ★ 窗口不从页面左边开始: 不然会量到返回箭头、标签栏(早先一版有 +6D 的离谱值就是这么来的)。
 3. 偏移 = (圆点左缘 - 取值列左缘) / D。 <= -0.01 判可疑(圆点比文字还靠左, 经理那条线一定碰到蓝色)。
+   苹果机型原尺寸截图(分辨率在 IOS_RES 里)判得更严: < +0.07 就判可疑, 见下面服务器数据。
+4. 判不了(CannotDetermine)的几种: 圆点直径 < 28 像素; 紧挨着上方的一行从圆点右边开始
+   (那是上一步的步骤文字, 说明第一个圆点没找到); 偏移 < -0.30(假图只差几个像素,
+   差出这么多是版面没认对, 比如时间轴顶着导航栏, 量到了标题)。
 
 本地 13,815 张实测(其中 489 张有时间轴):
     正常字体真图       +0.19 ~ +0.24   (各种分辨率都在这个范围)
     拼音手写字体真图   +0.018 起       (这种字体的字几乎不留左边白, 是最贴近的一类)
     假图 112 false     -0.068
     早先负号检查挑出的 6 张 1206 宽苹果图   -0.036(都带"处理进度"标签, 是另一种做法的假图)
+
+服务器 2026-09-01~16 新下载的图, 每 8 张取 1 张, 101,380 张里 28,050 张有时间轴:
+    每个常见分辨率都是两团, 中间是空的。苹果 12,994 张: 真图最低 +0.14, 可疑那团 -0.044 ~ 0.0。
+    可疑的逐张看过: 标签写成"进度处理"、订单号不是 2026MMDD20004001110 开头、
+    客服电话断行("客服9 / 5533")、同一天同一分辨率扎堆 —— 都是假图的特征。
+    唯一误判是一张 581 宽、手写字体、被缩过的图(圆点直径 24), 所以直径 < 28 不判。
 
 用法
 ----
@@ -48,8 +58,17 @@ cv2.setNumThreads(1)
 EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
 THRESHOLD = -0.01        # 偏移 <= 这个值判可疑
-MIN_DIAMETER = 20        # 圆点直径小于这个像素数不判(图被缩得太小, 一个像素就是 0.05D)
+MIN_DIAMETER = 28        # 圆点直径小于这个像素数不判: 图被缩小过, 一个像素就是 0.04D, 手写字体真图会掉下去
+GUARD = -0.30            # 偏移 < 这个值: 版面没认对, 不判
+STEP_TEXT = 0.6          # 从 圆点左缘 + 0.6D 往右才开始的行是步骤文字, 不是取值列
 LABEL_INK = 0.1          # "处理进度"标签灰字像素 / D^2 >= 这个值算有标签
+
+# 苹果机型原尺寸截图的分辨率。服务器 12,994 张这些分辨率的真图偏移最低 +0.14,
+# 可疑那团最高 0.0, 中间空着, 所以阈值放在 +0.07(两边各 3 个多像素)。
+# 只认完全相等的分辨率: 被缩放过的苹果图不在表里, 走通用阈值。
+IOS_RES = {(1179, 2556), (1290, 2796), (1170, 2532), (1320, 2868), (1206, 2622), (1284, 2778),
+           (1125, 2436), (1242, 2688), (828, 1792), (750, 1334), (1242, 2208)}
+IOS_THRESHOLD = 0.07     # 苹果原尺寸截图: 偏移 < 这个值判可疑
 
 
 def _runs(on):
@@ -128,7 +147,8 @@ def measure_img(bgr, path=""):
     c0 = cs[0]
     r = {"path": path, "W": W, "H": H, "n": len(cs), "D": D, "circle_left": cl, "circle_top": c0[1]}
     if D < MIN_DIAMETER:
-        r.update(verdict="CannotDetermine", why=f"圆点直径 {D:g} 太小")
+        r.update(verdict="CannotDetermine", why=f"圆点直径小于 {MIN_DIAMETER} 像素, 图被缩小过",
+                 ios=int((W, H) in IOS_RES), label=0)
         return r
 
     # 取值列: 第一个圆点上方的几行
@@ -159,19 +179,35 @@ def measure_img(bgr, path=""):
     sc = np.flatnonzero(sd.any(0))
     r["step_gap"] = round((int(sc[0]) + sx0 - (cl + D)) / D, 3) if len(sc) else ""
 
-    if not lefts:
-        r.update(verdict="CannotDetermine", why="圆点上方找不到取值列文字")
-        return r
-    vl = min(lefts[:2])
-    r["value_left"] = vl
-    r["offset_px"] = cl - vl
-    off = (cl - vl) / D
-    r["offset"] = round(off, 4)
-    if off <= THRESHOLD:
-        r.update(verdict="Suspicious", why="圆点左缘不在取值列文字右边")
-    else:
-        r.update(verdict="Ok", why="")
+    r.update(decide(W, H, D, cl, lefts))
     return r
+
+
+def decide(W, H, D, cl, lefts):
+    """量好之后的判定。lefts = 圆点上方各行的左缘, 离时间轴最近的在前。
+    单独拿出来是为了能拿扫描结果 csv 重新判(--redecide), 不用重扫图; C# 的 Run() 后半段和这里一一对应。"""
+    out = {"verdict": "CannotDetermine", "value_left": "", "offset_px": "", "offset": "", "ios": int((W, H) in IOS_RES)}
+    if D < MIN_DIAMETER:
+        out["why"] = f"圆点直径小于 {MIN_DIAMETER} 像素, 图被缩小过"
+        return out
+    if not lefts:
+        out["why"] = "圆点上方找不到取值列文字"
+        return out
+    edge = cl + STEP_TEXT * D
+    if lefts[0] >= edge:
+        out["why"] = "紧挨着上方的是步骤文字, 第一个圆点没找到"
+        return out
+    vals = [x for x in lefts if x < edge][:2]       # 再往上从圆点右边开始的行(居中的金额之类)跳过
+    vl = min(vals)
+    off = (cl - vl) / D
+    out.update(value_left=vl, offset_px=cl - vl, offset=round(off, 4))
+    if off < GUARD:
+        out["why"] = f"偏移 {off:+.2f} 个直径, 差得太多, 版面没认对"
+        return out
+    sus = off < IOS_THRESHOLD if out["ios"] else off <= THRESHOLD
+    out["verdict"] = "Suspicious" if sus else "Ok"
+    out["why"] = ("苹果原尺寸截图, 圆点缩进不够" if out["ios"] else "圆点左缘不在取值列文字右边") if sus else ""
+    return out
 
 
 def measure(p):
@@ -185,7 +221,7 @@ def measure(p):
 
 
 KEYS = ["path", "W", "H", "verdict", "offset", "offset_px", "circle_left", "value_left", "D", "n", "circle_top",
-        "lefts", "label", "label_ink", "step_gap", "why"]
+        "lefts", "label", "label_ink", "step_gap", "ios", "why"]
 
 
 def tile(r, width=300):
@@ -244,12 +280,23 @@ def main():
     ap.add_argument("--every", type=int, default=1, help="每 N 张取 1 张")
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     ap.add_argument("--from-csv", action="store_true", help="不扫图, 直接读 --out 那个 csv 出统计和对照图")
+    ap.add_argument("--redecide", default="", help="配合 --from-csv: 按现在的判定规则重新判一遍, 结果写到这个 csv")
     a = ap.parse_args()
 
     t0 = time.time()
     if a.from_csv:
         with open(a.out, encoding="utf-8-sig", newline="") as f:
             rows = list(csv.DictReader(f))
+        if a.redecide:
+            for r in rows:
+                if r.get("verdict") == "error" or r.get("D", "") == "":
+                    continue
+                lefts = [int(x) for x in (r.get("lefts") or "").split()]
+                r.update(decide(int(r["W"]), int(r["H"]), float(r["D"]), int(r["circle_left"]), lefts))
+            with open(a.redecide, "w", encoding="utf-8-sig", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=KEYS, extrasaction="ignore")
+                w.writeheader()
+                w.writerows(rows)
         for r in rows:
             if r.get("verdict") in ("Ok", "Suspicious"):
                 r["offset"], r["label"] = float(r["offset"]), int(r["label"])
@@ -286,7 +333,7 @@ def report(rows, n_files, a):
     sus = sorted([r for r in ok if r["verdict"] == "Suspicious"], key=lambda r: r["offset"])
     near = sorted([r for r in ok if r["verdict"] == "Ok" and r["offset"] < 0.10], key=lambda r: r["offset"])
     print(f"\nscanned {n_files if n_files is not None else '?'}   timeline pages {len(rows):,}   measured {len(ok):,}")
-    print(f"  Suspicious (offset <= {THRESHOLD})   {len(sus):,}")
+    print(f"  Suspicious (offset <= {THRESHOLD}, iPhone sizes < {IOS_THRESHOLD})   {len(sus):,}")
     print(f"  Ok but offset < 0.10 (close)         {len(near):,}")
     print(f"  Ok offset >= 0.10                    {len(ok) - len(sus) - len(near):,}")
     other = [r for r in rows if r.get("verdict") not in ("Ok", "Suspicious")]

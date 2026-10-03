@@ -99,7 +99,7 @@ namespace Ssp.TimelineTest
             {
                 var ci = CultureInfo.InvariantCulture;
                 using var sw2 = new StreamWriter(outCsv, false, new UTF8Encoding(true));
-                sw2.WriteLine("path,W,H,verdict,offset,offset_px,circle_left,value_left,D,n,circle_top,label,label_ink,reason");
+                sw2.WriteLine("path,W,H,verdict,offset,offset_px,circle_left,value_left,D,n,circle_top,label,label_ink,ios,reason");
                 foreach (var (path, w, h, r) in tl)
                 {
                     sw2.WriteLine(string.Join(",",
@@ -108,7 +108,7 @@ namespace Ssp.TimelineTest
                         r.Measured ? r.OffsetPixels.ToString(ci) : "",
                         r.CircleLeft, r.Measured ? r.ValueLeft.ToString(ci) : "",
                         r.Diameter.ToString("0.###", ci), r.CircleCount, r.CircleTop,
-                        r.LabelFound ? 1 : 0, r.LabelInk.ToString("0.000", ci), Csv(r.Reason)));
+                        r.LabelFound ? 1 : 0, r.LabelInk.ToString("0.000", ci), r.IosResolution ? 1 : 0, Csv(r.Reason)));
                 }
                 Console.WriteLine($"csv -> {outCsv}");
             }

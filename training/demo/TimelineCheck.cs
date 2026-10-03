@@ -27,6 +27,8 @@ namespace Ssp
         public double Offset;        // OffsetPixels / Diameter, 判定就看它
         public double LabelInk;      // 第一个圆点那一行、取值列左边的灰字像素 / D^2(只记录, 不参与判定)
         public bool LabelFound;      // 左边有没有"处理进度"标签(只记录, 不参与判定)
+        public bool IosResolution;   // 分辨率是苹果机型原尺寸截图, 用的是更严的 IosThreshold
+        public double AppliedThreshold;  // 这张图实际用的阈值
         public bool Measured;        // 为 false 时 ValueLeft / OffsetPixels / Offset 无意义
         public string Reason = "";
     }
@@ -37,15 +39,24 @@ namespace Ssp
     /// 真图的蓝色进度圆点比上面取值列的文字(如"招商银行")往右缩进几个像素;
     /// 假图的圆点和文字左缘对齐, 甚至往左凸出来。从文字左缘往下拉一条竖线,
     /// 真图从圆点左边擦过, 假图切进圆点里 —— 这里把这条线量准:
-    ///     Offset = (圆点左缘 - 取值列左缘) / 圆点直径,  &lt;= Threshold 判可疑。
+    ///     Offset = (圆点左缘 - 取值列左缘) / 圆点直径,  &lt;= Threshold 判可疑;
+    ///     苹果机型原尺寸截图(IosResolutions 里的分辨率)更严, &lt; IosThreshold 就判可疑。
     ///
     /// 用圆点直径做单位, 不用页面宽度的百分比: 不同机型、不同显示缩放下,
     /// 圆点和文字跟着一起缩放, 两者的相对位置不变; 按页面百分比就会随机型漂。
     ///
-    /// 本地 13,815 张实测(其中 489 张有时间轴):
-    ///     正常字体真图         +0.19 ~ +0.24(各分辨率都在这里)
-    ///     拼音手写字体真图     最低 +0.018(这种字体的字几乎不留左边白, 是最贴近的一类)
-    ///     假图                 -0.036 ~ -0.068
+    /// 服务器 2026-09-01~16 新下载的图, 抽 101,380 张, 其中 28,050 张有时间轴:
+    ///     每个常见分辨率都分成两团, 中间是空的。
+    ///     苹果原尺寸 12,994 张: 真图最低 +0.14, 可疑那团 -0.044 ~ 0.0。
+    ///     判可疑 62 张(0.22%), 逐张看过, 都带假图特征: 标签写成"进度处理"、
+    ///     订单号不是 2026MMDD20004001110 开头、客服电话断行、同一天同一分辨率扎堆。
+    /// 本地 13,815 张: 正常字体真图 +0.19 ~ +0.24; 拼音手写字体真图最低 +0.018
+    /// (这种字体的字几乎不留左边白, 是最贴近的一类); 假图 -0.036 ~ -0.068。
+    ///
+    /// 判不了(CannotDetermine)的几种, 都是宁可不判也不误判:
+    ///     圆点直径 &lt; MinDiameter: 图被缩小过, 手写字体真图会掉到阈值下面;
+    ///     紧挨着上方的一行从圆点右边开始: 那是上一步的步骤文字, 说明第一个圆点没找到;
+    ///     偏移 &lt; GuardOffset: 假图只差几个像素, 差出半个直径是版面没认对(比如时间轴顶着导航栏)。
     ///
     /// 取值列左缘取离时间轴最近两行文字各自最左的墨点, 再取更靠左的那个:
     /// 每个字左边留白不一样("中"比"账"多两三个像素), 只看一行会把字形差当成位置差。
@@ -53,14 +64,40 @@ namespace Ssp
     /// 和 training/timeline_scan.py 逐步对应(那边是批量扫描用的参考实现), 改一边要同步改另一边。
     /// 只读入参, 内部全部用 ROI 视图, 不复制整图(4 通道图除外, 要先去掉 alpha)。
     /// 无静态可变状态, 可多线程调用。
+    /// 从文件读图请用 ImreadModes.Color: Unchanged 读 16 位 PNG 会是 16 位 Mat, 这里只收 8 位。
     /// </summary>
     public static class TimelineCheck
     {
         /// <summary>Offset 小于等于这个值判可疑。按直径 46~62 像素算, 就是圆点比文字至少靠左 1 个像素。</summary>
         public const double Threshold = -0.01;
 
-        /// <summary>圆点直径小于这个像素数不判: 图被缩得太小, 一个像素就是 0.05 个直径, 量不准。</summary>
-        public const double MinDiameter = 20;
+        /// <summary>
+        /// 苹果机型原尺寸截图的阈值: 偏移小于它就判可疑。
+        /// 服务器上这些分辨率的真图最低 +0.14, 可疑那团最高 0.0, 放在中间。
+        /// </summary>
+        public const double IosThreshold = 0.07;
+
+        /// <summary>
+        /// 苹果机型原尺寸截图的分辨率(宽, 高)。只认完全相等的: 缩放过的苹果图不在表里, 走通用阈值。
+        /// 新机型上市后, 先在服务器上看过真图的分布再往里加。
+        /// </summary>
+        public static readonly IReadOnlyCollection<(int W, int H)> IosResolutions = new HashSet<(int, int)>
+        {
+            (1179, 2556), (1290, 2796), (1170, 2532), (1320, 2868), (1206, 2622), (1284, 2778),
+            (1125, 2436), (1242, 2688), (828, 1792), (750, 1334), (1242, 2208),
+        };
+
+        /// <summary>
+        /// 圆点直径小于这个像素数不判: 图被缩小过, 一个像素就是 0.04 个直径;
+        /// 服务器上唯一一张误判就是 581 宽、手写字体、直径 24 的图。
+        /// </summary>
+        public const double MinDiameter = 28;
+
+        /// <summary>偏移小于这个值不判: 假图只差几个像素, 差出这么多是版面没认对。</summary>
+        public const double GuardOffset = -0.30;
+
+        /// <summary>从 圆点左缘 + StepText 个直径 往右才开始的行是步骤文字, 不是取值列。</summary>
+        public const double StepText = 0.6;
 
         /// <summary>标签灰字像素 / D^2 达到这个值算有"处理进度"标签。</summary>
         public const double LabelInkMin = 0.1;
@@ -114,7 +151,9 @@ namespace Ssp
             res.Diameter = D;
             res.CircleLeft = cl;
             res.CircleTop = c0.Y;
-            if (D < MinDiameter) { res.Reason = $"圆点直径 {D:0.#} 像素, 太小量不准"; return res; }
+            res.IosResolution = IosResolutions.Contains((W, H));
+            res.AppliedThreshold = res.IosResolution ? IosThreshold : Threshold;
+            if (D < MinDiameter) { res.Reason = $"圆点直径 {D:0.#} 像素, 小于 {MinDiameter}, 图被缩小过, 不判"; return res; }
 
             // 取值列: 第一个圆点上方 6D 以内, 圆点左右 [-1.5D, +4D] 的窗口。
             // 窗口不从页面左边开始, 免得量到返回箭头、左边的标签栏。
@@ -157,16 +196,32 @@ namespace Ssp
 
             if (lefts.Count == 0) { res.Reason = "圆点上方找不到取值列文字"; return res; }
 
-            int vl = lefts.Count >= 2 ? Math.Min(lefts[0], lefts[1]) : lefts[0];
+            // 从圆点右边才开始的行是步骤文字。紧挨着的就是它, 说明第一个圆点没找到, 不判;
+            // 再往上的(居中的金额之类)跳过。
+            double edge = cl + StepText * D;
+            if (lefts[0] >= edge) { res.Reason = "紧挨着上方的是步骤文字, 第一个圆点没找到, 不判"; return res; }
+            var vals = lefts.Where(x => x < edge).Take(2).ToList();
+
+            int vl = vals.Min();
             res.ValueLeft = vl;
             res.OffsetPixels = cl - vl;
             res.Offset = (cl - vl) / D;
             res.Measured = true;
 
-            if (res.Offset <= Threshold)
+            if (res.Offset < GuardOffset)
+            {
+                res.Reason = $"偏移 {res.Offset:+0.00;-0.00} 个直径, 差得太多, 版面没认对, 不判";
+                return res;
+            }
+
+            bool suspicious = res.IosResolution ? res.Offset < IosThreshold : res.Offset <= Threshold;
+            if (suspicious)
             {
                 res.Verdict = TimelineVerdict.Suspicious;
-                res.Reason = $"圆点左缘 {cl} 不在取值列文字左缘 {vl} 的右边, 偏移 {res.Offset:+0.000;-0.000} 个直径"
+                res.Reason = (res.IosResolution
+                                 ? $"苹果原尺寸截图, 圆点只比取值列文字缩进 {res.OffsetPixels} 像素(真图至少 0.14 个直径)"
+                                 : $"圆点左缘 {cl} 不在取值列文字左缘 {vl} 的右边")
+                             + $", 偏移 {res.Offset:+0.000;-0.000} 个直径"
                              + (res.LabelFound ? "" : ", 左边也没有处理进度标签");
             }
             else
