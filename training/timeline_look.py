@@ -73,7 +73,8 @@ def main():
     for r in rows:
         r["o"] = float(r["offset"])
         r["res"] = f"{r['W']}x{r['H']}"
-        r["b"] = bucket(r["o"])
+        # 可疑按扫描给的判定算(苹果原尺寸截图阈值更严, 0 像素也算可疑), 其余按偏移分档
+        r["b"] = "susp" if r["verdict"] == "Suspicious" else bucket(r["o"])
     print(f"measured timeline pages: {len(rows):,}")
 
     by = collections.defaultdict(list)
