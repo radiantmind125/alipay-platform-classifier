@@ -61,6 +61,9 @@ namespace Ssp
     /// 取值列左缘取离时间轴最近两行文字各自最左的墨点, 再取更靠左的那个:
     /// 每个字左边留白不一样("中"比"账"多两三个像素), 只看一行会把字形差当成位置差。
     ///
+    /// 缩放和重新压缩: 本地 495 张时间轴图各过 20 种缩放/JPEG 压缩(真图 9,640 份),
+    /// 误判 0, 时间轴一张不丢; 假图 140/140 判可疑。再缩小下去圆点直径不到 28 的, 返回 CannotDetermine。
+    ///
     /// 和 training/timeline_scan.py 逐步对应(那边是批量扫描用的参考实现), 改一边要同步改另一边。
     /// 只读入参, 内部全部用 ROI 视图, 不复制整图(4 通道图除外, 要先去掉 alpha)。
     /// 无静态可变状态, 可多线程调用。
@@ -68,7 +71,11 @@ namespace Ssp
     /// </summary>
     public static class TimelineCheck
     {
-        /// <summary>Offset 小于等于这个值判可疑。按直径 46~62 像素算, 就是圆点比文字至少靠左 1 个像素。</summary>
+        /// <summary>
+        /// Offset 小于等于这个值判可疑。按直径 46~62 像素算, 就是圆点比文字至少靠左 1 个像素。
+        /// 想更严可以改成 0(经理那条线碰到圆点边就算假): 服务器样本里多抓 5 张, 逐张看过都是假图;
+        /// 代价是被缩小过的手写字体真图(原图只缩进 1~3 像素的那种)压力测试里约 0.5% 会被误判。
+        /// </summary>
         public const double Threshold = -0.01;
 
         /// <summary>
@@ -105,7 +112,9 @@ namespace Ssp
         // 支付宝蓝(OpenCV 的 HSV, H 是 0~180)
         static readonly Scalar BlueLo = new(98, 120, 150), BlueHi = new(118, 255, 255);
 
-        const int DarkGray = 110;        // 正文黑字: 灰度 < 110 且饱和度 < 60(排除蓝字)
+        // 正文黑字: 灰度 < 150 且饱和度 < 60(排除蓝字)。门槛 150 而不是 110:
+        // 图被缩小后细笔画会变浅, 110 会把字最左边那一竖丢掉, 文字左缘往右跑, 真图被判成圆点凸出来。
+        const int DarkGray = 150;
         const int DarkSat = 60;
         const int LabelGrayLo = 120;     // 标签灰字: 灰度 120~205 且饱和度 < 40
         const int LabelGrayHi = 205;
@@ -171,7 +180,7 @@ namespace Ssp
                     for (int x = 0; x < ww; x++) if (dark[y * ww + x] != 0) n++;
                     on[y] = n >= 2;
                 }
-                var rows = Runs(on).Where(r => r.b - r.a + 1 >= 0.4 * D).ToList();
+                var rows = TextRows(Runs(on), D);
                 for (int i = rows.Count - 1; i >= 0; i--)          // 从下往上, 离时间轴最近的先
                 {
                     int first = ww;
@@ -243,6 +252,8 @@ namespace Ssp
             using var roi = new Mat(bgr, new Rect(x0, 0, x1 - x0, H));
             using var hsv = new Mat();
             Cv2.CvtColor(roi, hsv, ColorConversionCodes.BGR2HSV);
+            using var gray = new Mat();
+            Cv2.CvtColor(roi, gray, ColorConversionCodes.BGR2GRAY);
 
             using var blue = new Mat();
             Cv2.InRange(hsv, BlueLo, BlueHi, blue);
@@ -272,13 +283,15 @@ namespace Ssp
                     continue;
                 if (!(0.22 * W <= x + x0 && x + x0 <= 0.42 * W))
                     continue;
-                // 圆心一块里要有白色对勾: 亮(V > 200)而不饱和(S < 60)的像素 >= 4%
+                // 圆心一块里要有白色对勾: 亮(灰度 > 170)的像素 >= 4%。
+                // 看亮度, 不看饱和度: JPEG 的 4:2:0 色度抽样会把蓝色糊到细细的对勾上, 饱和度一下就上去了,
+                // 压过一次的图第一个圆点常被漏掉; 亮度不受影响(对勾 ~255, 蓝底 ~105)。
                 int r = Math.Max(1, w / 2);
                 int ix = x + w / 4, iy = y + h / 4;
-                int iw = Math.Min(r, hsv.Cols - ix), ih = Math.Min(r, hsv.Rows - iy);
+                int iw = Math.Min(r, gray.Cols - ix), ih = Math.Min(r, gray.Rows - iy);
                 if (iw <= 0 || ih <= 0) continue;
-                using (var inner = new Mat(hsv, new Rect(ix, iy, iw, ih)))
-                    Cv2.InRange(inner, new Scalar(0, 0, 201), new Scalar(255, 59, 255), white);
+                using (var inner = new Mat(gray, new Rect(ix, iy, iw, ih)))
+                    Cv2.InRange(inner, new Scalar(171), new Scalar(255), white);
                 if (Cv2.CountNonZero(white) * 25 < iw * ih) continue;
                 outList.Add(new Rect(x + x0, y, w, h));
             }
@@ -341,6 +354,35 @@ namespace Ssp
             // InRange 的输出是新分配的连续矩阵, 可以整块拷
             System.Runtime.InteropServices.Marshal.Copy(m.Data, buf, 0, buf.Length);
             return buf;
+        }
+
+        /// <summary>
+        /// 文字行: 高 &gt;= 0.4D 的段, 再把紧贴在它上面的矮段(拼音那一行)并进来。
+        /// 拼音字体的页面, 拼音在汉字正上方且往左伸出去一点; 图一缩小拼音就断成 3~6 像素高的一段,
+        /// 不并进来的话左缘只剩汉字, 真图会被判成圆点凸出来。
+        /// 只往已经够高的行上并, 矮段自己永远不成行: 无条件拼碎段会把灰色日期行的碎片拼成新行,
+        /// 把真正的取值行挤出最近两行, 反而造出新的误判。
+        /// 每一步间隙 &lt;= max(1, round(0.2D)), 一共最多往上并 0.6D, 碰到另一个够高的行就停。
+        /// Math.Round 和 Python 的 round 一样是"四舍六入五成双", 两边一致。
+        /// </summary>
+        static List<(int a, int b)> TextRows(List<(int a, int b)> runs, double D)
+        {
+            int gap = Math.Max(1, (int)Math.Round(0.2 * D));
+            var rows = new List<(int a, int b)>();
+            for (int k = 0; k < runs.Count; k++)
+            {
+                var (ra, rb) = runs[k];
+                if (rb - ra + 1 < 0.4 * D) continue;
+                int top = ra;
+                for (int j = k - 1; j >= 0; j--)
+                {
+                    var (pa, pb) = runs[j];
+                    if (pb - pa + 1 >= 0.4 * D || top - pb - 1 > gap || ra - pa > 0.6 * D) break;
+                    top = pa;
+                }
+                rows.Add((top, rb));
+            }
+            return rows;
         }
 
         static List<(int a, int b)> Runs(bool[] on)

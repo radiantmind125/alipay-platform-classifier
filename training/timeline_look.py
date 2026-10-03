@@ -44,7 +44,29 @@ def main():
     ap.add_argument("--csv", required=True)
     ap.add_argument("--copy-to", default="")
     ap.add_argument("--ok-per-res", type=int, default=6)
+    ap.add_argument("--prev", default="", help="上一次扫描的 csv: 列出判定变了的图, 和可疑有关的拷出来(前缀 X_)")
     a = ap.parse_args()
+
+    changed = []
+    if a.prev:
+        with open(a.prev, encoding="utf-8-sig", newline="") as f:
+            prev = {r["path"]: r for r in csv.DictReader(f) if r.get("verdict") not in ("error", "unreadable")}
+        with open(a.csv, encoding="utf-8-sig", newline="") as f:
+            cur = {r["path"]: r for r in csv.DictReader(f) if r.get("verdict") not in ("error", "unreadable")}
+        trans = collections.Counter()
+        for p in set(prev) | set(cur):
+            v0 = prev[p]["verdict"] if p in prev else "NoTimeline"
+            v1 = cur[p]["verdict"] if p in cur else "NoTimeline"
+            if v0 != v1:
+                trans[(v0, v1)] += 1
+                if "Suspicious" in (v0, v1):
+                    changed.append((v0, v1, cur.get(p) or prev[p], prev.get(p, {}).get("offset", ""), cur.get(p, {}).get("offset", "")))
+        print("==== 0. changes against the previous scan (previous -> now) ====")
+        for (v0, v1), n in sorted(trans.items(), key=lambda kv: -kv[1]):
+            print(f"  {v0:>15} -> {v1:<15} {n:,}")
+        for v0, v1, r, o0, o1 in sorted(changed, key=lambda t: t[2]["path"]):
+            print(f"    {v0} -> {v1}   offset {o0 or '-'} -> {o1 or '-'}   {r['W']}x{r['H']}   {os.path.basename(r['path'])}")
+        print()
 
     with open(a.csv, encoding="utf-8-sig", newline="") as f:
         rows = [r for r in csv.DictReader(f) if r.get("verdict") in ("Ok", "Suspicious")]
@@ -106,6 +128,8 @@ def main():
             step = max(1, len(ok) // max(1, a.ok_per_res))
             for i, r in enumerate(ok[::step][: a.ok_per_res], 1):
                 picks.append((f"O_{k}_{i:02d}_{r['o']:+.3f}_", r))
+        for i, (v0, v1, r, o0, o1) in enumerate(changed, 1):
+            picks.append((f"X_{i:03d}_{v0[:4]}-{v1[:4]}_", r))
         done = miss = 0
         for pre, r in picks:
             try:

@@ -9,9 +9,10 @@ C# 版是 demo/TimelineCheck.cs, 两边逐步对应, 改一边要同步改另一
 
 量法
 ----
-1. 找圆点: 蓝色(OpenCV HSV 的 H 98~118, S>=120, V>=150), 圆形, 里面有白色对勾,
+1. 找圆点: 蓝色(OpenCV HSV 的 H 98~118, S>=120, V>=150), 圆形, 里面有白色对勾(按亮度找, 见 find_circles),
    在页面宽度 22%~42% 之间; 同一列竖着排开 >=2 个才算时间轴。
-2. 取值列左缘: 第一个圆点上方 6D 以内(D = 圆点直径), 圆点左右 [-1.5D, +4D] 窗口里的深色字,
+2. 取值列左缘: 第一个圆点上方 6D 以内(D = 圆点直径), 圆点左右 [-1.5D, +4D] 窗口里的深色字(灰度 < 150),
+   紧贴在上面的拼音并进同一行(见 _text_rows),
    取离时间轴最近的两行, 各取最左的墨点, 再取两者中更靠左的那个。
    ★ 为什么取两行里更靠左的: 每个字左边留白不一样("中"比"账"多两三个像素),
      只看一行会把字形差当成位置差。两行取靠左, 更接近文字真正的起点。
@@ -33,6 +34,11 @@ C# 版是 demo/TimelineCheck.cs, 两边逐步对应, 改一边要同步改另一
     可疑的逐张看过: 标签写成"进度处理"、订单号不是 2026MMDD20004001110 开头、
     客服电话断行("客服9 / 5533")、同一天同一分辨率扎堆 —— 都是假图的特征。
     唯一误判是一张 581 宽、手写字体、被缩过的图(圆点直径 24), 所以直径 < 28 不判。
+
+缩放和重新压缩(本地 495 张时间轴图 x 20 种缩放/JPEG 压缩, 真图 9,640 份): 误判 0, 时间轴一张不丢,
+假图 140/140 判可疑。早先的版本在这组上误判 23、丢时间轴 470 —— 原因和改法见 find_circles 和 _text_rows。
+THRESHOLD 改成 0(经理那条线碰到圆点边就算假): 服务器样本多抓 5 张, 都是假图;
+但缩小过的手写字体真图(原图只缩进 1~3 像素的)压力测试里约 0.5% 会被误判, 所以默认留在 -0.01。
 
 用法
 ----
@@ -89,6 +95,7 @@ def find_circles(bgr):
     H, W = bgr.shape[:2]
     x0, x1 = int(0.15 * W), int(0.55 * W)
     hsv = cv2.cvtColor(bgr[:, x0:x1], cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(bgr[:, x0:x1], cv2.COLOR_BGR2GRAY)
     m = cv2.inRange(hsv, (98, 120, 150), (118, 255, 255))
     k = max(5, int(W * 0.012)) | 1
     # 先用横条开运算去掉圆点之间那根细竖线(它比 k 窄), 再闭运算把对勾的白缝补上
@@ -102,12 +109,14 @@ def find_circles(bgr):
             continue
         if not (0.22 * W <= x + x0 <= 0.42 * W):
             continue
-        # 圆心一块里要有白色对勾(亮而不饱和的像素 >= 4%)
+        # 圆心一块里要有白色对勾: 亮(灰度 > 170)的像素 >= 4%。
+        # ★ 看亮度, 不看饱和度: JPEG 的 4:2:0 色度抽样会把蓝色糊到细细的对勾上, 饱和度一下就上去了,
+        #   压过一次的图第一个圆点常被漏掉; 亮度不受影响(对勾 ~255, 蓝底 ~105)。
         r = max(1, w // 2)
-        inner = hsv[y + h // 4: y + h // 4 + r, x + w // 4: x + w // 4 + r]
+        inner = gray[y + h // 4: y + h // 4 + r, x + w // 4: x + w // 4 + r]
         if inner.size == 0:
             continue
-        white = int(((inner[..., 1] < 60) & (inner[..., 2] > 200)).sum())
+        white = int((inner > 170).sum())
         if white * 25 < inner.shape[0] * inner.shape[1]:
             continue
         out.append((x + x0, y, w, h))
@@ -129,9 +138,35 @@ def timeline(cs):
 def _dark_grey(bgr):
     g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     s = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[..., 1]
-    dark = (g < 110) & (s < 60)                       # 正文黑字(排除蓝色)
+    # 正文黑字(排除蓝色)。灰度门槛 150 而不是 110: 图被缩小后细笔画会变浅,
+    # 110 会把字最左边那一竖丢掉, 文字左缘往右跑几个像素, 真图就被判成圆点凸出来了
+    dark = (g < 150) & (s < 60)
     grey = (g >= 120) & (g <= 205) & (s < 40)         # 标签灰字
     return dark, grey
+
+
+def _text_rows(runs, D):
+    """文字行: 高 >= 0.4D 的段, 再把紧贴在它上面的矮段(拼音那一行)并进来。
+
+    拼音字体的页面, 拼音在汉字正上方, 而且往左伸出去一点 —— 原尺寸时拼音和汉字连成一段,
+    左缘就带上了拼音; 图一缩小, 拼音就断开成 3~6 像素高的一段, 不够 0.4D 被丢掉,
+    左缘只剩汉字, 真图就被判成圆点凸出来。
+    ★ 只往已经够高的行上并, 矮段自己永远不成行: 无条件把碎段拼起来, 会把灰色日期行的碎片
+      拼成一个新行, 把真正的取值行挤出最近两行, 反而造出新的误判(实测 -38 像素)。
+    每一步的间隙 <= max(1, round(0.2D)), 一共最多往上并 0.6D, 碰到另一个够高的行就停。
+    """
+    gap = max(1, round(0.2 * D))
+    rows = []
+    for i, (a, b) in enumerate(runs):
+        if b - a + 1 < 0.4 * D:
+            continue
+        top = a
+        for pa, pb in reversed(runs[:i]):
+            if pb - pa + 1 >= 0.4 * D or top - pb - 1 > gap or a - pa > 0.6 * D:
+                break
+            top = pa
+        rows.append((top, b))
+    return rows
 
 
 def measure_img(bgr, path=""):
@@ -157,7 +192,7 @@ def measure_img(bgr, path=""):
     lefts = []
     if wy1 > wy0:
         dark, _ = _dark_grey(bgr[wy0:wy1, wx0:wx1])
-        rows = [(a, b) for a, b in _runs(dark.sum(1) >= 2) if b - a + 1 >= 0.4 * D]
+        rows = _text_rows(_runs(dark.sum(1) >= 2), D)
         for a, b in reversed(rows):                   # 从下往上, 离时间轴最近的先
             cols = np.flatnonzero(dark[a:b + 1].any(0))
             if cols[0] <= 1:                          # 贴着窗口左边: 是从标签栏伸过来的, 不要
@@ -212,12 +247,16 @@ def decide(W, H, D, cl, lefts):
 
 def measure(p):
     try:
-        bgr = cv2.imdecode(np.fromfile(p, np.uint8), cv2.IMREAD_COLOR)
+        buf = np.fromfile(p, np.uint8)
+        bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR) if buf.size else None
+        if bgr is None and buf.size > 2 and buf[0] == 0xFF and buf[1] == 0xD8:
+            # 截断的 JPEG(结尾少了 FFD9 结束标记, 本地实测有这种上传): 补上再解一次, 能解出绝大部分
+            bgr = cv2.imdecode(np.concatenate([buf, np.array([0xFF, 0xD9], np.uint8)]), cv2.IMREAD_COLOR)
         if bgr is None:
-            return None
+            return {"path": p, "verdict": "unreadable"}
         return measure_img(bgr, p)
     except Exception as e:  # noqa: BLE001
-        return {"path": p, "verdict": "error", "why": repr(e)[:120]}
+        return {"path": p, "verdict": "error", "why": repr(e)[:200]}
 
 
 KEYS = ["path", "W", "H", "verdict", "offset", "offset_px", "circle_left", "value_left", "D", "n", "circle_top",
@@ -313,13 +352,19 @@ def main():
     print(f"images to scan: {len(files):,}  (every {a.every})  listing took {time.time() - t0:.0f}s", flush=True)
 
     rows, step = [], max(1000, len(files) // 50)
+    bad = {"unreadable": [], "error": []}          # 读不了的、出错的单独记, 不算进时间轴页
     with ProcessPoolExecutor(a.workers) as ex:
         for i, r in enumerate(ex.map(measure, files, chunksize=32), 1):
-            if r:
+            if r and r.get("verdict") in bad:
+                bad[r["verdict"]].append(r)
+            elif r:
                 rows.append(r)
             if i % step == 0 or i == len(files):
                 el = time.time() - t0
                 print(f"  {i:,}/{len(files):,}  timeline pages {len(rows):,}  {i / max(el, 1e-9):.0f} img/s", flush=True)
+    print(f"unreadable files {len(bad['unreadable']):,}   errors {len(bad['error']):,}", flush=True)
+    for r in bad["error"][:5]:
+        print("  error:", r["path"], r["why"], flush=True)
     with open(a.out, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=KEYS, extrasaction="ignore")
         w.writeheader()
