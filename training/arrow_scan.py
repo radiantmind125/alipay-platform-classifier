@@ -54,7 +54,7 @@ EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 #   7~8 月的真图(老版本)R 0.86~0.94, 9 月以后的真图 1.4~1.8, 假图 0.62~0.70。
 #   还没升级的用户截出来就是老版本的样子, 所以线要放在假图和老版本真图之间。
 THRESHOLD = 0.78
-MIN_ARROW_H = 14         # 箭头高小于这个像素数不判: 图被缩小过, 一个像素差太多
+MIN_ARROW_H = 14         # 箭头高小于这个像素数不判: 图被缩小过(贴线的另外有"差一个像素"那条管)
 
 IOS_RES = {(1179, 2556), (1290, 2796), (1170, 2532), (1320, 2868), (1206, 2622), (1284, 2778),
            (1125, 2436), (1242, 2688), (828, 1792), (750, 1334), (1242, 2208)}
@@ -74,19 +74,34 @@ def _runs(on):
 
 
 def _is_chevron(sub):
-    """'>' 形: 中间那几行的最右点比最上、最下几行的最右点更靠右。"""
+    """'>' 形: 每一行只有一笔(一段), 笔画细; 每行那一笔的中心从上往中间往右走, 再往下往左回来。
+    ★ 只比"最右点"不够: 数字 9、5, 往下的 ∨ 都能混过去(服务器上真把时间戳最后一位当成了箭头)。
+      9 的上半是个圈, 一行两段; ∨ 的上半两条腿, 一行两段; > 每行都只有一段。"""
     ys = np.flatnonzero(sub.any(1))
     if len(ys) < 6:
         return False
     top, bot = ys[0], ys[-1]
     h = bot - top + 1
+    w = sub.shape[1]
+    cx = []
+    for y in range(top, bot + 1):
+        segs = _runs(sub[y])
+        if len(segs) != 1:
+            if len(segs) > 1:
+                return False
+            cx.append(None)
+            continue
+        a, b = segs[0]
+        if b - a + 1 > 0.7 * w and not (h * 0.35 <= y - top <= h * 0.65):   # 除了尖上, 每行的笔画要细
+            return False
+        cx.append((a + b) / 2)
     q = max(1, h // 5)
 
-    def xmax(a, b):
-        xs = np.flatnonzero(sub[a:b].any(0))
-        return xs[-1] if len(xs) else -1
-    mid = xmax(top + h // 2 - q // 2, top + h // 2 + q // 2 + 1)
-    return mid > xmax(top, top + q) and mid > xmax(bot - q + 1, bot + 1)
+    def mean(lo, hi):
+        v = [c for c in cx[lo:hi] if c is not None]
+        return sum(v) / len(v) if v else None
+    t, m, btm = mean(0, q), mean(h // 2 - q // 2, h // 2 + q // 2 + 1), mean(h - q, h)
+    return None not in (t, m, btm) and m - t >= 0.25 * w and m - btm >= 0.25 * w
 
 
 def find_rows(bgr):
@@ -130,6 +145,11 @@ def find_rows(bgr):
         j = len(cr) - 2
         while j > 0 and cr[j][0] - cr[j - 1][1] - 1 < h:
             j -= 1
+        # 账单管理的取值是右对齐的短字, 左边到标签之间是一大片空白。
+        # 起点左边 1.5 个行高以内有字, 说明是左对齐的长取值(比如"付款方式 中国农业银行(xxxx) >"), 不要
+        tl = x0 + cr[j][0]
+        if ink[a:b + 1, max(0, tl - int(1.5 * h)):tl].any():
+            continue
         out.append({"y": a, "h": h, "text_left": x0 + cr[j][0], "text_right": x0 + tb, "arrow_left": x0 + ca,
                     "arrow_w": cw, "arrow_h": ch, "margin": margin, "gap": ca - tb - 1, "arrow_gray": arrow_gray,
                     "text_gray": text_gray})
@@ -178,7 +198,7 @@ def measure_img(bgr, path=""):
          "arrow_gray": int(np.median([x["arrow_gray"] for x in col])), "ys": " ".join(str(x["y"]) for x in col),
          "hs": " ".join(str(x["h"]) for x in col), "ios": int((W, H) in IOS_RES)}
     # 拼音检查比较贵, 只在要判可疑的时候才跑
-    pinyin = int(_is_pinyin_page(bgr)) if ah >= MIN_ARROW_H and gap / ah < THRESHOLD else ""
+    pinyin = int(_is_pinyin_page(bgr)) if ah >= MIN_ARROW_H and (gap + 1) / ah < THRESHOLD else ""
     r["pinyin"] = pinyin
     r.update(decide(gap, ah, pinyin))
     return r
@@ -192,6 +212,11 @@ def decide(gap, ah, pinyin):
         return out
     if gap / ah >= THRESHOLD:
         out.update(verdict="Ok", why="")
+        return out
+    if (gap + 1) / ah >= THRESHOLD:
+        # 间距再量长一个像素就过线了: 差在测量误差以内, 不判。
+        # 小图(箭头 16 像素)一个像素就是 0.06, 大图(箭头 34 像素)是 0.03, 这样小图自动更保守。
+        out.update(verdict="CannotDetermine", why="离线不到一个像素, 不判")
         return out
     if pinyin:
         # 拼音模式下支付宝把箭头画大一号、间距也小一点, 真图 R 在 1.0 上下, 离假图太近, 不判
