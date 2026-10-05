@@ -22,7 +22,7 @@ namespace Ssp
         public double Gap;           // 文字右缘到箭头左缘的间距(各行中位数), 像素
         public double ArrowHeight;   // 箭头高(各行中位数), 像素
         public double ArrowWidth;
-        public int ArrowGray;        // 箭头最深的灰度(各行中位数)
+        public int ArrowGray;        // 箭头有多深: 每行笔画最深点的中位数, 再取各行的中位数
         public int RowCount;         // 量到的行数
         public int Margin;           // 箭头离页面右边的距离
         public int[] RowTops = Array.Empty<int>();
@@ -198,10 +198,18 @@ namespace Ssp
                 if (!(2 <= cw && cw <= 0.75 * ch && ch >= 0.4 * h && 0.03 * W <= margin && margin <= 0.14 * W)) continue;
                 if (!IsChevron(Ink, a, b, x0 + ca, x0 + cb)) continue;
 
-                int arrowGray = 255;
+                // 箭头有多深: 每一行笔画最深的那个点, 取各行的中位数(和 int(np.median(...)) 一样往下取整)。
+                // ★ 不能取整个箭头最深的一个点: JPEG 压一下(质量 75 以下)或者放大, 笔画边上会冒出几个更深的噪点,
+                //   造假工具的箭头(最深 119)就被压到 100 以下, 整列被当成黑箭头扔掉, 结论变成判不了(2026-10-05 经理的两张假图)。
+                var rowMins = new List<double>();
                 for (int y = a; y <= b; y++)
+                {
+                    int m = 256;
                     for (int x = ca; x <= cb; x++)
-                        if (Ink(y, x0 + x) && g[y * W + x0 + x] < arrowGray) arrowGray = g[y * W + x0 + x];
+                        if (Ink(y, x0 + x) && g[y * W + x0 + x] < m) m = g[y * W + x0 + x];
+                    if (m < 256) rowMins.Add(m);
+                }
+                int arrowGray = (int)Median(rowMins);
                 if (arrowGray < 100) continue;                 // 黑箭头: 蓝底胶囊里的那种, 不是账单管理的行
 
                 var (ta, tb) = cr[^2];

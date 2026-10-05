@@ -22,8 +22,8 @@ r"""账单详情页右边"灰字 + > 箭头"的间距检查(经理说的 111) �
 ----
 1. 页面右半边(宽度 45% 往右)按行切开, 每行最右边一段如果是 > 形的窄条, 而且离页面右边 3%~14% 宽,
    就当它是箭头; 它左边那一段是文字的结尾。
-2. 只要: 文字是灰的(灰度中位数 115~205), 箭头是灰的(最深的像素灰度 >= 100, 排除"我的消费图鉴"那种
-   蓝底里的黑箭头), 行的左边有黑字标签。
+2. 只要: 文字是灰的(灰度中位数 115~205), 箭头是灰的(每行笔画最深点的中位数 >= 100, 排除"我的消费图鉴"那种
+   蓝底里的黑箭头; 不用整个箭头最深的一个点, 那个点 JPEG 一压就变深, 见 find_rows), 行的左边有黑字标签。
 3. 一页里箭头离右边距离最常见的那个(+-2 像素)就是账单管理那一列, 只取这一列的行, 间距和箭头高各取中位数。
 
 用法
@@ -131,7 +131,12 @@ def find_rows(bgr):
             continue
         if not _is_chevron(sub):
             continue
-        arrow_gray = int(g[a:b + 1, x0 + ca:x0 + cb + 1][sub].min())
+        # 箭头有多深: 每一行笔画最深的那个点, 取各行的中位数。
+        # ★ 不能取整个箭头最深的一个点: JPEG 压一下(质量 75 以下)或者放大, 笔画边上会冒出几个更深的噪点,
+        #   造假工具的箭头(最深 119)就被压到 100 以下, 整列被当成黑箭头扔掉, 结论变成判不了(2026-10-05 经理的两张假图)。
+        ga = g[a:b + 1, x0 + ca:x0 + cb + 1]
+        arrow_gray = int(np.median([ga[y][sub[y]].min() for y in range(sub.shape[0]) if sub[y].any()]))
+        arrow_min = int(ga[sub].min())            # 老办法(整个箭头最深一个点), 只记录, 用来数这次改动影响了哪些图
         if arrow_gray < 100:                      # 黑箭头: 蓝底胶囊里的那种, 不是账单管理的行
             continue
         ta, tb = cr[-2]
@@ -151,7 +156,7 @@ def find_rows(bgr):
         if ink[a:b + 1, max(0, tl - int(1.5 * h)):tl].any():
             continue
         out.append({"y": a, "h": h, "text_left": x0 + cr[j][0], "text_right": x0 + tb, "arrow_left": x0 + ca,
-                    "arrow_w": cw, "arrow_h": ch, "margin": margin, "gap": ca - tb - 1, "arrow_gray": arrow_gray,
+                    "arrow_w": cw, "arrow_h": ch, "margin": margin, "gap": ca - tb - 1, "arrow_gray": arrow_gray, "arrow_min": arrow_min,
                     "text_gray": text_gray})
     return out
 
@@ -196,7 +201,8 @@ def measure_img(bgr, path=""):
     aw = float(np.median([r["arrow_w"] for r in col]))
     r = {"path": path, "W": W, "H": H, "n": len(col), "margin": mc, "gap": gap, "arrow_h": ah, "arrow_w": aw,
          "arrow_gray": int(np.median([x["arrow_gray"] for x in col])), "ys": " ".join(str(x["y"]) for x in col),
-         "hs": " ".join(str(x["h"]) for x in col), "ios": int((W, H) in IOS_RES)}
+         "hs": " ".join(str(x["h"]) for x in col), "ios": int((W, H) in IOS_RES),
+         "rescued": sum(1 for x in rows if x["arrow_min"] < 100)}   # 老办法会扔掉的行数; 0 = 结论和改之前一模一样
     # 拼音检查比较贵, 只在要判可疑的时候才跑
     pinyin = int(_is_pinyin_page(bgr)) if ah >= MIN_ARROW_H and (gap + 1) / ah < THRESHOLD else ""
     r["pinyin"] = pinyin
@@ -239,7 +245,7 @@ def measure(p):
         return {"path": p, "verdict": "error", "why": repr(e)[:200]}
 
 
-KEYS = ["path", "W", "H", "verdict", "ratio", "gap", "arrow_h", "arrow_w", "arrow_gray", "margin", "n", "ys", "hs", "pinyin",
+KEYS = ["path", "W", "H", "verdict", "ratio", "gap", "arrow_h", "arrow_w", "arrow_gray", "margin", "n", "ys", "hs", "pinyin", "rescued",
         "ios", "why"]
 
 
@@ -296,6 +302,10 @@ def report(rows, a):
         print(f"  not measured: {why}  {sum(1 for r in other if r.get('why', '') == why):,}")
     if not ok:
         return
+    # 2026-10-05 箭头深浅改成按行取中位数: 只有 rescued > 0 的图结论可能和改之前不一样
+    res = [r for r in rows if int(r.get("rescued") or 0) > 0]
+    print(f"  pages where the arrow-darkness change kept extra rows: {len(res):,}   " + "  ".join(
+        f"{k} {v:,}" for k, v in collections.Counter(r.get("verdict") for r in res).most_common()))
     v = np.array([r["ratio"] for r in ok])
     print("  R percentiles  p0.1 {:.2f}  p1 {:.2f}  p5 {:.2f}  p50 {:.2f}  p99 {:.2f}".format(
         *np.percentile(v, [0.1, 1, 5, 50, 99])))
@@ -332,6 +342,9 @@ def report(rows, a):
         mid = sorted([r for r in ok if r["verdict"] == "Ok" and r["ratio"] < 1.0], key=lambda r: r["path"])
         new = sorted([r for r in ok if r["ratio"] >= 1.2], key=lambda r: r["path"])
         picks = [(f"S_{i:03d}_R{r['ratio']:.2f}_{r['W']}x{r['H']}_", r) for i, r in enumerate(sus, 1)]
+        # N_ 箭头深浅改动以后才判可疑的(改之前多半是判不了), 全部拷出来看
+        picks += [(f"N_{i:03d}_R{r['ratio']:.2f}_{r['W']}x{r['H']}_", r)
+                  for i, r in enumerate([r for r in sus if int(r.get("rescued") or 0) > 0], 1)]
         picks += [(f"C_{i:03d}_R{r['ratio']:.2f}_{r['W']}x{r['H']}_", r)
                   for i, r in enumerate(mid[:: max(1, len(mid) // 60)][:60], 1)]
         picks += [(f"O_{i:02d}_R{r['ratio']:.2f}_{r['W']}x{r['H']}_", r)
