@@ -68,8 +68,9 @@ namespace Ssp
         public const int BlackMax = 12;
         /// <summary>卡片外面页面边上的颜色范围: 支付宝 #F5F5F5(245), 造假工具 244/246; 整页白(255)的不是支付宝页面。</summary>
         public const int EdgeLo = 238, EdgeHi = 250;
-        /// <summary>标签颜色范围: 支付宝 #999(153), 造假工具 150。</summary>
-        public const int LabelLo = 148, LabelHi = 158;
+        /// <summary>标签颜色范围: 支付宝 #999(153), 造假工具 150; 抖音通知(147)在下限外。
+        /// 上限 165 等于不限: 图被缩小 + 压缩以后标签字变浅, 造假图会到 156~163。</summary>
+        public const int LabelLo = 148, LabelHi = 165;
         /// <summary>行的取值核心色在这个范围算 #333。</summary>
         public const int GreyLo = 38, GreyHi = 64;
         /// <summary>纯黑(或 #333)的行占比 &gt;= 60% 就下结论(按 x * 5 &gt;= rows * 3 整数比, 不受浮点影响)。</summary>
