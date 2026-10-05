@@ -19,16 +19,25 @@ r"""账单详情页正文字的颜色深度检查(经理说的 118) —— Pytho
 3. 这些行要上下对齐(账单详情上面那张卡片): 至少 3 行, 标签左缘中位数在宽度 3%~10%, 取值左缘中位数在
    20%~34%, 每行和中位数差 <= 0.6% 宽度。对不齐的(收银台、支付结果页、银行短信、别的 App)不判,
    它们本来就用纯黑字。
-4. 按行数算(每行一票): 取值核心 <= 25(纯黑)的行占 >= 60% 判可疑; 38~64(#333)的行占 >= 60% 判 Ok;
-   其他判不了。
-5. 要判可疑之前先看是不是拼音页(用现成的 pinyin_probe, C# 是 PinyinCheck), 拼音页不判:
+4. 只判支付宝的页面(服务器 09-01~16 实测, 不加这两条会把 200 多张微信账单当成假图):
+   卡片外面页面边上(宽度 0.4%~1.6%, 对齐那几行的高度)的颜色要是支付宝的灰底 238~250(#F5F5F5 = 245,
+   造假工具 244/246); 微信账单、很多别的 App、支付宝 8 月以前的老版是整页白(255), 不判。
+   标签核心色要在 148~158(支付宝 #999 = 153, 造假工具 150); 抖音通知这类页面在范围外。
+5. 按行数算(每行一票): 取值核心 <= 12(纯黑)的行占 >= 60% 判可疑; 38~64(#333)的行占 >= 60% 判 Ok;
+   其他判不了。纯黑只认 0 附近: 两种造假工具都是正好 0, 微信、支付宝话费充值页、银行短信是 21~25(黑色 90%)。
+6. 要判可疑之前先看是不是拼音页(用现成的 pinyin_probe, C# 是 PinyinCheck), 拼音页不判:
    拼音字体有细体的变种, 字会压得很深, 拼音库里有几张支付结果页本来就是纯黑(本地实测 4 张误判, 都是拼音页)。
 
-本地验证(11,957 张: 拼音库 9,063、经理给的 111/112/116/118 真假图、111/112 服务器样本、之前的可疑集)
+服务器验证(D:/download2/OtherImages 每 8 张抽 1 张, 101,285 张, 09-01~16)
 --------
-经理给的 4 组真假图全对; 拼音库 0 张可疑; 112 服务器真图 155 张里 1 张可疑(C_052, 看着像假图);
-112 服务器假图 68 张里 19 张可疑(其余多是别的页面, 不是账单详情, 不判)。
-真图标签核心色 98% 是 153, 造假工具是 150, 但缩放/重压过的图 143~162 都有, 所以不按标签颜色判。
+判可疑 66 张(0.07%), 逐张看过:
+    34 张 111 或 112 也判了假(经理那个造假工具: 标签 150、底色 244、取值 0);
+    32 张只有这一项判出来, 都是支付宝账单详情, 订单号是乱的(不是 2026MMDD2000400111 开头)、
+    两个人两笔转账同一个订单号, 或者底色是造假工具的 244/246; 9 月 13~15 日有一批(底色 246, 标签 153)。
+没加第 4 条和纯黑只认 0 附近之前判了 276 张, 多出来的 210 张是微信账单、话费充值页、银行短信、
+抖音通知、骂人的文字截图, 都不是支付宝页面。
+经理给的 111/112/116/118 真假图和 10-05 的两张假图全对; JPEG 压到 40、缩小到宽 600、放大照样判 2;
+左右各裁掉 40 像素(页面边上的灰底被裁没了)判不了。本地拼音库 9,063 张 0 张可疑。
 
 用法
 ----
@@ -53,7 +62,11 @@ import numpy as np  # noqa: E402
 cv2.setNumThreads(1)
 EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
-BLACK_MAX = 25           # 行核心颜色 <= 这个算纯黑
+BLACK_MAX = 12           # 行核心颜色 <= 这个算纯黑。两种造假工具都是正好 0; 微信账单、支付宝话费充值页、
+                         # 银行短信这些是 21~25(黑色 90% 不透明), 不能算(服务器 09-01~16 实测)
+EDGE_LO, EDGE_HI = 238, 250   # 卡片外面页面边上的颜色: 支付宝是 #F5F5F5(245) 灰底上放白卡片, 造假工具 244/246;
+                              # 微信账单和很多别的 App 是整页白(255), 不是支付宝的页面不判
+LABEL_LO, LABEL_HI = 148, 158  # 标签颜色: 支付宝 #999(153), 造假工具 150; 抖音通知这类别的页面在这个范围外
 GREY_LO, GREY_HI = 38, 64   # 行核心颜色在这个范围算 #333
 SHARE = 0.60             # 占比 >= 这个就下结论
 
@@ -103,7 +116,7 @@ def measure_img(bgr, path=""):
             continue
         ll = int(np.flatnonzero(lm.any(0))[0]) + x0
         vl = int(np.flatnonzero(vm.any(0))[0]) + vx0 + x0
-        cand.append((a + y0, lcore, vcore, ll, vl))
+        cand.append((a + y0, lcore, vcore, ll, vl, b + y0))
     # ★ 账单详情上面那张卡片: 标签都从左边 3%~10% 起、取值都从同一个 x 起(20%~34%), 上下对齐。
     #   收银台、支付结果页、订单说明这些别的页面对不齐, 就不判(它们本来就用纯黑字, 本地实测会误判)。
     pairs = []
@@ -116,10 +129,18 @@ def measure_img(bgr, path=""):
     rows_black = sum(1 for p in pairs if p[2] <= BLACK_MAX)
     rows_grey = sum(1 for p in pairs if GREY_LO <= p[2] <= GREY_HI)
     n = len(pairs)
+    # 卡片左边外面(宽度 0.4%~1.6%)、对齐那几行高度上, 页面底色出现最多的灰度
+    edge = ""
+    if n:
+        G = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        xa = int(0.004 * W)
+        xb = max(xa + 1, int(0.016 * W))
+        ev = np.concatenate([G[p[0]:p[5] + 1, xa:xb].ravel() for p in pairs])
+        edge = int(np.bincount(ev, minlength=256).argmax())
     r = {"path": path, "W": W, "H": H, "rows": n, "rows_black": rows_black, "rows_grey": rows_grey,
          "rows_other": n - rows_black - rows_grey,
          "black_share": round(rows_black / n, 3) if n else "", "grey_share": round(rows_grey / n, 3) if n else "",
-         "bg": bg, "label_core": int(np.median([p[1] for p in pairs])) if n else "",
+         "bg": bg, "edge": edge, "label_core": int(np.median([p[1] for p in pairs])) if n else "",
          "cores": " ".join(str(p[2]) for p in pairs[:30])}
     d = decide(r)
     if d["verdict"] == "Suspicious":          # 拼音检查比较贵, 只在要判可疑时才跑
@@ -134,6 +155,11 @@ def decide(r, pinyin=None):
     pinyin: 只在要判可疑时才会传进来(调用方先判拼音), 其余情况不用。"""
     if not r["rows"] or r["rows"] < 3:
         return {"verdict": "CannotDetermine", "why": "不是左标签右取值的账单详情页"}
+    # ★ 只判支付宝的页面。微信账单也是左标签右取值, 字是黑色 90%(25)或纯黑, 不按支付宝的颜色判(服务器实测误判 200 多张)
+    if not (EDGE_LO <= int(r["edge"]) <= EDGE_HI):
+        return {"verdict": "CannotDetermine", "why": "页面边上不是支付宝的灰底(微信账单、别的 App)"}
+    if not (LABEL_LO <= int(r["label_core"]) <= LABEL_HI):
+        return {"verdict": "CannotDetermine", "why": "标签颜色不是支付宝的"}
     if float(r["black_share"]) >= SHARE:
         if pinyin:
             return {"verdict": "CannotDetermine", "why": "拼音页, 拼音字体的字本来就深, 不判"}
@@ -162,7 +188,7 @@ def measure(p):
         return {"path": p, "verdict": "error", "why": repr(e)[:200]}
 
 
-KEYS = ["path", "W", "H", "verdict", "black_share", "grey_share", "rows", "rows_black", "rows_grey", "rows_other", "label_core", "pinyin",
+KEYS = ["path", "W", "H", "verdict", "black_share", "grey_share", "rows", "rows_black", "rows_grey", "rows_other", "label_core", "edge", "pinyin",
         "bg", "cores", "why"]
 
 

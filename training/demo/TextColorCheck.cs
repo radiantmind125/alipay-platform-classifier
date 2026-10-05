@@ -23,8 +23,9 @@ namespace Ssp
         public int RowsGrey;           // 取值核心色在 GreyLo~GreyHi 的行数
         public double BlackShare;      // RowsBlack / Rows
         public double GreyShare;       // RowsGrey / Rows
-        public int LabelCore;          // 标签核心色(各行中位数), 只记录不判: 真图 153, 造假工具 150
-        public int Background;         // 左边页边的底色, 只记录不判: 真图 245, 造假工具 244
+        public int LabelCore;          // 标签核心色(各行中位数): 真图 153, 造假工具 150; 不在 LabelLo~LabelHi 不判
+        public int Background;         // 卡片里左边的底色, 只记录不判
+        public int Edge;               // 卡片外面页面边上的颜色: 支付宝 245, 造假工具 244/246, 微信等整页白 255
         public int[] ValueCores = Array.Empty<int>();   // 每行取值的核心色(前 30 行)
         public bool PinyinChecked;     // 跑过拼音检查(只在要判可疑时才跑)
         public bool Pinyin;
@@ -36,7 +37,7 @@ namespace Ssp
     ///
     /// 支付宝账单详情上面那张卡片: 左边灰标签 #999999(灰度 153), 右边取值 #333333(灰度 51)。
     /// 造假工具(和 111/112/116 的假图同一个, 1080x2400 苹果样式)取值是纯黑 #000000, 标签 150, 底色 244。
-    /// JPEG 压过之后真图取值的核心颜色还是稳稳的 50~51, 纯黑还是 0~25。
+    /// JPEG 压过之后真图取值的核心颜色还是稳稳的 50~51, 造假工具的纯黑还是 0。
     /// 苹果的状态栏、导航栏标题本来就是纯黑, 所以只看导航栏下面(高度 9.5% 往下)。
     ///
     /// 量法:
@@ -47,18 +48,28 @@ namespace Ssp
     ///   3. 这些行要上下对齐: 至少 3 行, 标签左缘中位数在宽度 3%~10%, 取值左缘中位数在 20%~34%,
     ///      每行和中位数差 &lt;= 0.6% 宽度。对不齐的(收银台、支付结果页、银行短信、别的 App)不判,
     ///      它们本来就用纯黑字。
-    ///   4. 每行一票: 纯黑的行占 &gt;= 60% 判可疑; #333 的行占 &gt;= 60% 判 Ok; 其他判不了。
-    ///   5. 要判可疑之前先看是不是拼音页(PinyinCheck), 拼音页不判: 拼音字体有细体的变种, 字会压得很深。
+    ///   4. 只判支付宝的页面: 卡片外面页面边上的颜色要是支付宝的灰底(EdgeLo~EdgeHi), 标签色要在 LabelLo~LabelHi。
+    ///      微信账单也是左标签右取值, 字是黑色 90%(25)或纯黑; 不加这一条服务器上会把 200 多张微信账单当成假图。
+    ///      支付宝 8 月以前的老版是整页白, 也不判。
+    ///   5. 每行一票: 纯黑(&lt;= BlackMax)的行占 &gt;= 60% 判可疑; #333 的行占 &gt;= 60% 判 Ok; 其他判不了。
+    ///      纯黑只认 0 附近: 两种造假工具都是正好 0, 微信、支付宝话费充值页、银行短信是 21~25。
+    ///   6. 要判可疑之前先看是不是拼音页(PinyinCheck), 拼音页不判: 拼音字体有细体的变种, 字会压得很深。
     ///
-    /// 不按标签颜色判: 真图 98% 是 153、造假工具是 150, 但缩放/重压过的图 143~162 都有, 分不开。
+    /// 服务器 09-01~16 抽的 101,285 张: 判可疑 66 张(0.07%), 逐张看过都是支付宝账单详情的假图
+    /// (34 张 111/112 也判了假; 32 张只有这一项判出来, 订单号是乱的、两笔转账同一个订单号、或者底色是造假工具的)。
+    /// 页面左右被裁掉(灰底没了)判不了。
     ///
     /// 和 training/color_scan.py 逐步对应, 改一边要同步改另一边。
     /// 只读入参, 无静态可变状态, 可多线程调用。从文件读图请用 ImreadModes.Color。
     /// </summary>
     public static class TextColorCheck
     {
-        /// <summary>行的取值核心色 &lt;= 这个算纯黑。</summary>
-        public const int BlackMax = 25;
+        /// <summary>行的取值核心色 &lt;= 这个算纯黑(造假工具都是 0; 微信、话费充值页、银行短信 21~25 不能算)。</summary>
+        public const int BlackMax = 12;
+        /// <summary>卡片外面页面边上的颜色范围: 支付宝 #F5F5F5(245), 造假工具 244/246; 整页白(255)的不是支付宝页面。</summary>
+        public const int EdgeLo = 238, EdgeHi = 250;
+        /// <summary>标签颜色范围: 支付宝 #999(153), 造假工具 150。</summary>
+        public const int LabelLo = 148, LabelHi = 158;
         /// <summary>行的取值核心色在这个范围算 #333。</summary>
         public const int GreyLo = 38, GreyHi = 64;
         /// <summary>纯黑(或 #333)的行占比 &gt;= 60% 就下结论(按 x * 5 &gt;= rows * 3 整数比, 不受浮点影响)。</summary>
@@ -86,7 +97,7 @@ namespace Ssp
 
         struct Cand
         {
-            public int Y, LabelCore, ValueCore, LabelLeft, ValueLeft;
+            public int Y, YB, LabelCore, ValueCore, LabelLeft, ValueLeft;
         }
 
         static TextColorResult Run(Mat bgr, TextColorResult res)
@@ -177,7 +188,7 @@ namespace Ssp
                 if (ln < 10 || vn < 10) continue;
                 int lcore = ArgMax(lh), vcore = ArgMax(vh);
                 if (lcore < 140 || lcore > 165) continue;
-                cand.Add(new Cand { Y = a, LabelCore = lcore, ValueCore = vcore, LabelLeft = ll, ValueLeft = vl });
+                cand.Add(new Cand { Y = a, YB = b, LabelCore = lcore, ValueCore = vcore, LabelLeft = ll, ValueLeft = vl });
             }
 
             // 账单详情上面那张卡片: 标签都从左边 3%~10% 起、取值都从同一个 x 起(20%~34%), 上下对齐。
@@ -201,9 +212,20 @@ namespace Ssp
                 res.GreyShare = (double)res.RowsGrey / rows;
                 res.LabelCore = (int)Median(pairs.Select(t => (double)t.LabelCore));
                 res.ValueCores = pairs.Take(30).Select(t => t.ValueCore).ToArray();
+                // 卡片左边外面(宽度 0.4%~1.6%)、对齐那几行高度上, 页面底色出现最多的灰度
+                int xa = (int)(0.004 * W), xb = Math.Max(xa + 1, (int)(0.016 * W));
+                var eh = new int[256];
+                foreach (var t in pairs)
+                    for (int y = t.Y; y <= t.YB; y++)
+                        for (int x = xa; x < xb; x++) eh[g[y * W + x]]++;
+                res.Edge = ArgMax(eh);
             }
             if (rows < 3) { res.Reason = "不是左标签右取值的账单详情页"; return res; }
             res.Measured = true;
+
+            // 只判支付宝的页面(微信账单、别的 App、支付宝老版整页白; 标签颜色不对的别的页面)
+            if (res.Edge < EdgeLo || res.Edge > EdgeHi) { res.Reason = $"页面边上是 {res.Edge}, 不是支付宝的灰底(微信账单、别的 App), 不判"; return res; }
+            if (res.LabelCore < LabelLo || res.LabelCore > LabelHi) { res.Reason = $"标签颜色 {res.LabelCore}, 不是支付宝的, 不判"; return res; }
 
             // 按行数算(每行一票), 不按像素: 一大块黑色(按钮、图片)会把像素占比带偏
             if (res.RowsBlack * 5 >= rows * 3)

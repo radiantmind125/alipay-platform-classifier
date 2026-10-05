@@ -95,12 +95,12 @@ namespace Ssp.ColorTest
                 // 每张都写(包括没量到的), 方便和 Python 逐张对
                 var ci = CultureInfo.InvariantCulture;
                 using var sw2 = new StreamWriter(outCsv, false, new UTF8Encoding(true));
-                sw2.WriteLine("path,W,H,verdict,black_share,grey_share,rows,rows_black,rows_grey,label_core,pinyin,bg,cores,reason");
+                sw2.WriteLine("path,W,H,verdict,black_share,grey_share,rows,rows_black,rows_grey,label_core,edge,pinyin,bg,cores,reason");
                 foreach (var (path, w, h, r) in all)
                 {
                     sw2.WriteLine(string.Join(",", Csv(path), w, h, r.Verdict,
                         r.Rows > 0 ? r.BlackShare.ToString("0.000", ci) : "", r.Rows > 0 ? r.GreyShare.ToString("0.000", ci) : "",
-                        r.Rows, r.RowsBlack, r.RowsGrey, r.Rows > 0 ? r.LabelCore.ToString(ci) : "",
+                        r.Rows, r.RowsBlack, r.RowsGrey, r.Rows > 0 ? r.LabelCore.ToString(ci) : "", r.Rows > 0 ? r.Edge.ToString(ci) : "",
                         r.PinyinChecked ? (r.Pinyin ? "1" : "0") : "", r.Background, string.Join(" ", r.ValueCores), Csv(r.Reason)));
                 }
                 Console.WriteLine($"csv -> {outCsv}");
