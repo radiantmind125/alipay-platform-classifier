@@ -29,6 +29,12 @@
 ----
     python count_truncated_labels.py --pairs D:\\alipay-ai-data\\pinyin-pairs ^
         --also D:\\alipay-ai-data\\pinyin-pairs-blue2
+    加 --drop: 把"坐实的"(字段名真子串)那些在 _segments.csv 里标成 bad=1, 训练时筛掉
+
+★★ 为什么后来又要 --drop(2026-10-07)
+    9/10 月的图加进来重训以后, 新模型在没见过的测试图上把 `订单号` 读成 `单号` 11 次(老模型 0 次),
+    推理端 pad 4 也救不回来 —— 错标签多了, 模型学得更死。这些标签是错的, 直接不让它们进训练。
+    只动"字段名真子串 + 宽度正好像少一个字"那一类, 商家名、金额一概不碰。
 """
 from __future__ import annotations
 
@@ -58,7 +64,10 @@ def main() -> None:
     ap.add_argument("--pairs", type=Path, required=True)
     ap.add_argument("--also", type=Path, nargs="*", default=[])
     ap.add_argument("--show", type=int, default=15)
+    ap.add_argument("--drop", action="store_true",
+                    help="把坐实的截断(字段名真子串)在 _segments.csv 里标成 bad=1, 原件备份 .csv.bak3")
     a = ap.parse_args()
+    summary = []
 
     print("=" * 72)
     print("  COUNT TRUNCATED LABELS  (ASCII only - safe to paste)")
@@ -121,6 +130,7 @@ def main() -> None:
                 # 这一段的文字要是某个字段名的真子串, 那基本可以坐实
                 if any(t != f and t in f for f in FIELDS):
                     field_hit.append((t, cur))
+                    r["_trunc"] = True
 
         n = len(keep)
         print("-" * 72)
@@ -143,7 +153,41 @@ def main() -> None:
             for t, c in Counter(t for _r, t, _c in susp).most_common(a.show):
                 print(f"      {c:>6}x  {t[:40]}")
         print()
+        top = Counter(t for t, _ in field_hit).most_common(3)
+        # 不看宽度: 标签就是某个字段名的真子串(单号/款方式/交易成...)有多少 —— 量级参考, 不拿来删
+        anysub = Counter(t for _r, t, _u, _w, _h in keep
+                         if len(t) >= 2 and any(t != f and t in f for f in FIELDS) and t not in FIELDS)
+        summary.append((d.name, n, len(field_hit), top, sum(anysub.values()), anysub.most_common(3)))
+        if a.drop and field_hit:
+            bak = man.with_suffix(".csv.bak3")
+            if not bak.exists():
+                bak.write_bytes(man.read_bytes())
+            fields = [f for f in rows[0].keys() if f != "_trunc"]
+            if "bad" not in fields:
+                fields.append("bad")
+            n_mark = 0
+            for r in rows:
+                if r.pop("_trunc", False):
+                    r["bad"] = "1"
+                    n_mark += 1
+                elif not r.get("bad"):
+                    r["bad"] = "0"
+            with man.open("w", encoding="utf-8-sig", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=fields)
+                w.writeheader()
+                w.writerows(rows)
+            print(f"    ★ --drop: 标了 {n_mark:,} 段 bad=1 -> {man.name}  (原件备份 {bak.name})")
+            print()
 
+    print("-" * 72)
+    print(f"  {'目录':<28}{'可用段':>10}{'坐实截断':>9}{'占比':>8}   最多的")
+    for name, n, k, top, _m, _mt in summary:
+        print(f"  {name:<28}{n:>10,}{k:>9,}{k / n:>8.2%}   " + "  ".join(f"{t} {c}" for t, c in top))
+    print()
+    print(f"  {'(参考) 不看宽度, 标签是字段名碎片':<28}")
+    for name, n, _k, _top, m, mt in summary:
+        print(f"  {name:<28}{n:>10,}{m:>9,}{m / n:>8.2%}   " + "  ".join(f"{t} {c}" for t, c in mt))
+    print()
     print("-" * 72)
     print("  ★★★★★ 只能拿**字段名真子串**那一行去做决定。")
     print("     上面那个'疑似'是宽判, 大字号的完整文字(账单详情、-100.00、添加)")
