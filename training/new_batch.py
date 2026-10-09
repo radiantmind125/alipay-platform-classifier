@@ -235,15 +235,17 @@ def cmd_inventory(a) -> None:
     print("=" * 72)
     print(f"  NEW BATCH INVENTORY  (ASCII only - safe to paste)")
     print("=" * 72)
+    # ★ --old 可以不给(2026-10-09 经理把 7、8 月的老图库删了): 不给就当老图库是空的,
+    #   见过的全靠 --seen 的扫描名单。给了但不存在照样报错, 免得把老图当新图再扫一遍。
     for d in (a.new, a.old):
-        if not d.exists():
+        if d is not None and not d.exists():
             print(f"  目录不在: {d}")
             return
     print(f"  新: {a.new}")
     print("  正在列新目录...", flush=True)
     new_imgs, other, ndir = walk(a.new)
     print("  正在列老目录...", flush=True)
-    old_imgs, _o, _d = walk(a.old)
+    old_imgs, _o, _d = walk(a.old) if a.old is not None else ([], Counter(), 0)
     old_names = {os.path.basename(p) for p in old_imgs}
     # ★★ 上一批处理过的(原图可能已经被删了, 只剩扫描名单)也算见过 —— 见 seen_names.py
     seen, seen_where = set(), {}
@@ -268,7 +270,7 @@ def cmd_inventory(a) -> None:
     if other:
         print(f"          不是图片的文件 {sum(other.values()):,} 个: "
               + ", ".join(f"{k} {v}" for k, v in other.most_common(6)))
-    print(f"  老目录  图片 {len(old_imgs):>10,} 张   ({a.old})")
+    print(f"  老目录  图片 {len(old_imgs):>10,} 张   ({a.old if a.old is not None else '没给 --old, 当作没有老图库'})")
     print()
     print(f"  ★ 新目录里和老目录**同名**的   {len(overlap):>10,} 张   <- 不是新数据")
     if a.seen:
@@ -902,7 +904,8 @@ def main() -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p1 = sub.add_parser("inventory", help="清点: 多少张、多少真新的、日期、蓝白")
     p1.add_argument("--new", type=Path, required=True)
-    p1.add_argument("--old", type=Path, required=True)
+    p1.add_argument("--old", type=Path, default=None,
+                    help="老图库目录; 老图库删了就不给, 见过的靠 --seen")
     p1.add_argument("--sample", type=int, default=300, help="抽多少张看页头颜色")
     p1.add_argument("--seed", type=int, default=17)
     p1.add_argument("--detail", action="store_true",
