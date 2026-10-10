@@ -65,12 +65,19 @@ def keep_val_sources(keep: list[dict], a) -> set | None:
             hit_keys.add(k)
             forced.add(r["source"])
     old_dirs = {k[0] for k in want}
-    print(f"  --keep-val: \u4e0a\u6b21\u9a8c\u8bc1\u96c6 {len(want):,} \u6bb5, \u8fd9\u6b21\u6e05\u5355\u91cc\u5bf9\u4e0a {len(hit_keys):,} \u6bb5, "
+    # 上次验证集里有、这次没传进来的目录(比如这次不要 7、8 月的数据): 那些段不算"对不上", 不核。
+    #   只拿这次传进来的目录去核, 不然少传一个老目录就会因为"对不上超过 2%"整个拒绝。(2026-10-10)
+    passed = {Path(d).name.lower() for d in [a.pairs, *a.also]}
+    want_in = {k for k in want if k[0] in passed}
+    if len(want_in) < len(want):
+        gone = ", ".join(sorted({k[0] for k in want} - passed))
+        print(f"  --keep-val: 上次验证集里 {len(want) - len(want_in):,} 段所在的目录这次没传进来, 不核它们: {gone}")
+    print(f"  --keep-val: \u4e0a\u6b21\u9a8c\u8bc1\u96c6 {len(want_in):,} \u6bb5, \u8fd9\u6b21\u6e05\u5355\u91cc\u5bf9\u4e0a {len(hit_keys):,} \u6bb5, "
           f"\u5bf9\u56de\u539f\u56fe {len(forced):,} \u5f20")
-    miss = len(want) - len(hit_keys)
+    miss = len(want_in) - len(hit_keys)
     if miss:
         print(f"  \u2605 \u6709 {miss:,} \u6bb5\u5bf9\u4e0d\u4e0a(\u4e0a\u6b21\u4e4b\u540e\u8fd9\u4e9b\u6bb5\u88ab\u7b5b\u6389\u6216\u8005\u91cd\u5207\u8fc7)")
-        if miss > 0.02 * len(want):
+        if miss > 0.02 * len(want_in):
             print("  \u2605\u2605 \u8d85\u8fc7 2%, \u4e0a\u6b21\u7684\u9a8c\u8bc1\u96c6\u548c\u73b0\u5728\u7684\u6e05\u5355\u5bf9\u4e0d\u4e0a, \u4e0d\u5f80\u4e0b\u505a\u3002")
             return None
     val_srcs = set(forced)
