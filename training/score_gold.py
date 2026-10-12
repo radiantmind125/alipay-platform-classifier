@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import sys
 import unicodedata
 from pathlib import Path
@@ -39,8 +40,13 @@ def strict(s: str) -> str:
 
 
 def lenient(s: str) -> str:
+    """再去掉不算错的写法差别: 箭头图标、+ 图标(结尾的)、引号样式、句尾标点、时间后面被读成"支"的支付宝图标。"""
     s = strict(s).replace("十", "+")
-    return "".join(c for c in s if c not in "><›‹〉〈")
+    for a in "“”„‟": s = s.replace(a, '"')
+    for a in "‘’": s = s.replace(a, "'")
+    s = "".join(c for c in s if c not in "><›‹〉〈")
+    s = re.sub(r"^(\d{1,2}:\d{2})支$", r"\1", s)
+    return s.rstrip("+,，。")
 
 
 def run_model(onnx: Path, files: list[Path]) -> list[str]:
