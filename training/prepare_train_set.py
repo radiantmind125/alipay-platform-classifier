@@ -32,7 +32,7 @@ from pathlib import Path
 HAN = re.compile(r"[\u4e00-\u9fff]")
 
 
-def keep_val_sources(keep: list[dict], a) -> set | None:
+def keep_val_sources(keep: list[dict], a, all_rows: list[dict] | None = None) -> set | None:
     """\u6309\u4e0a\u4e00\u6b21\u7684 val.txt \u5b9a\u8fd9\u6b21\u7684\u9a8c\u8bc1\u96c6\u539f\u56fe\u3002
 
     \u2605\u2605\u2605\u2605\u2605 \u4e3a\u4ec0\u4e48\u8981\u8fd9\u4e2a: \u9a8c\u8bc1\u96c6\u662f"\u539f\u56fe\u6392\u5e8f\u3001\u6309\u79cd\u5b50\u6253\u4e71\u3001\u53d6\u524d 5%"\u3002\u52a0\u8fdb\u65b0\u76ee\u5f55\u4ee5\u540e\u539f\u56fe\u53d8\u591a,
@@ -59,6 +59,13 @@ def keep_val_sources(keep: list[dict], a) -> set | None:
         return None
     hit_keys = set()
     forced = set()
+    # 标了 bad 的段(check_alignment / recheck_segments 筛掉的)清单里还在, 只是不进训练 ——
+    #   它们不算"对不上"(对不上是指重切过), 单独报出来。(2026-10-12)
+    dropped = set()
+    for r in (all_rows or []):
+        k = (Path(r["_dir"]).name.lower(), r["file"])
+        if k in want and r.get("bad") == "1":
+            dropped.add(k)
     for r in keep:
         k = (Path(r["_dir"]).name.lower(), r["file"])
         if k in want:
@@ -74,7 +81,10 @@ def keep_val_sources(keep: list[dict], a) -> set | None:
         print(f"  --keep-val: 上次验证集里 {len(want) - len(want_in):,} 段所在的目录这次没传进来, 不核它们: {gone}")
     print(f"  --keep-val: \u4e0a\u6b21\u9a8c\u8bc1\u96c6 {len(want_in):,} \u6bb5, \u8fd9\u6b21\u6e05\u5355\u91cc\u5bf9\u4e0a {len(hit_keys):,} \u6bb5, "
           f"\u5bf9\u56de\u539f\u56fe {len(forced):,} \u5f20")
-    miss = len(want_in) - len(hit_keys)
+    dropped &= want_in
+    if dropped:
+        print(f"  --keep-val: 上次验证集里 {len(dropped):,} 段这次标了 bad(筛掉了), 不算对不上, 验证集里也不再有它们")
+    miss = len(want_in) - len(hit_keys) - len(dropped)
     if miss:
         print(f"  \u2605 \u6709 {miss:,} \u6bb5\u5bf9\u4e0d\u4e0a(\u4e0a\u6b21\u4e4b\u540e\u8fd9\u4e9b\u6bb5\u88ab\u7b5b\u6389\u6216\u8005\u91cd\u5207\u8fc7)")
         if miss > 0.02 * len(want_in):
@@ -203,7 +213,7 @@ def main() -> None:
         n_val = max(1, int(len(srcs) * a.val_ratio))
         val_srcs = set(srcs[:n_val])
     else:
-        val_srcs = keep_val_sources(keep, a)
+        val_srcs = keep_val_sources(keep, a, rows)
         if val_srcs is None:
             return
         n_val = len(val_srcs)
