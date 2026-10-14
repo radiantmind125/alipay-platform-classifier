@@ -23,7 +23,11 @@ r"""按页面类型和位置修标签: 每一类页面上固定的字(回首页 
    和它的编辑距离 <= 允许值(3~4 个字 1, 5~7 个字 2, 8 个字以上 3), 而且最近的只有一个 -> 改成那个固定字
 2. 捡回来: recheck_segments 判成对不上(_recheck.csv 里 flag=1)扔掉的段, 单独重读的结果按第 1 条的规矩能对上一个固定字
    (位置也对) -> 标签改成那个固定字, 不再扔(bad=0)。别的原因扔掉的(大号红色金额、只有一半的标签、错配 ...)一律不动
-3. 补 ¥: 纯数字两位小数的标签, 落在 ¥ 格子里 -> 前面补 ¥
+3. 补 ¥: 纯数字两位小数的标签, 落在 ¥ 格子里 -> 前面补 ¥(单独重读是带 - / + 的不补, 那是 -¥0.11 这种)
+10/14 人眼核过 625 条改动以后加的几道闸(只会少改, 不会多改):
+    要补字的(标签比固定字短), 裁图宽度不到这个固定字平常宽度的 9 成 -> 不补: 图被切掉 / 被浮窗挡住, 少的字本来就看不见
+    10 个字以上的固定字只许换字, 不许在头尾增删(款项已经转出成功...这句话在哪折行跟字体有关)
+    带 银行 的(除了 收款方银行 / 付款方银行)不算固定字: 中国农业银行是取值, 不能把 中国银行 改成它
 状态栏那一行(行号 0)不动; 非支付宝 / 说不清 / 照片 / 深色 这几类不学也不改(非支付宝是微信、银行、平台混在一起, 交易号在银行页上就是对的)。
 
 用法
@@ -49,6 +53,8 @@ RARE_PAGE_FRAC = 0.003    # 要改的标签本身在这一类里得少见(真常
 X_TOL = 0.08              # 横向: 中心离固定字的中位数不超过页宽的 8%
 Y_MARGIN = 0.02           # 纵向: 固定字 5%~95% 分位外面再放 2% 页高
 YEN_SHARE = 0.80
+LONG = 10                 # 10 个字以上的固定字只许换字
+NARROW = 0.90             # 要补字时, 裁图宽度不到这个固定字平常宽度的 9 成就不补
 SKIP_CLS = {"X", "U", "P", "D"}   # 非支付宝(微信/银行/平台混在一起, 没有统一模板)、说不清、照片、深色: 不学也不改
 YEN_MIN = 50
 GW = re.compile(r"GWCZ\d+")
@@ -131,7 +137,7 @@ def load_dir(d: Path, types: dict) -> tuple[list[dict], list[dict], list[str]]:
         x0, x1 = float(r["x0"]), float(r["x1"])
         rr, flag = rc.get(r["file"], ("", False))
         recs.append({"i": i, "dir": d.name, "page": m.group(0), "cls": cls, "row": int(rowno.group(1)),
-                     "xc": (x0 + x1) / 2 / W, "y": y / H, "text": norm(r.get("text", "")),
+                     "xc": (x0 + x1) / 2 / W, "w": (x1 - x0) / W, "y": y / H, "text": norm(r.get("text", "")),
                      "bad": r.get("bad") == "1", "rc_flag": flag, "reread": norm(rr), "file": r["file"]})
     return rows, recs, fields
 
@@ -147,7 +153,7 @@ def learn(recs: list[dict]) -> tuple[dict, dict, dict]:
         if r["bad"] or r["row"] == 0 or not r["text"]:
             continue
         seen[r["cls"]][r["text"]].add(r["page"])
-        pos[r["cls"]][r["text"]].append((r["xc"], r["y"]))
+        pos[r["cls"]][r["text"]].append((r["xc"], r["y"], r["w"]))
         if AMOUNT.match(r["text"]) or YEN_AMOUNT.match(r["text"]):
             cell = (round(r["y"] / 0.02), 0 if r["xc"] < 0.34 else (1 if r["xc"] < 0.66 else 2))
             yen[r["cls"]][cell][0] += 1
@@ -162,12 +168,15 @@ def learn(recs: list[dict]) -> tuple[dict, dict, dict]:
         for t, ps in seen[cls].items():
             if len(t) < 2 or any(c.isdigit() for c in t):
                 continue
+            if "银行" in t and "方银行" not in t:      # 中国农业银行 这种是取值(收款方银行填的), 不是固定字
+                continue
             if len(ps) < VOCAB_MIN_PAGES or len(ps) / n < VOCAB_PAGE_FRAC:
                 continue
             xs = sorted(p[0] for p in pos[cls][t])
             ys = sorted(p[1] for p in pos[cls][t])
             q = lambda arr, f: arr[min(len(arr) - 1, int(f * len(arr)))]
-            v[t] = {"pages": len(ps), "share": len(ps) / n, "xc": q(xs, 0.5),
+            ws = sorted(p[2] for p in pos[cls][t])
+            v[t] = {"pages": len(ps), "share": len(ps) / n, "xc": q(xs, 0.5), "w": q(ws, 0.5),
                     "y0": q(ys, 0.05) - Y_MARGIN, "y1": q(ys, 0.95) + Y_MARGIN}
         vocab[cls] = v
         yen_cells[cls] = {c for c, (tot, y) in yen[cls].items() if tot >= YEN_MIN and y / tot >= YEN_SHARE}
@@ -182,6 +191,8 @@ def snap(text: str, xc: float, y: float, voc: dict) -> str | None:
             continue
         cap = allowed(len(v))
         if cap == 0:
+            continue
+        if len(v) >= LONG and len(text) != len(v):   # 长句子在哪折行跟字体有关, 只许换字, 不许在头尾增删
             continue
         d = lev(text, v, cap)
         if d > cap:
@@ -213,12 +224,14 @@ def decide(r: dict, vocab: dict, yen_cells: dict, share: dict) -> tuple[str | No
         return None, False, ""
     if AMOUNT.match(t):
         cell = (round(r["y"] / 0.02), 0 if r["xc"] < 0.34 else (1 if r["xc"] < 0.66 else 2))
-        if cell in yen_cells.get(r["cls"], ()):
+        if cell in yen_cells.get(r["cls"], ()) and r["reread"][:1] not in "-−+":   # 重读带正负号的不补(-¥0.11)
             return "¥" + t, False, "补 ¥"
         return None, False, ""
     if any(c.isdigit() for c in t) or share.get(r["cls"], {}).get(t, 0) >= RARE_PAGE_FRAC:
         return None, False, ""
     v = snap(t, r["xc"], r["y"], voc)
+    if v and len(t) < len(v) and r["w"] < NARROW * voc[v]["w"]:
+        return None, False, ""                   # 裁图比这个固定字平常窄: 多半是被切掉 / 挡住了, 少的字本来就不在图上
     if v:
         return v, False, "读错的固定字"
     return None, False, ""
