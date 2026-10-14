@@ -24,7 +24,7 @@ r"""按页面类型和位置修标签: 每一类页面上固定的字(回首页 
 2. 捡回来: recheck_segments 判成对不上(_recheck.csv 里 flag=1)扔掉的段, 单独重读的结果按第 1 条的规矩能对上一个固定字
    (位置也对) -> 标签改成那个固定字, 不再扔(bad=0)。别的原因扔掉的(大号红色金额、只有一半的标签、错配 ...)一律不动
 3. 补 ¥: 纯数字两位小数的标签, 落在 ¥ 格子里 -> 前面补 ¥
-状态栏那一行(行号 0)不动。
+状态栏那一行(行号 0)不动; 非支付宝 / 说不清 / 照片 / 深色 这几类不学也不改(非支付宝是微信、银行、平台混在一起, 交易号在银行页上就是对的)。
 
 用法
 ----
@@ -49,6 +49,7 @@ RARE_PAGE_FRAC = 0.003    # 要改的标签本身在这一类里得少见(真常
 X_TOL = 0.08              # 横向: 中心离固定字的中位数不超过页宽的 8%
 Y_MARGIN = 0.02           # 纵向: 固定字 5%~95% 分位外面再放 2% 页高
 YEN_SHARE = 0.80
+SKIP_CLS = {"X", "U", "P", "D"}   # 非支付宝(微信/银行/平台混在一起, 没有统一模板)、说不清、照片、深色: 不学也不改
 YEN_MIN = 50
 GW = re.compile(r"GWCZ\d+")
 AMOUNT = re.compile(r"^\d{1,7}\.\d{2}$")
@@ -155,7 +156,7 @@ def learn(recs: list[dict]) -> tuple[dict, dict, dict]:
     for cls, pg in pages.items():
         n = len(pg)
         share[cls] = {t: len(ps) / max(1, n) for t, ps in seen[cls].items()}
-        if n < MIN_PAGES:
+        if n < MIN_PAGES or cls in SKIP_CLS:
             continue
         v = {}
         for t, ps in seen[cls].items():
