@@ -13,6 +13,11 @@ r"""两边一致改标签: 交叉读(crossfit.py, 没背过这条标签的模型
     模型读的 == 重读的 != 标签  ->  标签换成模型读的
     保险: 标签是很常见的写法(全部目录里 >= COMMON 次), 两边一致读出来的却少见(不到标签次数的 1/10) -> 不改
           (两个读的人一起把 付款方式 读成 付款方 这种, 信常见的标签)
+    10/15 训练集上抽 360 条对着图核过(补全 109 对 1 错, 换字 89 对 7 错, 删字 50 对 13 错), 错的几种加了闸(guard):
+          银行名被改(农业->农亚)、卡号尾号不再是 4 位数字、数字少了或变成字母(满1元->满元, 2026->2D26, 手写 1 -> /)、
+          删的不是箭头 / 加号 / 文档图标读成的字(进群领->进群, 晟逸卫坊->逸卫坊)、删汉字后剩下的不是常见写法、
+          图标读成 上 / 三 / 一 加在常见写法前面、常见三字词被改成少见的(已入账->已人账)、编号里 O/0 I/1 对调、逗号改句号;
+          省略号几个点、定位图标 ?、记账本图标 ¥ 比的时候都不算。模型读出来尾巴多个逗号(箭头读成的)而重读没有的, 写进标签前去掉。
 分三种出报告和核对图: 补全(读出来更长, 多半是标签只有一半)、换字(一样长)、删字(读出来更短)。
 
 用法
@@ -44,7 +49,77 @@ def cmp(s: str) -> str:
         s = s.replace(q, "'")
     s = "".join(c for c in s if c not in "><›‹〉〈")
     s = re.sub(r"^(\d{1,2}:\d{2})支$", r"\1", s)
+    s = re.sub(r"(?<!\d)[.·•]+(?!\d)|[.·•]{2,}", "…", s)      # 省略号几个点都算一样(··· / .. / ·)
+    s = re.sub(r"^[?？]", "", s)                                 # 定位图标读成的 ?
+    s = re.sub(r"^[¥￥](?=[^\d\-+])", "", s)                    # 记账本图标读成的 ¥(后面不是数字)
     return s.rstrip("+,，。")
+
+
+TRAIL_JUNK = set("入人干)）〉>/|!！")         # 结尾: 箭头 > 常读成 入 人 ) /, 加号读成 干
+LEAD_JUNK = set("三司白兰二」「?？(（)）一V")   # 开头: 文档图标常读成 三 司 白 兰 二, 打勾图标读成 ) 一 V
+#                                             (删开头的汉字要剩下的是常见写法: 一支付成功 -> 支付成功 可以, 一键领 -> 键领 不行)
+MID_JUNK = set("「」|/、~")                   # 中间: 纯标点的零碎
+BANKS = ("农业银行", "工商银行", "建设银行", "中国银行", "招商银行", "交通银行", "光大银行", "邮政储蓄", "邮储银行", "兴业银行",
+         "浦发银行", "民生银行", "中信银行", "平安银行", "华夏银行", "广发银行", "农商银行", "农村信用", "农信")
+CONFUSE = {("O", "0"), ("0", "O"), ("I", "1"), ("1", "I"), ("l", "1"), ("1", "l"), ("Z", "2"), ("2", "Z"),
+           ("S", "5"), ("5", "S"), ("B", "8"), ("8", "B")}
+TAIL = re.compile(r"(?:卡|行)[（(]([^）)]*)[）)]")
+
+
+def trigrams(s: str) -> list[str]:
+    return [s[i:i + 3] for i in range(max(0, len(s) - 2))]
+
+
+def is_han(c: str) -> bool:
+    return "一" <= c <= "鿿"
+
+
+def guard(old: str, new: str, freq: Counter, cnt3: Counter) -> str:
+    """两边一致了也不改的几种(10/15 训练集上抽 360 条人眼核过以后加的), 返回理由; 空 = 可以改。"""
+    import difflib
+    o, n = cmp(old), cmp(new)
+    for b in BANKS:
+        if b in o and b not in n:
+            return "银行名被改"
+    to, tn = TAIL.search(o), TAIL.search(n)
+    if to and re.fullmatch(r"\d{4}", to.group(1)) and (not tn or not re.fullmatch(r"\d{4}", tn.group(1))):
+        return "卡号尾号不再是4位数字"
+    ops = [op for op in difflib.SequenceMatcher(None, o, n, autojunk=False).get_opcodes() if op[0] != "equal"]
+    only_conf = only_comma_to_dot = bool(ops)
+    for tag, i1, i2, j1, j2 in ops:
+        os_, ns_ = o[i1:i2], n[j1:j2]
+        arrow7 = tag == "delete" and i2 == len(o) and os_ == "7" and i1 > 0 and is_han(o[i1 - 1])   # 请选择7: 箭头读成 7
+        if not arrow7 and sum(c.isdigit() for c in ns_) < sum(c.isdigit() for c in os_):
+            return "数字少了或变成别的"
+        if tag == "delete" and not arrow7:
+            if i2 == len(o) and all(c in TRAIL_JUNK for c in os_):
+                pass                                            # 结尾的箭头 / 加号
+            elif i1 == 0 and all(c in LEAD_JUNK or "a" <= c <= "z" for c in os_):
+                if any(is_han(c) for c in os_) and freq[n] < 20:
+                    return "删开头的汉字后剩下的不常见"
+            elif not all(c in MID_JUNK for c in os_):
+                return "删掉的不是图标读成的字"
+        if tag == "insert" and i1 == 0 and ns_ in ("上", "三", "一") and freq[o] >= 20:
+            return "图标读成一个字加在前面"
+        if tag == "replace" and len(os_) == len(ns_):
+            if not all((a, b) in CONFUSE for a, b in zip(os_, ns_)):
+                only_conf = False
+            if not all(a in ",，" and b in ".。" for a, b in zip(os_, ns_)):
+                only_comma_to_dot = False
+            for k in range(i1, i2):
+                if not is_han(o[k]):
+                    continue                            # 只看汉字; 数字(卡号尾号)不按常见不常见判
+                jk = j1 + (k - i1)
+                t_old, t_new = o[max(0, k - 1):k + 2], n[max(0, jk - 1):jk + 2]
+                if len(t_old) == 3 and cnt3[t_old] >= 20 and cnt3[t_new] * 10 < cnt3[t_old]:
+                    return "常见的词被改成少见的"
+        else:
+            only_conf = only_comma_to_dot = False
+    if only_conf and any("A" <= c <= "Z" or "a" <= c <= "z" for c in n):
+        return "编号里字母和数字对调"
+    if only_comma_to_dot:
+        return "逗号改成句号"
+    return ""
 
 
 def kind(old: str, new: str) -> str:
@@ -144,6 +219,12 @@ def main() -> None:
             if r.get("bad") != "1":
                 freq[cmp(r.get("text", ""))] += 1
         loaded.append((d, rows, fields, rr))
+    cnt3 = Counter()
+    for t, c in freq.items():
+        for g in trigrams(t):
+            cnt3[g] += c
+    guard_fn = guard
+    gwhy = Counter()
     tot, guard_tot = Counter(), 0
     by_kind = defaultdict(list)
     for d, rows, fields, rr in loaded:
@@ -162,7 +243,15 @@ def main() -> None:
                 continue
             if freq[cmp(old)] >= COMMON and freq[cmp(p)] < freq[cmp(old)] / 10:
                 guard += 1
+                gwhy["常见标签少见读法"] += 1
                 continue
+            why = guard_fn(old, p, freq, cnt3)
+            if why:
+                guard += 1
+                gwhy[why] += 1
+                continue
+            if re.search(r"[，,。]$", p) and not re.search(r"[，,。]$", re_):
+                p = re.sub(r"[，,。]+$", "", p)          # 箭头读成的逗号: 尾巴跟重读走
             k = kind(old, p)
             cnt[k] += 1
             ex[k][f"{old} -> {p}"] += 1
@@ -186,7 +275,8 @@ def main() -> None:
                 w.writerows(rows)
             print(f"      ★ 已改写 {man.name}  (原件备份 {bak.name})")
     print("-" * 76)
-    print("  合计: " + "  ".join(f"{k} {v:,}" for k, v in tot.most_common()) + f"   常见标签保险挡下 {guard_tot:,}")
+    print("  合计: " + "  ".join(f"{k} {v:,}" for k, v in tot.most_common()) + f"   保险挡下 {guard_tot:,}")
+    print("  挡下的理由: " + "  ".join(f"{k} {v:,}" for k, v in gwhy.most_common()))
     if a.sheet and a.sheet_dir:
         for (color, k), ch in sorted(by_kind.items()):
             sheet(ch, a.sheet_dir / f"cl_{color}_{k}.png", a.sheet)
