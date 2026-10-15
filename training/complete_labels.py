@@ -16,6 +16,13 @@ consensus_labels 补不到它们: 那边要"交叉读的模型和重读一致", 
        是缺字写法的 3 倍以上 (单号 -> 订单号, 备 -> 备注, 商银行储蓄卡(#) -> 工商银行储蓄卡(#))
     都不动: 状态栏那一行(_r00_); 补全后会被 fix_labels 判成不让进训练的(大号红色金额、状态栏连着网速...)
           补出来那段开头或结尾是标点(，）蜜雪冰城… / （充）充值金…: 图标读成的渣)
+          (10/15 服务器上只看一遍后加) 补出来的有字母(拼音没擦干净: 10lun18笔… 外卖满减券WIO E YIS; 订单号前缀 ALW2026 / P100*** 除外);
+          数字前面又接数字而结果不是日期时间(图标读成 1: 109-0113:02, 14119943974889); 旧标签只有一两个字而补全后的写法
+          别处没见过(我的 -> 我的渭费鉴(少)); 去掉头或尾一个字是常见写法、带上反而少见(干开通记账本…: 干 是加号图标)
+          头尾的箭头图标(<账单详情)不进标签
+          (10/15 核对 224 行以后再加) 数字前面补数字只许是订单号前半截(补 >= 5 位、整串 >= 16 位); 补出来括号不配对的不补;
+          旧标签 3 个字以内也要补全后的写法别处见过; 头上的 ? 和记账本 ¥ 图标去掉
+    C 已知错读: 花体字里 账户余额 被老师读成 账芦茶额(个人余额 -> 个大茶额), 核对图 12/12 都是 账户余额 -> 所有活段一起改
 标准答案上量过(本地重读, 比服务器上的粗; 整个工具跑过): 23 处改动 18 条从错变对、0 条从对变错、5 条还是错但都更近。
 ★ bad=1 的段也看: fix_labels 当初把"标签只是裁图的一部分"的段直接扔了(没补), 这一类图就再也没有完整标签的样本;
   补得上的拉回来(bad 改成 0)。
@@ -44,6 +51,12 @@ OK_PUNCT = set("·…:-,，¥￥+%*()（）/ 年月日")          # 补出来的
 ICON_HAN = set("一二三")                                # 文档 / 打勾图标常读成的字, 不算真字
 EDGE_JUNK = ",，、)）(（·…:"                              # 补出来那段的开头(或结尾)是这些 = 图标渣, 不补
 A_MIN_REAL = 3
+LATIN_OK = re.compile(r"[A-Z]+(?=[0-9*])")              # 补出来的字母只许是订单号前缀(ALW2026… P100******), 后面紧跟数字或 *
+DATETIME = re.compile(r"^(\d{4}-)?\d{2}-\d{2}\d{2}:\d{2}(:\d{2})?$")   # cmp 之后(空格去掉)的 日期时间
+SHORT_OLD = 3                                           # 旧标签只有 1~3 个字时, 补全后的写法别处要见过
+SHORT_MIN_FREQ = 3
+LONG_ID_ADD, LONG_ID_LEN = 5, 16                        # 数字前面补数字: 补 >= 5 位、整串 >= 16 位的是订单号/交易号前半截, 可以
+KNOWN = [("账芦茶额", "账户余额"), ("个大茶额", "个人余额")]   # 花体字的已知错读(10/15 核对图 12/12 都是 账户余额), 所有活段都改
 B_MIN_FREQ = 50
 B_RATIO = 3
 
@@ -66,8 +79,24 @@ def propose(old: str, rr: str, freq: Counter) -> tuple[str, str]:
     if (pre and pre[0] in EDGE_JUNK) or (suf and suf[-1] in ",，、(（:"):     # 结尾的省略号 … 是真的(名字被截断)
         return "", ""                                      # ，）蜜雪冰城… / （充）充值金…: 补出来的头尾是图标渣
     add = pre + suf
+    if re.search(r"[A-Za-z]", LATIN_OK.sub("", pre) + LATIN_OK.sub("", suf)):
+        return "", ""                                      # 拼音没擦干净读成字母(10lun18笔… 外卖满减券WIO E YIS), logo(tooNt)
+    if pre and pre[-1].isdigit() and o[0].isdigit() and not DATETIME.match(n):
+        head = re.search(r"\d+$", pre).group(0)
+        whole = re.match(r"\d+", n[len(pre) - len(head):]).group(0)
+        if not (head == pre and len(head) >= LONG_ID_ADD and len(whole) >= LONG_ID_LEN):
+            return "", ""                                  # 数字前面又接几位数字: 图标读成 1(109-0113:02, 14119943974889)
+    if n.count("(") != n.count(")") and o.count("(") == o.count(")"):
+        return "", ""                                      # 补出来括号不配对(…去查看）, …有限公司(嵩级认证)
+    if len(o) <= SHORT_OLD and freq[skel(n)] < SHORT_MIN_FREQ:
+        return "", ""                                      # 旧标签就一两个字, 补全后的写法别处没见过(我的 -> 我的渭费鉴(少))
+    for cut in (n[1:], n[:-1]):
+        if len(cut) >= 2 and freq[skel(cut)] >= 20 and freq[skel(n)] * 10 < freq[skel(cut)]:
+            return "", ""                                  # 去掉头(尾)一个字是常见写法, 带上反而少见: 那个字是图标渣(干开通记账本…)
     real = [c for c in add if REAL.match(c)]
-    new = re.sub(r"[>〉›]+$", "", rr.strip())             # 结尾的箭头图标不进标签
+    new = re.sub(r"^[<〈‹?？]+|^[¥￥](?=[^\d\-+])|[>〉›]+$", "", rr.strip())   # 头尾的图标不进标签(<账单详情, ?银行处理中)
+    for a_, b_ in KNOWN:
+        new = new.replace(a_, b_)
     if all(REAL.match(c) or c in OK_PUNCT for c in add) and len([c for c in real if c not in ICON_HAN]) >= A_MIN_REAL:
         return "A长补全", new
     if 1 <= len(add) <= 2 and all(is_han(c) for c in add) and (not pre or not suf):
@@ -118,6 +147,11 @@ def main() -> None:
                 continue
             old, re_ = r.get("text", ""), rr.get(r["file"], "")
             rule, new = propose(old, re_, freq)
+            if not rule and r.get("bad") != "1" and any(a_ in old for a_, _ in KNOWN):
+                new = old
+                for a_, b_ in KNOWN:
+                    new = new.replace(a_, b_)
+                rule = "C已知错读"
             if not rule:
                 continue
             nt, why = decide(new, re_)
@@ -128,7 +162,7 @@ def main() -> None:
             k = rule + ("(拉回)" if revive else "")
             cnt[k] += 1
             ex[k][f"{old} -> {new}"] += 1
-            by_kind[("蓝" if "blue" in d.name else "白", rule)].append((d, r, old, new, re_))
+            by_kind[("蓝" if "blue" in d.name else "白", k)].append((d, r, old, new, re_))     # 核对图按 规则 x 拉回没拉回 分开
             if a.apply:
                 r["text"] = new
                 if revive:
@@ -151,6 +185,7 @@ def main() -> None:
             print(f"      ★ 已改写 {man.name}  (原件备份 {bak.name})")
     print("-" * 76)
     print("  合计: " + "  ".join(f"{k} {v:,}" for k, v in tot.most_common()))
+    print(f"  TOTAL_CHANGES {sum(tot.values())}")             # 给服务器脚本读的(纯 ASCII)
     if a.sheet and a.sheet_dir:
         for (color, k), ch in sorted(by_kind.items()):
             sheet(ch, a.sheet_dir / f"cp_{color}_{k}.png", a.sheet)
