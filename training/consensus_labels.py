@@ -223,13 +223,12 @@ def main() -> None:
     for t, c in freq.items():
         for g in trigrams(t):
             cnt3[g] += c
-    guard_fn = guard
     gwhy = Counter()
     tot, guard_tot = Counter(), 0
     by_kind = defaultdict(list)
     for d, rows, fields, rr in loaded:
         cnt, ex = Counter(), defaultdict(Counter)
-        seen = guard = 0
+        seen = blocked = 0
         for r in rows:
             if r.get("bad") == "1" or re.search(r"_r00_s\d+", r["file"]):
                 continue
@@ -242,12 +241,12 @@ def main() -> None:
             if not cmp(p) or cmp(p) != cmp(re_) or cmp(p) == cmp(old) or not cmp(old):   # 读出来只剩标点的(。)不算
                 continue
             if freq[cmp(old)] >= COMMON and freq[cmp(p)] < freq[cmp(old)] / 10:
-                guard += 1
+                blocked += 1
                 gwhy["常见标签少见读法"] += 1
                 continue
-            why = guard_fn(old, p, freq, cnt3)
+            why = guard(old, p, freq, cnt3)
             if why:
-                guard += 1
+                blocked += 1
                 gwhy[why] += 1
                 continue
             if re.search(r"[，,。]$", p) and not re.search(r"[，,。]$", re_):
@@ -260,8 +259,8 @@ def main() -> None:
                 r["text"] = p
         n = sum(cnt.values())
         tot.update(cnt)
-        guard_tot += guard
-        print(f"  {d.name}: 交叉读到的活段 {seen:,}   要改 {n:,} ({n / max(1, seen):.2%})   常见标签保险挡下 {guard:,}")
+        guard_tot += blocked
+        print(f"  {d.name}: 交叉读到的活段 {seen:,}   要改 {n:,} ({n / max(1, seen):.2%})   保险挡下 {blocked:,}")
         for k, c in cnt.most_common():
             print(f"      {k} {c:>6,}   例: " + "  |  ".join(s for s, _ in ex[k].most_common(a.show)))
         if a.apply and n:
