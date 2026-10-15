@@ -1,9 +1,12 @@
-r"""金标准考卷上给模型打分: 跟人工改过的标准答案比, 不是跟老师 OCR 的标签比。
+r"""金标准考卷上给模型打分: 跟标准答案比, 不是跟老师 OCR 的标签比。
 
 输入
 ----
 <gold>/_gold_candidates.csv     export_gold.py 导出的: id, file, src_path, dir, label(老师读的)
-<gold>/_gold.csv                人工改好的: id, gold   (gold 为空 = 没定; NO_TEXT = 裁图里没有字; UNREADABLE = 看不清)
+<gold>/_gold.csv                标准答案: id, gold   (gold 为空 = 没定; NO_TEXT = 裁图里没有字; UNREADABLE = 看不清)
+<gold>/_relevance.csv           (可选) id, rel   KEY = 要紧的内容(金额、日期时间、银行卡、人名、商户、订单号、结果标题、字段名),
+                                LOW = 不要紧的(券、优惠、按钮、状态栏网速电量、提示语)。按内容判, 和模型读得对不对无关,
+                                两个人各判一遍、不一致的算 KEY(2026-10-15, 1,356 段里一致 99.4%)。有这个文件就多出一张"按内容分"的表。
 <gold>/img/                     裁图
 --onnx 一个或几个模型(同目录要有 charset.txt)
 
@@ -99,7 +102,7 @@ def main() -> None:
 
     dirs = sorted({r["dir"] for r in cand})
     print("=" * 78)
-    print("  GOLD SCORE  (vs 人工标准答案)")
+    print("  GOLD SCORE  (vs 标准答案)")
     print("=" * 78)
     for d in dirs:
         idx = [i for i, r in enumerate(cand) if r["dir"] == d and gold.get(r["id"], "") not in ("", *SKIP)]
@@ -114,6 +117,20 @@ def main() -> None:
             tot = sum(max(1, len(lenient(gold[cand[i]["id"]]))) for i in idx)
             n = max(1, len(idx))
             print(f"    {k:<14}{ex_s / n:>10.1%}{ex_l / n:>10.1%}{1 - ed / tot:>10.1%}")
+    rp = a.gold / "_relevance.csv"
+    if rp.exists():
+        rel = {r["id"]: r["rel"] for r in csv.DictReader(rp.open(encoding="utf-8-sig"))}
+        print("-" * 78)
+        print("  按内容分 (全对 宽口径)   KEY = 金额 日期时间 银行卡 人名 商户 订单号 结果标题 字段名;  LOW = 券 按钮 状态栏 提示")
+        for side in ("blue", "white"):
+            for rl in ("KEY", "LOW"):
+                idx = [i for i, r in enumerate(cand) if side in r["dir"] and rel.get(r["id"]) == rl
+                       and gold.get(r["id"], "") not in ("", *SKIP)]
+                if not idx:
+                    continue
+                print(f"    {side:<6}{rl:<4} {len(idx):>4} 段   " + "   ".join(
+                    f"{k} {sum(1 for i in idx if lenient(pr[i]) == lenient(gold[cand[i]['id']])) / len(idx):.1%}"
+                    for k, pr in preds.items()))
     print("=" * 78)
 
 
