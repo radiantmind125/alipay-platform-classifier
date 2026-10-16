@@ -17,8 +17,8 @@ r"""蓝图页头的图标判状态(纯看图, 不做 OCR): 到账失败 / 提交
 ----
     页头不是支付宝蓝(5%~20% 高度平均色 B > 150 且 B > R + 60)   -> CannotDetermine(不是蓝图)
     在 2%~17% 高度里找白色连通块(三个通道都 > 215), 挑 横向正中 / 直径 0.035~0.09 W / 近正方 / 实心 的
-        找到, 圆里是感叹号(高/宽 >= 3, 至少两块)  -> Suspicious, 到账失败一类
-        找到, 圆里是时钟(高/宽 1.2~2.4)           -> Suspicious(可选), 提交成功 还没到账
+        找到, 圆里蓝字 字宽 <= 0.16 直径(感叹号)        -> Suspicious, 到账失败一类
+        找到, 圆里蓝字 字宽 0.19~0.34 直径、一块(时钟)   -> Suspicious(可选), 提交成功 还没到账
         找到, 圆里认不出                          -> CannotDetermine, 记下来
     没找到实心圆, 找到成功页标题左边的空心细圈     -> Ok
     都没有(通知条盖住了页头等)                     -> CannotDetermine
@@ -60,8 +60,15 @@ DISK_TOP = (0.035, 0.13)        # 圆顶占页高
 DISK_ASPECT = (0.85, 1.18)
 DISK_WHITE = (0.55, 0.80)       # 白色占外接框
 DISK_FILLED = (0.68, 0.84)      # 填掉圆里的字以后占外接框(正圆 0.785)
-BANG_HW, BANG_PARTS = 3.0, 2    # 感叹号: 高/宽 >= 3, 至少两块
-CLOCK_HW = (1.2, 2.4)           # 时钟指针: 高/宽
+# 圆里的蓝字(10/16 改): 只认红通道 < GLYPH_R 的像素(蓝字 R 只有 20~60, JPEG 在白圆里压出来的灰点 R 在 200 以上),
+#   而且先把圆往里收一圈(去掉圆边上的过渡色); 小于全部 5% 的碎块不算。量 字宽 / 圆直径、字高 / 圆直径:
+#   样本 7 张到账失败 + 12 张提交成功各过 7 种压缩缩放(JPEG 75 / 40、缩到 0.5、0.75 + JPEG 60、0.5 + JPEG 40、宽 360 + JPEG 60):
+#       感叹号 字宽 0.048~0.125   时钟 0.217~0.275   中间是空的;  字高 两种都在 0.44~0.49(压得最狠时掉到 0.13~0.28)
+#   老办法(圆里不是白的都算字, 看 高/宽 和块数)在 JPEG 40 下会把感叹号认成时钟, 不用了。
+GLYPH_R = 160
+BANG_MAX_W = 0.16               # 感叹号: 字宽 <= 0.16 直径
+CLOCK_W = (0.19, 0.34)          # 时钟指针: 字宽 0.19~0.34 直径, 而且只有一块
+GLYPH_MIN_H = 0.30              # 字高 < 0.30 直径: 压坏了, 认不出
 # 成功页标题左边的空心细圈
 RING_CX = (0.25, 0.48)
 RING_D = (0.025, 0.065)
@@ -86,15 +93,18 @@ def _shape(lab, k, x, y, w, h, area):
     return area / (w * h), float(filled.sum()) / (w * h), (filled == 1) & (comp == 0)
 
 
-def _glyph(hole, w, h):
-    """圆里的蓝字: (高/宽, 块数, 中心横向偏移占直径)。"""
-    ys, xs = np.nonzero(hole)
-    if len(xs) < 4:
-        return 0.0, 0, 0.0
+def _glyph(crop, filled, w, h):
+    """圆里的蓝字: (字宽 / 直径, 字高 / 直径, 块数, 中心横向偏移 / 直径)。见 GLYPH_R 的注。"""
+    inner = cv2.erode(filled, np.ones((3, 3), np.uint8), iterations=max(1, w // 20))
+    ink = ((crop[:, :, 2] < GLYPH_R) & (inner == 1)).astype(np.uint8)
+    total = int(ink.sum())
+    if total < 4:
+        return 0.0, 0.0, 0, 0.0
+    n, lab, st, _c = cv2.connectedComponentsWithStats(ink, 8)
+    keep = [j for j in range(1, n) if st[j][4] >= 0.05 * total]
+    ys, xs = np.nonzero(np.isin(lab, keep))
     gw, gh = xs.max() - xs.min() + 1, ys.max() - ys.min() + 1
-    n, _l, st, _c = cv2.connectedComponentsWithStats(hole.astype(np.uint8), 8)
-    parts = sum(1 for j in range(1, n) if st[j][4] >= 0.01 * len(xs))
-    return gh / gw, parts, (xs.mean() - w / 2) / w
+    return gw / w, gh / h, len(keep), (xs.mean() - w / 2) / w
 
 
 def check(bgr) -> dict:
@@ -120,12 +130,13 @@ def check(bgr) -> dict:
         fw, fa, hole = _shape(lab, k, x, y, w, h, area)
         if (abs(cx - 0.5) <= DISK_CX and DISK_D[0] <= d <= DISK_D[1] and DISK_TOP[0] <= top <= DISK_TOP[1]
                 and DISK_WHITE[0] <= fw <= DISK_WHITE[1] and DISK_FILLED[0] <= fa <= DISK_FILLED[1]):
-            hw, parts, off = _glyph(hole, w, h)
+            filled = (hole | (lab[y:y + h, x:x + w] == k)).astype(np.uint8)
+            gw, gh, parts, off = _glyph(roi[y:y + h, x:x + w], filled, w, h)
             out["disk"] = f"cx {cx:.3f} top {top:.3f} d {d:.3f} white {fw:.2f} filled {fa:.2f}"
-            out["glyph"] = f"h/w {hw:.2f} parts {parts} off {off:+.2f}"
-            if hw >= BANG_HW and parts >= BANG_PARTS:
+            out["glyph"] = f"w {gw:.3f} h {gh:.3f} parts {parts} off {off:+.3f}"
+            if gh >= GLYPH_MIN_H and gw <= BANG_MAX_W:
                 out.update(verdict="Suspicious", kind="到账失败")
-            elif CLOCK_HW[0] <= hw <= CLOCK_HW[1]:
+            elif gh >= GLYPH_MIN_H and CLOCK_W[0] <= gw <= CLOCK_W[1] and parts == 1:
                 out.update(verdict="Suspicious", kind="提交成功")
             else:
                 out.update(kind="实心圆里认不出")
