@@ -21,7 +21,14 @@ r"""蓝图页头的图标判状态(纯看图, 不做 OCR): 到账失败 / 提交
         找到, 圆里蓝字 字宽 0.19~0.34 直径、一块(时钟)   -> Suspicious(可选), 提交成功 还没到账
         找到, 圆里认不出                          -> CannotDetermine, 记下来
     没找到实心圆, 找到成功页标题左边的空心细圈     -> Ok
+    蓝图上都没有, 但卡片里是实心绿圆 + 白色时钟     -> Suspicious(可选), 等待对方领取(10/17 加, 见 GREEN_* 的注)
     都没有(通知条盖住了页头等)                     -> CannotDetermine
+  白图(页头 5%~20% 平均色三个通道都 > 200), 10/17 加, 见 AMOUNT_* 的注:
+    金额下面橙字(处理中 / 等待对方领取)            -> Suspicious(可选), 白图未完成
+    金额下面红字(已全额退款)                       -> Suspicious, 白图已全额退款
+    金额上面是"退"字头像(退款成功的记录)           -> Suspicious, 白图退款记录
+    以上三条只在支付宝账单详情卡片上判, 别的页面(平台收银台等)记 白图异常但不是支付宝卡片, CannotDetermine
+    都没有 -> CannotDetermine, 白图没看出异常(白图上不说 Ok: 交易关闭 这类灰字分不出来)
 ★ 授权成功 / 代付成功 的页头和成功页一模一样, 只能靠字分(status_scan)。
 ★ 通知条盖住页头的(1.8 万张里 8 张 到账失败 有 1 张), 这里判不了, 交给 status_scan(读 资金将原路返回)。
 
@@ -75,6 +82,49 @@ RING_D = (0.025, 0.065)
 RING_WHITE = (0.05, 0.30)
 RING_FILLED = (0.68, 0.86)
 
+# ---- 10/17 加: 等待对方领取(蓝图 转账详情页: 蓝色顶栏 + 白卡片, 卡片里一个实心绿圆, 圆里白色时钟) ----
+#   样本 17 张(1.8 万张里 3 张 + 没找到图标的 2,000 张里 14 张): 绿圆圆心 0.500 W, 直径 0.157~0.172 W, 圆顶 0.161~0.172 H,
+#   填满占外接框 0.78~0.79; 圆里白色时钟 字宽 0.220~0.229 字高 0.424~0.430 直径、一块(过 3 种压缩缩放 0.203~0.237 / 0.393~0.441);
+#   顶栏(2%~8% 高度)是支付宝蓝。微信支付成功页也是大绿圆(圆里打勾), 但顶栏不是蓝的, 字也不是时钟。
+GREEN_ROI = (0.05, 0.40)
+GREEN_D = (0.12, 0.22)
+GREEN_TOP = (0.10, 0.25)
+GREEN_FILLED = (0.70, 0.86)
+GREEN_GLYPH_W = (0.17, 0.30)
+GREEN_GLYPH_H = (0.33, 0.50)
+# ---- 10/17 加: 白图账单详情(页头白) ----
+#   金额(卡片里最大的一行黑字, 12%~40% 高度、横向居中; 1.8 万张里的金额在 16%~33%)下面那行状态字:
+#     处理中 / 等待对方领取 是橙字, 已全额退款 是红字; 交易成功 / 退款成功 是灰字。
+#   量 金额下面 0.15~1.4 个金额字高、金额中心左右 0.3 W 里的 橙 / 红 像素数 / 金额字高^2(1.8 万张里的样本):
+#     处理中 橙 0.32~0.35   等待对方领取 橙 0.35~0.70   已全额退款 红 0.54~0.55(橙 0)   退款成功 / 交易成功 0
+#   本地 9,621 张(拼音账单详情 7,500 张为主)判出来的逐张看过, 都对; 样本 + 400 张正常白图过 10 种压缩缩放:
+#     正常白图 0 次判可疑; 未完成 / 已全额退款 / 退款记录 压得狠了掉成判不了, 不会认错种类; 等待对方领取 绿圆 每种都 19/19
+#   退款成功 的记录看头像: 金额上面居中一个蓝色实心圆, 圆里白色"退"字(TUI_REF), 和默认头像(蓝圆里白色人形)比形状:
+#     退款记录 15/17 张 IoU 0.83~1.00(1 张头像被屏幕顶切掉 0.55、1 张没有退字头像), 人形头像 0.39~0.48
+#   ★ 这两条只在支付宝账单详情的卡片上判(page_type.card_gate 是 A / A0): 平台收银台这类页面金额下面也常有红字。
+#     card_gate 慢, 只在要判可疑的时候才量。
+AMOUNT_ROI = (0.12, 0.40)       # 从 12% 起: 拼音页顶栏(返回箭头 + 拼音标题, 0.08~0.11)比金额字还高, 会被当成金额
+AMOUNT_MAX_W = 0.60             # 金额那一行不会超过 0.6 页宽(顶栏那种整行的不是)
+AMOUNT_DARK = 100               # 金额黑字: 三个通道最大值 < 100
+AMOUNT_H = (0.012, 0.05)        # 一个字的高 占页高
+WARM_MIN = 0.10                 # 橙 + 红 像素 / 金额字高^2 >= 这个: 金额下面是彩色状态字
+TUI_IOU = 0.70
+TUI_N = 32
+TUI_REF = [
+    "................................", "................................", "................................", "................................",
+    "................................", "................................", "................................", "................................",
+    "........##...##########.........", "........###..##########.........", ".........##..###.....##.........", ".........##..##########.........",
+    ".............##########.........", ".......#####.###.....##.........", ".......#####.##########.........", "........####.###########........",
+    ".........###.###..#...##........", ".........###.###.#######........", ".........###.###.######.........", ".........###.######.####........",
+    "........####.#####...####.......", ".......########........##.......", ".......###.##############.......", ".......##...#############.......",
+    "................................", "................................", "................................", "................................",
+    "................................", "................................", "................................", "................................",
+]
+_TUI = np.array([[c == "#" for c in row] for row in TUI_REF])
+# 判可疑的种类; flagged-only 时 icon.csv 只写这些和下面几种判不了的
+SUSPICIOUS_KINDS = ("到账失败", "提交成功", "等待对方领取", "白图未完成", "白图已全额退款", "白图退款记录")
+KEEP_KINDS = ("实心圆里认不出", "没找到图标", "白图异常但不是支付宝卡片")
+
 KEYS = ["path", "W", "H", "verdict", "kind", "disk", "glyph", "secs", "src"]
 
 
@@ -107,14 +157,160 @@ def _glyph(crop, filled, w, h):
     return gw / w, gh / h, len(keep), (xs.mean() - w / 2) / w
 
 
+def _filled(lab, k, x, y, w, h):
+    comp = (lab[y:y + h, x:x + w] == k).astype(np.uint8)
+    filled = comp.copy()
+    cnts, _ = cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(filled, cnts, -1, 1, -1)
+    return filled
+
+
+def green_waiting(bgr):
+    """蓝图 转账详情页的 等待对方领取(实心绿圆里白色时钟)。返回 (圆的说明, 字的说明) 或 None。"""
+    H, W = bgr.shape[:2]
+    b, g, r = bgr[int(H * 0.02):int(H * 0.08)].reshape(-1, 3).mean(0)
+    if not (b > 150 and b > r + 60):
+        return None
+    y0 = int(H * GREEN_ROI[0])
+    roi = bgr[y0:int(H * GREEN_ROI[1])]
+    ri = roi.astype(np.int16)
+    green = ((ri[:, :, 1] > 140) & (ri[:, :, 1] - ri[:, :, 2] > 60) & (ri[:, :, 1] - ri[:, :, 0] > 30)).astype(np.uint8)
+    n, lab, st, _c = cv2.connectedComponentsWithStats(green, 8)
+    for k in range(1, n):
+        x, y, w, h, area = (int(v) for v in st[k])
+        d, cx, top = w / W, (x + w / 2) / W, (y + y0) / H
+        if (abs(cx - 0.5) > DISK_CX or not (GREEN_D[0] <= d <= GREEN_D[1]) or not (GREEN_TOP[0] <= top <= GREEN_TOP[1])
+                or not (DISK_ASPECT[0] <= w / max(h, 1) <= DISK_ASPECT[1])):
+            continue
+        filled = _filled(lab, k, x, y, w, h)
+        fa = float(filled.sum()) / (w * h)
+        if not (GREEN_FILLED[0] <= fa <= GREEN_FILLED[1]):
+            continue
+        inner = cv2.erode(filled, np.ones((3, 3), np.uint8), iterations=max(1, w // 20))
+        ink = ((roi[y:y + h, x:x + w].min(2) > 200) & (inner == 1)).astype(np.uint8)       # 圆里的白字
+        total = int(ink.sum())
+        if total < 4:
+            continue
+        m, gl, gs, _c2 = cv2.connectedComponentsWithStats(ink, 8)
+        keep = [j for j in range(1, m) if gs[j][4] >= 0.05 * total]
+        ys, xs = np.nonzero(np.isin(gl, keep))
+        gw, gh = (xs.max() - xs.min() + 1) / w, (ys.max() - ys.min() + 1) / h
+        if GREEN_GLYPH_W[0] <= gw <= GREEN_GLYPH_W[1] and GREEN_GLYPH_H[0] <= gh <= GREEN_GLYPH_H[1] and len(keep) == 1:
+            return (f"green cx {cx:.3f} top {top:.3f} d {d:.3f} filled {fa:.2f}",
+                    f"w {gw:.3f} h {gh:.3f} parts {len(keep)} off {(xs.mean() - w / 2) / w:+.3f}")
+    return None
+
+
+def amount_row(bgr):
+    """白图卡片里的金额(12%~40% 高度里字最高、横向居中、宽 0.12~0.6 页宽、至少 3 个字的黑字行)。返回 (上, 下, 左, 右) 或 None。"""
+    H, W = bgr.shape[:2]
+    y0 = int(H * AMOUNT_ROI[0])
+    roi = bgr[y0:int(H * AMOUNT_ROI[1])]
+    dark = (roi.max(2) < AMOUNT_DARK).astype(np.uint8)
+    n, _lab, st, _c = cv2.connectedComponentsWithStats(dark, 8)
+    comps = [tuple(int(v) for v in st[k]) for k in range(1, n)
+             if AMOUNT_H[0] * H <= st[k][3] <= AMOUNT_H[1] * H and st[k][2] <= 0.12 * W]
+    rows = []                                   # [左, 上, 右, 下, 字数, 最高的字]
+    for x, y, w, h, _a in sorted(comps, key=lambda c: c[1]):
+        for r in rows:
+            if min(r[3], y + h) - max(r[1], y) > 0.5 * min(h, r[3] - r[1]):
+                r[0], r[1], r[2], r[3] = min(r[0], x), min(r[1], y), max(r[2], x + w), max(r[3], y + h)
+                r[4] += 1
+                r[5] = max(r[5], h)
+                break
+        else:
+            rows.append([x, y, x + w, y + h, 1, h])
+    cand = [r for r in rows if r[4] >= 3 and 0.35 <= (r[0] + r[2]) / 2 / W <= 0.65 and 0.12 * W <= r[2] - r[0] <= AMOUNT_MAX_W * W]
+    if not cand:
+        return None
+    r = max(cand, key=lambda r: r[5])
+    return r[1] + y0, r[3] + y0, r[0], r[2]
+
+
+def status_line(bgr, row):
+    """金额下面那行的 (橙, 红) 像素 / 金额字高^2。"""
+    H, W = bgr.shape[:2]
+    a0, a1, x0, x1 = row
+    h = a1 - a0
+    cx = (x0 + x1) // 2
+    band = bgr[a1 + int(0.15 * h):min(H, a1 + int(1.4 * h)), max(0, cx - int(0.3 * W)):min(W, cx + int(0.3 * W))].astype(np.int16)
+    b, g, r = band[:, :, 0], band[:, :, 1], band[:, :, 2]
+    warm = (r > 180) & (r - b > 90) & (r - g > 40)
+    # 橙 / 红 按 G - B 分, 不按 G 的高低: JPEG 把红字和白底混成粉色(255,140,140)时 G 会升到 100 以上, 但 G ≈ B;
+    #   橙字(255,128,0)混白以后(255,190,128) G 仍比 B 高 60 左右。按 G 的高低分, 已全额退款 压过以后全被认成橙字(10/17 量过)
+    orange = warm & (g - b >= 40)
+    return float(orange.sum()) / (h * h), float((warm & ~orange).sum()) / (h * h)
+
+
+def tui_iou(bgr, row):
+    """金额上面居中的蓝色实心圆头像, 圆里白字和"退"字模板的 IoU; 没有这种头像返回 None。"""
+    H, W = bgr.shape[:2]
+    y0 = max(0, row[0] - int(0.13 * H))
+    roi = bgr[y0:row[0]]
+    ri = roi.astype(np.int16)
+    blue = ((ri[:, :, 0] > 190) & (ri[:, :, 0] - ri[:, :, 2] > 110) & (ri[:, :, 1] > 90) & (ri[:, :, 1] < 190)).astype(np.uint8)
+    n, lab, st, _c = cv2.connectedComponentsWithStats(blue, 8)
+    for k in range(1, n):
+        x, y, w, h, _a = (int(v) for v in st[k])
+        if w < 0.04 * W or abs((x + w / 2) / W - 0.5) > 0.05 or not (DISK_ASPECT[0] <= w / max(h, 1) <= DISK_ASPECT[1]):
+            continue
+        filled = _filled(lab, k, x, y, w, h)
+        if float(filled.sum()) / (w * h) < 0.65:
+            continue
+        gray = cv2.resize(cv2.cvtColor(roi[y:y + h, x:x + w], cv2.COLOR_BGR2GRAY), (TUI_N, TUI_N), interpolation=cv2.INTER_AREA)
+        disk = cv2.resize(filled * 255, (TUI_N, TUI_N), interpolation=cv2.INTER_AREA) > 127
+        inner = cv2.erode(disk.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=2) == 1
+        m = (gray > 200) & inner
+        return float((m & _TUI).sum()) / max(1, int((m | _TUI).sum()))
+    return None
+
+
+def _alipay_card(bgr) -> bool:
+    """支付宝账单详情的卡片(page_type.card_gate 是 A / A0)。慢, 只在要判可疑时调。"""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import page_type as pt
+    return pt.card_gate(bgr)[0] in ("A", "A0")
+
+
+def _white(out, bgr):
+    row = amount_row(bgr)
+    if row is None:
+        out["kind"] = "白图找不到金额"
+        return out
+    H = bgr.shape[0]
+    orange, red = status_line(bgr, row)
+    iou = None
+    kind = ""
+    if orange + red >= WARM_MIN:
+        kind = "白图已全额退款" if red > orange else "白图未完成"
+    else:
+        iou = tui_iou(bgr, row)
+        if iou is not None and iou >= TUI_IOU:
+            kind = "白图退款记录"
+    out["disk"] = f"amount y {row[0] / H:.3f}-{row[1] / H:.3f}" + (f" tui_iou {iou:.2f}" if iou is not None else "")
+    out["glyph"] = f"orange {orange:.3f} red {red:.3f}"
+    if not kind:
+        out["kind"] = "白图没看出异常"
+    elif _alipay_card(bgr):
+        out.update(verdict="Suspicious", kind=kind)
+    else:
+        out["kind"] = "白图异常但不是支付宝卡片"
+        out["glyph"] += f" ({kind})"
+    return out
+
+
 def check(bgr) -> dict:
-    """-> {verdict: Ok / Suspicious / CannotDetermine, kind: 到账失败 / 提交成功 / 成功 / ..., disk, glyph}"""
+    """-> {verdict: Ok / Suspicious / CannotDetermine, kind: 到账失败 / 提交成功 / 等待对方领取 / 白图未完成 / 白图已全额退款 /
+    白图退款记录 / 成功 / ..., disk, glyph}"""
     H, W = bgr.shape[:2]
     out = {"verdict": "CannotDetermine", "kind": "", "disk": "", "glyph": ""}
     if W < 300 or H < 400:
         out["kind"] = "图太小"
         return out
     if not blue_header(bgr):
+        b, g, r = bgr[int(H * 0.05):int(H * 0.20)].reshape(-1, 3).mean(0)
+        if min(b, g, r) > 200:
+            return _white(out, bgr)
         out["kind"] = "不是蓝图"
         return out
     y0 = int(H * ROI[0])
@@ -146,6 +342,10 @@ def check(bgr) -> dict:
             ring = f"cx {cx:.3f} top {top:.3f} d {d:.3f} white {fw:.2f} filled {fa:.2f}"
     if ring:
         out.update(verdict="Ok", kind="成功", disk=ring)
+        return out
+    gw_ = green_waiting(bgr)
+    if gw_:
+        out.update(verdict="Suspicious", kind="等待对方领取", disk=gw_[0], glyph=gw_[1])
     else:
         out["kind"] = "没找到图标"
     return out
@@ -207,7 +407,7 @@ def main() -> None:
         w = csv.DictWriter(f, fieldnames=KEYS, extrasaction="ignore")
         w.writeheader()
         w.writerows(r for r in rows if not a.flagged_only
-                    or not (r.get("verdict") == "Ok" or r.get("kind") == "不是蓝图"))
+                    or r.get("verdict") == "Suspicious" or r.get("kind") in KEEP_KINDS)
     os.replace(tmp, a.out / "icon.csv")
     c = Counter(f"{x['verdict']}/{x['kind']}" for x in rows)
     lines = ["=" * 70, f"  蓝图页头图标 status_icon   图 {len(rows):,} 张   {wall:.0f} 秒   {len(rows) / max(wall, 1e-9):.1f} 张/秒", "=" * 70]
