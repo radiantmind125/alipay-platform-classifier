@@ -108,6 +108,15 @@ AMOUNT_MAX_W = 0.60             # 金额那一行不会超过 0.6 页宽(顶栏�
 AMOUNT_DARK = 100               # 金额黑字: 三个通道最大值 < 100
 AMOUNT_H = (0.012, 0.05)        # 一个字的高 占页高
 WARM_MIN = 0.10                 # 橙 + 红 像素 / 金额字高^2 >= 这个: 金额下面是彩色状态字
+# 10/17 白图池 137.9 万张跑完 OCR 核对后加: 彩色字的宽度(笔画连成行以后的外接框宽 / 金额字高)按字数分得很开:
+#   处理中(3 个字) 1.73~1.76   已全额退款(5 个字) 2.96~2.97   等待对方领取(6 个字) 3.51~3.80   等待付款(4 个字, 拼音字体) 2.06~2.12
+#   每个字约 0.59 个金额字高; 字高 0.51~0.70 个金额字高(拼音字体连上头顶的拼音到 0.87); 横向在金额正下方(偏 -0.02 W)。
+#   淘宝这类商户付款的 支付成功 交易成功 也是橙字, 和 等待付款 一样 4 个字, 分不开, 一律判不了; 浮窗 / 贴纸 / 印章的宽高也对不上。
+#   橙字只认 3 个字或 6 个字, 红字只认 5 个字, 别的记 白图彩色字不认识(CannotDetermine)。
+WARM_ORANGE_W = ((1.45, 1.95), (3.10, 4.00))   # JPEG 压过以后线条变细, 宽会缩 0.1~0.2
+WARM_RED_W = (2.70, 3.20)
+WARM_H = (0.30, 1.00)
+WARM_CX = 0.05
 TUI_IOU = 0.70
 TUI_N = 32
 TUI_REF = [
@@ -123,7 +132,7 @@ TUI_REF = [
 _TUI = np.array([[c == "#" for c in row] for row in TUI_REF])
 # 判可疑的种类; flagged-only 时 icon.csv 只写这些和下面几种判不了的
 SUSPICIOUS_KINDS = ("到账失败", "提交成功", "等待对方领取", "白图未完成", "白图已全额退款", "白图退款记录")
-KEEP_KINDS = ("实心圆里认不出", "没找到图标", "白图异常但不是支付宝卡片")
+KEEP_KINDS = ("实心圆里认不出", "没找到图标", "白图异常但不是支付宝卡片", "白图彩色字不认识")
 
 KEYS = ["path", "W", "H", "verdict", "kind", "disk", "glyph", "secs", "src"]
 
@@ -228,18 +237,31 @@ def amount_row(bgr):
 
 
 def status_line(bgr, row):
-    """金额下面那行的 (橙, 红) 像素 / 金额字高^2。"""
+    """金额下面那行彩色字: (橙, 红 像素 / 金额字高^2, 宽 / 金额字高, 高 / 金额字高, 中心横向偏移 / 页宽)。没有彩色字时后三个是 0。"""
     H, W = bgr.shape[:2]
     a0, a1, x0, x1 = row
     h = a1 - a0
     cx = (x0 + x1) // 2
-    band = bgr[a1 + int(0.15 * h):min(H, a1 + int(1.4 * h)), max(0, cx - int(0.3 * W)):min(W, cx + int(0.3 * W))].astype(np.int16)
+    by0, bx0 = a1 + int(0.15 * h), max(0, cx - int(0.3 * W))
+    band = bgr[by0:min(H, a1 + int(1.4 * h)), bx0:min(W, cx + int(0.3 * W))].astype(np.int16)
     b, g, r = band[:, :, 0], band[:, :, 1], band[:, :, 2]
     warm = (r > 180) & (r - b > 90) & (r - g > 40)
     # 橙 / 红 按 G - B 分, 不按 G 的高低: JPEG 把红字和白底混成粉色(255,140,140)时 G 会升到 100 以上, 但 G ≈ B;
     #   橙字(255,128,0)混白以后(255,190,128) G 仍比 B 高 60 左右。按 G 的高低分, 已全额退款 压过以后全被认成橙字(10/17 量过)
     orange = warm & (g - b >= 40)
-    return float(orange.sum()) / (h * h), float((warm & ~orange).sum()) / (h * h)
+    o, rd = float(orange.sum()) / (h * h), float((warm & ~orange).sum()) / (h * h)
+    total = int(warm.sum())
+    if total < 4:
+        return o, rd, 0.0, 0.0, 0.0
+    # 一行字的笔画先横向连起来(闭运算, 核宽 = 金额字高 / 6), 再取面积 >= 全部 5% 的块合起来的外接框
+    joined = cv2.morphologyEx(warm.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, max(3, h // 6)), np.uint8))
+    n, _lab, st, _c = cv2.connectedComponentsWithStats(joined, 8)
+    comps = [st[j] for j in range(1, n) if st[j][4] >= 0.05 * total]
+    if not comps:
+        return o, rd, 0.0, 0.0, 0.0
+    xs0, xs1 = min(int(c[0]) for c in comps), max(int(c[0] + c[2]) for c in comps)
+    ys0, ys1 = min(int(c[1]) for c in comps), max(int(c[1] + c[3]) for c in comps)
+    return o, rd, (xs1 - xs0) / h, (ys1 - ys0) / h, (bx0 + (xs0 + xs1) / 2 - cx) / W
 
 
 def tui_iou(bgr, row):
@@ -278,19 +300,25 @@ def _white(out, bgr):
         out["kind"] = "白图找不到金额"
         return out
     H = bgr.shape[0]
-    orange, red = status_line(bgr, row)
+    orange, red, ww, wh, wcx = status_line(bgr, row)
     iou = None
     kind = ""
     if orange + red >= WARM_MIN:
-        kind = "白图已全额退款" if red > orange else "白图未完成"
+        line = WARM_H[0] <= wh <= WARM_H[1] and abs(wcx) <= WARM_CX
+        if red > orange:
+            kind = "白图已全额退款" if line and WARM_RED_W[0] <= ww <= WARM_RED_W[1] else "白图彩色字不认识"
+        else:
+            kind = "白图未完成" if line and any(lo <= ww <= hi for lo, hi in WARM_ORANGE_W) else "白图彩色字不认识"
     else:
         iou = tui_iou(bgr, row)
         if iou is not None and iou >= TUI_IOU:
             kind = "白图退款记录"
     out["disk"] = f"amount y {row[0] / H:.3f}-{row[1] / H:.3f}" + (f" tui_iou {iou:.2f}" if iou is not None else "")
-    out["glyph"] = f"orange {orange:.3f} red {red:.3f}"
+    out["glyph"] = f"orange {orange:.3f} red {red:.3f} ww {ww:.2f} wh {wh:.2f} wcx {wcx:+.3f}"
     if not kind:
         out["kind"] = "白图没看出异常"
+    elif kind == "白图彩色字不认识":
+        out["kind"] = kind
     elif _alipay_card(bgr):
         out.update(verdict="Suspicious", kind=kind)
     else:
