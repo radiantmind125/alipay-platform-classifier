@@ -24,10 +24,13 @@ r"""蓝图页头的图标判状态(纯看图, 不做 OCR): 到账失败 / 提交
     蓝图上都没有, 但卡片里是实心绿圆 + 白色时钟     -> Suspicious(可选), 等待对方领取(10/17 加, 见 GREEN_* 的注)
     都没有(通知条盖住了页头等)                     -> CannotDetermine
   白图(页头 5%~20% 平均色三个通道都 > 200), 10/17 加, 见 AMOUNT_* 的注:
-    金额下面橙字(处理中 / 等待对方领取)            -> Suspicious(可选), 白图未完成
-    金额下面红字(已全额退款)                       -> Suspicious, 白图已全额退款
+    金额下面一行橙字, 3 个字或 6 个字(处理中 领取中 待到账 / 等待对方领取 等待对方付款 等待确认收货)
+                                                    -> Suspicious, 白图未完成
+    金额下面一行红字, 5 个字(已全额退款)             -> Suspicious, 白图已全额退款
+    金额下面有彩色字但字数 / 位置对不上(支付成功 交易成功 等待付款 这类 4 个字、浮窗、印章)
+                                                    -> CannotDetermine, 白图彩色字不认识(见 WARM_ORANGE_W 的注)
     金额上面是"退"字头像(退款成功的记录)           -> Suspicious, 白图退款记录
-    以上三条只在支付宝账单详情卡片上判, 别的页面(平台收银台等)记 白图异常但不是支付宝卡片, CannotDetermine
+    判可疑的三条只在支付宝账单详情卡片上判, 别的页面(平台收银台等)记 白图异常但不是支付宝卡片, CannotDetermine
     都没有 -> CannotDetermine, 白图没看出异常(白图上不说 Ok: 交易关闭 这类灰字分不出来)
 ★ 授权成功 / 代付成功 的页头和成功页一模一样, 只能靠字分(status_scan)。
 ★ 通知条盖住页头的(1.8 万张里 8 张 到账失败 有 1 张), 这里判不了, 交给 status_scan(读 资金将原路返回)。
@@ -113,8 +116,13 @@ WARM_MIN = 0.10                 # 橙 + 红 像素 / 金额字高^2 >= 这个: �
 #   每个字约 0.59 个金额字高; 字高 0.51~0.70 个金额字高(拼音字体连上头顶的拼音到 0.87); 横向在金额正下方(偏 -0.02 W)。
 #   淘宝这类商户付款的 支付成功 交易成功 也是橙字, 和 等待付款 一样 4 个字, 分不开, 一律判不了; 浮窗 / 贴纸 / 印章的宽高也对不上。
 #   橙字只认 3 个字或 6 个字, 红字只认 5 个字, 别的记 白图彩色字不认识(CannotDetermine)。
-WARM_ORANGE_W = ((1.45, 1.95), (3.10, 4.00))   # JPEG 压过以后线条变细, 宽会缩 0.1~0.2
-WARM_RED_W = (2.70, 3.20)
+# 10/17 step 30 以后改: 宽和高用宽松的暖色(R > 150, R - B > 40, R - G > 15)量, 有没有彩色字、橙还是红仍用严格的暖色。
+#   严格的暖色在 宽 360 + JPEG 60、缩一半 + JPEG 40 下丢掉浅的笔画, 4 个字的 支付成功 量成 1.55~1.94, 掉进 3 个字的范围;
+#   宽松的量法过 10 种压缩缩放(原图 + 9 种)都稳: 3 个字 1.48~1.91, 4 个字 2.25 以上(拼音字体 2.03~2.21),
+#   6 个字 3.14~3.86, 红字 已全额退款 2.85~3.04(拼音字体 2.56~2.78), 红字 交易成功 最大 2.48。
+#   界线都偏向"认不出": 3 个字上限 1.95, 红字下限 2.60(拼音细体 已全额退款 有一部分判不了)。
+WARM_ORANGE_W = ((1.40, 1.95), (3.05, 3.95))
+WARM_RED_W = (2.60, 3.20)
 WARM_H = (0.30, 1.00)
 WARM_CX = 0.05
 TUI_IOU = 0.70
@@ -250,11 +258,13 @@ def status_line(bgr, row):
     #   橙字(255,128,0)混白以后(255,190,128) G 仍比 B 高 60 左右。按 G 的高低分, 已全额退款 压过以后全被认成橙字(10/17 量过)
     orange = warm & (g - b >= 40)
     o, rd = float(orange.sum()) / (h * h), float((warm & ~orange).sum()) / (h * h)
-    total = int(warm.sum())
-    if total < 4:
+    # 量宽高用宽松的暖色: 压缩以后浅的笔画还在, 宽不会缩(见 WARM_ORANGE_W 上面的说明)
+    loose = (r > 150) & (r - b > 40) & (r - g > 15)
+    total = int(loose.sum())
+    if int(warm.sum()) < 4 or total < 4:
         return o, rd, 0.0, 0.0, 0.0
     # 一行字的笔画先横向连起来(闭运算, 核宽 = 金额字高 / 6), 再取面积 >= 全部 5% 的块合起来的外接框
-    joined = cv2.morphologyEx(warm.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, max(3, h // 6)), np.uint8))
+    joined = cv2.morphologyEx(loose.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, max(3, h // 6)), np.uint8))
     n, _lab, st, _c = cv2.connectedComponentsWithStats(joined, 8)
     comps = [st[j] for j in range(1, n) if st[j][4] >= 0.05 * total]
     if not comps:
@@ -379,6 +389,14 @@ def check(bgr) -> dict:
     return out
 
 
+def _decode_truncated(buf):
+    """结尾少了 FFD9 的 JPEG(上传没传完): OpenCV 4.11 读不了, C# 用的 OpenCvSharp 4.10 照样读出来。
+    补上 FFD9 再解一次(和 page_type.decode、timeline_scan 一样); 10/17 在 4 张这种图上和 C# 逐项比过, 一模一样。"""
+    if buf.size > 2 and buf[0] == 0xFF and buf[1] == 0xD8:
+        return cv2.imdecode(np.concatenate([buf, np.array([0xFF, 0xD9], np.uint8)]), cv2.IMREAD_COLOR)
+    return None
+
+
 def work(task):
     path, src = task
     t0 = time.time()
@@ -386,6 +404,8 @@ def work(task):
     try:
         buf = np.fromfile(path, np.uint8)
         bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR) if buf.size else None
+        if bgr is None and buf.size:
+            bgr = _decode_truncated(buf)
         if bgr is None:
             r.update(verdict="CannotDetermine", kind="读不出")
         else:

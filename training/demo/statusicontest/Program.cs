@@ -16,7 +16,7 @@ namespace Ssp.StatusIconTest
     ///
     /// 用法:
     ///   cd training/demo/statusicontest
-    ///   dotnet run -c Release -- 图或目录 [图或目录 ...] [--out 结果.csv]
+    ///   dotnet run -c Release -- 图或目录 [图或目录 ...] [--list 路径清单.txt] [--out 结果.csv]
     ///
     ///   csv 的列和 training/status_icon.py 对得上(verdict kind 圆的位置大小 圆里蓝字的形状), 可以逐行比两边一不一样。
     ///   退出码: 0 = 跑完; 2 = 参数不对。
@@ -33,6 +33,8 @@ namespace Ssp.StatusIconTest
             for (int i = 0; i < args.Length; i++)
             {
                 if (args[i] == "--out" && i + 1 < args.Length) outCsv = args[++i];
+                else if (args[i] == "--list" && i + 1 < args.Length)      // 一行一个图的路径(UTF-8)
+                    inputs.AddRange(File.ReadAllLines(args[++i], Encoding.UTF8).Select(l => l.Trim().TrimStart('﻿')).Where(l => l.Length > 0));
                 else inputs.Add(args[i]);
             }
             if (inputs.Count == 0)
@@ -76,7 +78,8 @@ namespace Ssp.StatusIconTest
             if (outCsv != null)
             {
                 var ci = CultureInfo.InvariantCulture;
-                var sb = new StringBuilder("path,W,H,verdict,kind,disk,ring,cx,top,d,white,filled,gw,gh,parts,off,reason\n");
+                var sb = new StringBuilder("path,W,H,verdict,kind,disk,ring,cx,top,d,white,filled,gw,gh,parts,off," +
+                                           "amount,atop,abottom,orange,red,lw,lh,loff,tui,card,reason\n");
                 foreach (var t in all)
                 {
                     var r = t.r;
@@ -85,7 +88,13 @@ namespace Ssp.StatusIconTest
                       .Append(r.CenterX.ToString("F4", ci)).Append(',').Append(r.Top.ToString("F4", ci)).Append(',')
                       .Append(r.Diameter.ToString("F4", ci)).Append(',').Append(r.WhiteFill.ToString("F4", ci)).Append(',')
                       .Append(r.FilledFill.ToString("F4", ci)).Append(',').Append(r.GlyphWidth.ToString("F4", ci)).Append(',').Append(r.GlyphHeight.ToString("F4", ci)).Append(',')
-                      .Append(r.GlyphParts).Append(',').Append(r.GlyphOffset.ToString("F4", ci)).Append(",\"").Append(r.Reason.Replace("\"", "'")).Append("\"\n");
+                      .Append(r.GlyphParts).Append(',').Append(r.GlyphOffset.ToString("F4", ci)).Append(',')
+                      // 白图: 金额行(占页高)、金额下面 橙 / 红、彩色字那行的宽高偏移、退字 IoU、卡片种类(全精度, 比两边用)
+                      .Append(r.AmountFound ? 1 : 0).Append(',').Append(r.AmountTop.ToString("R", ci)).Append(',').Append(r.AmountBottom.ToString("R", ci)).Append(',')
+                      .Append(r.Orange.ToString("R", ci)).Append(',').Append(r.Red.ToString("R", ci)).Append(',')
+                      .Append(r.LineWidth.ToString("R", ci)).Append(',').Append(r.LineHeight.ToString("R", ci)).Append(',').Append(r.LineOffset.ToString("R", ci)).Append(',')
+                      .Append(r.TuiIou.ToString("R", ci)).Append(',').Append(r.Card)
+                      .Append(",\"").Append(r.Reason.Replace("\"", "'")).Append("\"\n");
                 }
                 File.WriteAllText(outCsv, sb.ToString(), new UTF8Encoding(true));
                 Console.WriteLine($"  -> {outCsv}");
