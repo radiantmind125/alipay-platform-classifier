@@ -1,4 +1,4 @@
-r"""整页分类(第一版): 先判一张原图是哪一类页面, 再交给这一类自己的模型 —— 规则为主, OCR 关键词补规则分不开的。
+r"""整页分类(第二版): 先判一张原图是哪一类页面, 再交给这一类自己的模型 —— 规则为主, OCR 关键词补规则分不开的。
 
 为什么(2026-10-12)
 ------------------
@@ -16,11 +16,16 @@ r"""整页分类(第一版): 先判一张原图是哪一类页面, 再交给这�
 
 类别
 ----
-    B1 蓝图转账成功   B2 蓝图到账成功   B3 蓝图支付成功(含代付成功、付款成功)   B0 蓝图说不清
+    B1 蓝图转账成功   B2 蓝图到账成功   B3 蓝图支付成功(含代付成功、付款成功)
+    B4 蓝图异常页(v2: 到账失败 / 提交成功 / 等待对方领取, 钱没到)   B0 蓝图说不清(话费充值、授权成功、订单展示 ...)
     W1 账单详情(子类: 银行卡转账 / 转给个人 / 商户消费 / 收钱码 / 其它)
-    W2 转账凭证       W3 白底结果页(H5 支付成功、支付消息、付款给个人、红包 ...)
-    D  深色模式       X  非支付宝(微信、银行、平台、聊天 ...)   P 翻拍照片   U 说不清
-每张图另外记几个标记: 页头(蓝底/白底/其它)、深色、平整度、拼音、设备(按分辨率)、读到的标题。
+    W2 转账凭证(v2 子类: 页面截图 / 转账凭证图 / 转账回执 / 其它尺寸)
+    W3 白底结果页(H5 支付成功、支付成功、支付消息、聊天转账、帮我付、红包 ...)
+    W4 余额明细(v2: 余额明细详情页, 支付宝的另一个模板)
+    D  深色模式       X  非支付宝(微信、银行、平台、收款码图、聊天 ...)   P 翻拍照片   U 说不清
+每张图另外记几个标记: 页头(蓝底/白底/其它)、深色、平整度、拼音、设备(按分辨率)、读到的标题;
+v2 加 state: status_icon 只看图认出的异常页(到账失败 / 提交成功 / 等待对方领取 / 白图未完成 / 白图已全额退款 / 白图退款记录),
+白图的这三种照常分进 W1(模板一样), 只记在 state 里。
 
 判定顺序(便宜的在前, 能早停就早停)
 ------------------------------------
@@ -57,11 +62,28 @@ run2 人眼核过以后改的(10/13, 每类 48 格; 错的大头是 B0 / U / D)
 * >= 750 万像素的直接算照片(截图没有这么大); 横图 / 相机尺寸的平整度只量灰度 > 40 的地方(黑屋子里拍的四周压成一个灰度)
 * 同一个 GWCZ 编号的图在几个目录里重复(pinyin-all / pinyin_hits / suspect ...), 只留第一张
 
+v2(10/19): census 1.8 万张人眼核过的错(scratchpad census_verify), 每条新关键词都先在 census + 拼音库 + 本地 5.5 万行 OCR 字上
+查过会碰上哪些类(只碰上该碰的才加)
+* 蓝图: 异常页(到账失败 / 提交成功 / 等待对方领取)先按 status_icon 的页头图标定 B4, 图标看不到的按字定(abnormal_text);
+  census 8 张到账失败进了 B3、提交成功在 B2。没读到标题时: 收款码图 / 平台扫码收银台 -> X, 授权成功 / 订单展示 -> B0 子类,
+  右边 ¥ 那一行左边是 银行名 + 卡尾号 -> B2, 还定不下来再读 0.34~0.60(支付有礼 / 到账时间 / 半屏的到账成功)
+* 页头被盖住走蓝图那一路要上半截蓝 >= 0.30(0.18~0.30 的全是平台页 / 收款码 / 红包详情 / 浮窗; 真蓝图最低 0.36), 浮窗先判
+* 白底: 余额明细详情单独一类 W4(在"不是支付宝的字"之前); 支付消息列表在账单详情的规则之前; 账单详情 要有 账(订单详情不算);
+  完成 要单独一个框; 苹果状态栏的"◀ 支付宝"不算; 转账首页 / 交易中断 -> U; 标题和左边图标是微信绿的支付成功 -> X 微信
+  (census U 里 83 张); 没有金额、框很少的 支付成功 -> H5支付成功; 银行 App 的 付款户名 / 付款账号、微信 零钱提现 -> X
+* 账单详情子类: 余额充值 / 代充值 / 余额宝转入 / 退款转账 -> 其它(以前进了 商户消费 / 转给个人)
+* 转账凭证: 标题区是 转账凭证 的只读标题就定(这种页 v1 平均 25 秒一张, 占 census 四分之一的 CPU); 凭证图的尺寸放宽、按高宽比认
+* 深色: 平台页 / 微信分出去, 一点支付宝线索都没有的不算 D; 照片: 亮处不到 15% 的不用亮处的量法
+* --compare 上一版的 page_type.csv: 只出变了的 diff.csv 和联系表
+
 用法
 ----
     python training/page_type.py --src 目录或名单 [...] --out 输出目录 [--n 3000 --seed 1] [--workers 8] [--sheets 2] [--no-ocr]
+                                 [--compare 上一版的page_type.csv --diff-sheets 30]
     名单 = .txt(一行一个路径) 或 .csv(按 path / file / source 列找文件)
-输出: page_type.csv、summary.txt、sheets\<类别>_NN.png + .txt(格子编号 -> 路径)
+    ★ 要在同一批图上和上一版比, --src 直接给上一版的 page_type.csv(--n --seed 重抽时目录里的图一变, 抽到的就全变了)
+输出: page_type.csv、summary.txt、sheets\<类别>_NN.png + .txt(格子编号 -> 路径);
+      --compare 时另有 diff.csv、diff_sheets\diff_NN.png(每格写 上一版 -> 这一版)
 ★ 只读原图, 不改不挪。
 ★ 一张图出任何错都记成 U, 理由里写错误, 不会让整批停下来。
 """
@@ -91,23 +113,30 @@ sys.path.insert(0, str(HERE.parent / "src"))
 import arrow_scan  # noqa: E402
 import color_scan  # noqa: E402
 import pinyin_probe as pp  # noqa: E402
+import status_icon  # noqa: E402
 import timeline_scan  # noqa: E402
 from alipay_platform.bootstrap import resolution_platform  # noqa: E402
 from alipay_platform.metadata_seed import IPHONE_RESOLUTIONS  # noqa: E402
 
 EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-NAMES = {"B1": "蓝图转账成功", "B2": "蓝图到账成功", "B3": "蓝图支付成功", "B0": "蓝图说不清",
-         "W1": "账单详情", "W2": "转账凭证", "W3": "白底结果页",
+NAMES = {"B1": "蓝图转账成功", "B2": "蓝图到账成功", "B3": "蓝图支付成功", "B4": "蓝图异常页", "B0": "蓝图说不清",
+         "W1": "账单详情", "W2": "转账凭证", "W3": "白底结果页", "W4": "余额明细",
          "D": "深色模式", "X": "非支付宝", "P": "翻拍照片", "U": "说不清"}
 DEVICE = {"ios": "苹果", "android": "安卓", "abstain": "说不清"}
 # 目录名是这些的不进(联系表、裁图), 只要整页原图
 SKIP_DIRS = {"sheets", "seg_input", "seg_label", "label", "input", "cmp", "__pycache__"}
 
-VOUCHER_W, VOUCHER_H = 1304, (1950, 2300)   # 支付宝"转账凭证"生成的图: 宽 1304, 高 2014~2042; 凭证编号折行的高 2122
+# 支付宝"转账凭证"生成的图: 宽 1304, 高 2014~2042(转出成功, 到银行卡) / 2114~2122(转账成功, 下面有 支付宝转账 到账特别快 + 二维码);
+#   v2: 还有一种二维码在灰框里的 1304x2386(census 一张), 上限放到 2450
+VOUCHER_W, VOUCHER_H = 1304, (1950, 2450)
+VOUCHER_RATIO = (1.45, 1.66)   # v2: 存下来又缩小 / 裁过的凭证图(宽 1112~1288, 高宽比 1.49~1.63; 手机截图都在 1.77 以上), 要有凭证的字才算
 # 中位灰度 < 这个算深色模式。★ 不用 color_scan 的 128: 本地 run1 量过, 真深色页是 0~36,
 #   128 以下还混进了弹窗把白页压暗的(97~127)、零花钱红包页(64), 它们走白底那一路
 DARK_MEDIAN = 60
-BLUE_TOP = 0.18            # 上半截支付宝蓝占比 >= 这个: 页头被通知条盖住的蓝图(和 split_blue_white 一样)
+BLUE_TOP = 0.18            # 上半截支付宝蓝占比 >= 这个: 先看是不是嵌在平台页里的浮窗(和 split_blue_white 一样)
+# v2(10/19): 页头不是蓝底的, 上半截蓝 >= 这个才走蓝图那一路(页头被通知条盖住)。census + 拼音库 + 本地 5.5 万行量过:
+#   0.18~0.30 的全是平台收银台、收款码图、红包详情、浮窗, 还有 1 张账单详情; 真蓝图被盖住的最低 0.36
+BLUE_TOP_ROUTE = 0.30
 OCR_W = 540                # 检测用的缩小宽度
 STATUS = 0.03              # 框中心在这个高度以上是状态栏, 不读
 MIN_BOX_H = 12             # 缩小图上框高 < 这个像素: 拼音那一行或者小字, 不读
@@ -141,8 +170,8 @@ ALIPAY_KW = ["账单详情", "创建时间", "付款方式", "订单号", "账�
              "账户余额", "储蓄卡", "信用卡", "通知TA", "完成", "下载支付宝", "验证姓名", "转账保障"]
 # 不是支付宝的: 微信账单的标签、银行 App、平台页、套图网站水印
 X_KW = ["微信支付", "财付通", "收单机构", "当前状态", "商户全称", "账单服务", "对订单有疑惑", "发起群收款",
-        "在此商户的交易", "申请电子凭证", "交易单号", "商户单号", "零钱通", "微信", "收支详情", "交易摘要",
-        "交易附言", "对方户名", "交易卡号", "手机银行", "存款详情", "收银台", "凭证已提交", "继续支付",
+        "在此商户的交易", "申请电子凭证", "交易单号", "商户单号", "零钱通", "微信", "交易摘要",
+        "交易附言", "对方户名", "交易卡号", "手机银行", "收银台", "凭证已提交", "继续支付",
         "tugaigai", "返回商家", "继续转账", "收款账号", "收款银行", "明细详情", "交易账户", "记账日", "交易地点",
         "存款通道", "交易币种", "交易对象", "可用余额", "动账提醒", "明细查询", "账户查询", "账户信息",
         "交易描述", "账户交易"]
@@ -150,7 +179,10 @@ X_KW = ["微信支付", "财付通", "收单机构", "当前状态", "商户全�
 # ★ 只认原样的: 允许错一个字时 网商银行 会认上 工商银行 / 招商银行, 转账单号 会认上 转账账号
 X_EXACT = ["转出账号", "转账路径", "超级网银", "转账渠道", "收款人户名", "流水号", "查看回执", "交易动向", "交易流水号",
            "网商银行", "微银行", "农信", "资金明细", "交易渠道", "收货信息", "实付款", "天猫店", "数字货币", "货币地址",
-           "提现金额", "支付来源", "平台客服", "转账单号", "所属账本", "微信向银行卡转账"]
+           "提现金额", "支付来源", "平台客服", "转账单号", "所属账本", "微信向银行卡转账",
+           # v2: 收支详情 / 存款详情 从 X_KW 挪过来只认原样: 错一个字时 收款详情(支付宝收钱码的收款详情页)两个都认上了(census 3 张);
+           #   付款户名 / 付款账号: 银行 App 的转账详情(census 一张农行的因此进了 W1)
+           "收支详情", "存款详情", "付款户名", "付款账号"]
 # ★ 收单机构 不算强的: 支付宝的商户消费账单详情也有这一行(本地实测)
 # ★ 不能放"存款方式": 允许错一个字的匹配会把"付款方式"也认成它(run1 之后实测把 40 多张支付宝深色页判成了非支付宝)
 # ★ 强的要原样读到才算: 允许错一个字时 "电信支付" 也算 微信支付(run2 里一张支付宝 H5 交电信费的页因此判成 X)
@@ -160,24 +192,48 @@ X_LATIN = ("tugai", "gaigai", "payeeobj", "ttlmessage")   # 套图网站水印�
 #   这类页常嵌一张支付宝截图(账单详情、转账成功浮窗), 支付宝的字总比平台的多。
 #   ★ 只认汉字: mclient.alipay.com/h5pay/cashierActivity 是支付宝自己的 H5 收银台, 拉丁字母里的 cashier 不算
 PLATFORM_KW = ["收银台", "收银苔", "银台", "拉单", "上传截图", "截图付款明细", "不予退款", "补款", "可能被冻结",
-               "凭证已提交", "我已付款", "取消订单"]
+               "凭证已提交", "我已付款", "取消订单",
+               # v2: census 核出来漏掉的平台页(上传付款截图 / 立即上传图片 的扫码收银台; 嵌了示例账单的存款说明页)
+               "上传付款截图", "上传转账截图", "否则无法到账", "账单示例图", "立即上传图片"]
+# v2: 收款码图(支付宝个人收款码海报)和平台扫码收银台: 蓝图那一路没读到标题时才认(census: 6 张收款码图 + 8 张收银台在 B0 / B1)。
+#   ★ 不能有标题也认: 支付成功页、账单详情的推荐卡片上也有 推荐使用支付宝(拼音库各 1 张)
+QR_RE = re.compile(r"推.?使用.?付.|推荐使用|打开支付宝.{0,3}扫一扫|扫码付款|收款姓名")
+# v2: 蓝图异常页(钱没到): status_icon 看页头图标定; 页头被盖住、图标看不到的, 按读到的字定(见 abnormal_text)
+BLUE_ABNORMAL = ("到账失败", "提交成功", "等待对方领取")
+# v2: 右边 ¥ 金额那一行左边是银行卡(银行名 + 卡尾号 4 位)的是到账成功一类(census 72 张 B2 每张都有, B3 一张没有)
+BANK_TAIL = re.compile(r"(银行|农信|信用社|农商|储蓄|邮政|村镇|信用联社|农料信)\d{4}")
 DEPOSIT_KW = ["类型存款", "存款方式", "存款账号", "存款金额", "预计到账总金额", "每日开门红"]   # 原样匹配, 见 X_STRONG 的注
 PLATFORM_ORDER = re.compile(r"(?<!家)订单号[A-Z]{2,}\d{8,}")   # 平台单号 GWCZ2085...; 支付宝的订单号全是数字
 TRADE_NO = re.compile(r"20\d{6}200040011")                    # 支付宝转账的交易号; run2 里只在支付宝页上出现
 AL_NOISE = re.compile(r"向支付宝|支付宝支付科技|支付宝中国网络技术|支付宝网络技术")   # 对方名字里的"支付宝", 不算支付宝的字
 W2_KW = ["凭证编号", "收款方姓名", "付款方账号", "收款方账号", "转账附言", "到账特别快", "转账回执", "向你转账",
-         "收方账户实际到账"]      # 凭证上那句"请以收方账户实际到账为准"(微信的凭证是"收款方账户实际入账")
+         "收方账户实际到账",      # 凭证上那句"请以收方账户实际到账为准"(微信的凭证是"收款方账户实际入账")
+         "收款人账号", "通知对方已转账"]   # v2: 转账回执卡片(通知对方已转账 ... XX向你转账 ... 收款人账号; census 一张因此进了 U)
+W2_TITLE = re.compile(r"转账.?凭证|转账凭|转宪证")   # v2: 标题区的 转账凭证(支付宝 转账凭证 页面截图的导航栏), 读坏的也认
 # ★ 红包页不能只认"红包"两个字: 账单详情的账单分类常是"转账红包", 蓝图的券也带红包(本地 400 张里 4 张因此判错)
-W3_KW = [("确认付款", "付款确认页"), ("支付消息", "支付消息"), ("付款给个人", "付款给个人"),
+# v2: census 里 确认付款 碰上的 4 张都是 帮我付(朋友的代付请求, 那句"实际金额以付款人确认付款时为准"), 先认 帮我付;
+#   ★ 确认付款 本身留着记 付款确认页: 本地有一张是 支付宝付款 还没付的确认页(订单信息 / 付款方式 / 确认付款 按钮)。
+#   帮对方充值、给孩子发的红包(红包已经发给孩子啦)census 在 U 里各一两张
+W3_KW = [("帮我付", "帮我付"), ("确认付款", "付款确认页"), ("支付消息", "支付消息"), ("付款给个人", "付款给个人"),
          ("加为好友", "聊天转账"), ("聊天更方便", "聊天转账"),           # 支付宝聊天里的转账气泡(转账成功 马上通知TA)
-         ("零花钱红包", "红包"), ("红包发送成功", "红包"), ("已发送至", "红包"), ("你的零花钱", "红包")]
-RED_KW = ["零花钱红包", "红包发送成功", "已发送至", "你的零花钱"]
+         ("零花钱红包", "红包"), ("红包发送成功", "红包"), ("已发送至", "红包"), ("你的零花钱", "红包"),
+         ("红包已经发给", "红包"), ("帮对方充值", "帮对方充值")]
+RED_KW = ["零花钱红包", "红包发送成功", "已发送至", "你的零花钱", "红包已经发给"]
+# v2: 支付消息列表(服务消息 > 支付消息): 卡片闸门会把它的卡片当成账单详情(census 8 张进了 W1)。认它的筛选条和统计条
+PAYMSG_RE = re.compile(r"支付消息|服务消息|统计支出|回顾\d*月支出")
+# v2: 支付宝 转账 首页(转到支付宝 / 转到银行卡 / 二维码转账 + 最近转账卡片): 卡片上的 到账成功 / 转账成功 不是结果页(census 2 张进了 W3)
+HOME_RE = re.compile(r"转到银行卡|转账记录|二维码转账|转到支付宝")
+# v2: 余额明细详情(余额那一页的明细: 关联账单 查看账单详情 / 可用余额 / 交易类型): 支付宝的另一个模板, 单独一类 W4
+#   (v1 只认标题, 标题被盖住的进了 W1; 正文里的 明细详情 / 资金明细 又让 census 一张进了 X)
+YUE_TITLE = re.compile(r"余额明细|明细详情|明細")
 # 支付宝 H5 支付成功页(浏览器里): 地址栏、下载条、页脚口号。字母不分大小写
 H5_KW = ["mclientalipay", "alipaycom", "支付宝付款", "下载支付宝", "便捷生活", "一点就好", "支付宝网页版", "支付宝官网",
          "app立即下载"]
 H5_LATIN = ("bianjieshenghuo", "yidianjiuhao")
 # 微信支付成功页下面那一段(0.75~0.92)的字: 页面上面字太少、读不出东西的时候看
-WX_LOW = ["返回商家", "摇一摇", "收单机构", "财付通"]
+WX_LOW = ["返回商家", "返回商户", "摇一摇", "收单机构", "财付通"]     # v2: 返回商户(繁体 返回商戶, norm 以后)
+WX_PAGE = re.compile(r"零钱提现|发起提现申请")     # v2: 微信 零钱提现 详情页(census 一张进了 W3 到账成功)
+DARK_PLATFORM = re.compile(r"投注|提现记录|出款中|利息宝|晋级VIP|申请提现")   # v2: 深色的博彩平台页(census D 里 2 张); 只在深色那一路用
 YEN = re.compile(r"[¥￥]\s*[\dUIZlOS]")     # ¥ 金额; 通知条压住半截的大金额常读成 ¥1UUUU / ¥IUUUU / ¥ZUUUU / ¥SUUUU
 SHOP_B3 = re.compile(r"有限公司|商家|电商|商城|超市|便利店|杂货|旗舰店|专营店")
 SHOP_W1 = re.compile(r"有限公司|公司|商行|店|超市|商城|便利|药房|餐饮|商家|电商")
@@ -259,9 +315,22 @@ def pinyin_code(latin: str):
     return None
 
 
-def alipay_hits(txt: str) -> list[str]:
-    """支付宝的字; 对方名字里的"支付宝"(向支付宝-xx、支付宝支付科技有限公司)先去掉。"""
-    return hits(AL_NOISE.sub("", txt), ALIPAY_KW)
+def zd_hit(t: str) -> bool:
+    """v2: 账单详情(标题)。v1 用 has 允许错任意一个字, 订单详情(店铺的订单页)也认上了(census 一张进了 W1);
+    现在要有 账单 / 账.详情 / 前面不是 订 的 单详情(账 读丢了或者读成 帐 的)。"""
+    return "账单详情" in t or bool(re.search(r"账单.情|账.详情|(?<!订)单详情", t))
+
+
+def alipay_hits(txt: str, items=None) -> list[str]:
+    """支付宝的字; 对方名字里的"支付宝"(向支付宝-xx、支付宝支付科技有限公司)先去掉。
+    v2: 账单详情 要过 zd_hit; 给了 items(读过的框)时, 完成 要单独一个框才算(census: 商城 H5 页"您的订单已完成支付"里的完成被当成了支付宝的字)。"""
+    t = AL_NOISE.sub("", txt)
+    out = hits(t, ALIPAY_KW)
+    if "账单详情" in out and not zd_hit(t):
+        out.remove("账单详情")
+    if "完成" in out and items is not None and not any(norm(b[4]) == "完成" for b in items):
+        out.remove("完成")
+    return out
 
 
 def platform_hit(txt: str, lat: str) -> str:
@@ -272,8 +341,10 @@ def platform_hit(txt: str, lat: str) -> str:
     m = PLATFORM_ORDER.search(txt)
     if m:
         return "平台单号" + m.group()[3:9]
-    if txt.count("存款") >= 2:
-        return f"存款 x{txt.count('存款')}"
+    # v2: 银行短信通知条上的"本机构吸收的本外币存款依照存款保险条例受到保护"不算(census 一张到账成功因此进了 X 平台页)
+    dep = re.sub(r"存款保险|本外币存款", "", txt).count("存款")
+    if dep >= 2:
+        return f"存款 x{dep}"
     if has(txt, "类型存款"):          # 拼音字体常读成 易型存款; 它不会和支付宝的字混(存款方式 会混 付款方式, 不能这样)
         return "类型存款"
     if "shouyintai" in lat:
@@ -632,7 +703,7 @@ class Reader:
 # ---------------------------------------------------------------- 分类
 
 def classify(path: str, use_ocr: bool) -> dict:
-    out = {"path": path, "W": "", "H": "", "cls": "U", "sub": "", "header": "", "dark": "", "flat": "",
+    out = {"path": path, "W": "", "H": "", "cls": "U", "sub": "", "state": "", "header": "", "dark": "", "flat": "",
            "pinyin": "", "device": "", "title": "", "reason": "", "card": "", "mode": "", "ocr": ""}
     bgr = decode(path)
     if bgr is None:
@@ -667,7 +738,11 @@ def classify(path: str, use_ocr: bool) -> dict:
     sz = f"{W}x{H}"
     if cue in ("横图", "相机尺寸"):
         # 只量灰度 > 40 的地方: 黑屋子里横着拍的屏, 四周黑成同一个灰度, 平整度 0、最多灰度占 0.37, 像截图(run2 判成了深色)
-        q2, mode2 = flatness(gray, PHOTO_MIN_GRAY), mode_share(gray, PHOTO_MIN_GRAY)
+        # v2: 亮处不到 15% 的(黑底视频截图上只有一行字)亮处只剩字的笔画, 量出来的平整度没意义, 用整张的(census P 一张)
+        if float((gray > PHOTO_MIN_GRAY).mean()) >= 0.15:
+            q2, mode2 = flatness(gray, PHOTO_MIN_GRAY), mode_share(gray, PHOTO_MIN_GRAY)
+        else:
+            q2, mode2 = q, mode
     if W * H >= PHOTO_MP:
         photo = f"{sz} 有 {W * H / 1e6:.1f} 百万像素, 手机 / 平板截图没有这么大"
     elif cue in ("横图", "相机尺寸") and (q2 >= PHOTO_Q or mode2 < PHOTO_MODE):
@@ -685,9 +760,18 @@ def classify(path: str, use_ocr: bool) -> dict:
     if (W, H) not in IPHONE_RESOLUTIONS:
         out["pinyin"] = pinyin_flag(gray, mode)
 
+    # v2: 异常页(钱没到 / 退回来了 / 还在处理), status_icon 只看图、便宜(蓝图几毫秒)。蓝图的三种在 _blue 里直接定 B4;
+    #   白图的三种照常分类(都是账单详情的模板), 只记在 state 里
+    st = status_icon.check(bgr)
+    if st["verdict"] == "Suspicious":
+        out["state"] = st["kind"]
+
     # 页头不是蓝的但上半截蓝很多: 通知条(白的、灰的)盖住了蓝图的页头, 或者弹窗把蓝图压暗了。
-    # 本地 run1 量过: 白底页头的账单详情上半截蓝最多 0.17, 这样的页面 0.18 以上的 9 张都是蓝图
-    is_blue = not dark and (head == "蓝底" or btop >= BLUE_TOP)
+    # 本地 run1 量过: 白底页头的账单详情上半截蓝最多 0.17。
+    # v2: 0.18 以上先看是不是平台页里嵌的浮窗; 走蓝图那一路要 0.30 以上(见 BLUE_TOP_ROUTE)
+    if not dark and head != "蓝底" and btop >= BLUE_TOP and inset_window(small):
+        return _x(out, f"页头被盖住, 上半截蓝 {btop:.2f}, 蓝色结果页是浮窗(两边不是蓝的), 像平台页里嵌的截图", "", "浮窗")
+    is_blue = not dark and (head == "蓝底" or btop >= BLUE_TOP_ROUTE)
     if dark:
         return _dark(out, bgr, small, use_ocr)
     if is_blue:
@@ -737,8 +821,26 @@ def _dark(out, bgr, small, use_ocr):
         out.update(cls="W3", sub="红包", title="红包", reason="红包页(底色本来就深)")
         return out
     h5 = h5_hit(txt, lat)
-    if not (al or h5 or TRADE_NO.search(txt)) and wechat_green(small) >= GREEN_MIN:
+    trade = TRADE_NO.search(txt)
+    if not (al or h5 or trade) and wechat_green(small) >= GREEN_MIN:
         return _x(out, "深色, 页头有微信绿, 没有支付宝的字", rd.first_cjk(), "微信")
+    # v2: census 的 D 20 张里只有 10 张是支付宝(深色浏览器里的 H5 结果页), 另外 6 张微信、2 张平台页、2 张不是页面。
+    #   平台页的字(提现 / 投注 / VIP)、微信(绿色标题 / 返回商家 / XX的店铺 的账单)分出去; 一点支付宝线索都没有的不算 D
+    m = DARK_PLATFORM.search(txt)
+    if m:
+        return _x(out, "深色, 平台页: " + m.group(), rd.first_cjk(), "平台页")
+    items = rd.items()
+    if title_icon(bgr, items) == "green" and not trade:
+        return _x(out, "深色, 支付成功 标题和左边的图标是微信绿", rd.first_cjk(), "微信")
+    if not (al or h5 or trade or blue_logo(bgr)):
+        k = [w for w in WX_LOW if w in rd.band(0.75, 0.92)] + (["的店铺"] if "的店铺" in txt else [])
+        if k:
+            return _x(out, "深色, 没有支付宝的线索, 有 " + "/".join(k), rd.first_cjk(), "微信")
+        ncjk = sum("一" <= c <= "鿿" for c in txt)
+        if ncjk >= 12:
+            return _x(out, f"深色, 读到 {ncjk} 个汉字, 没有支付宝的线索", rd.first_cjk())
+        out.update(cls="U", sub="深色", title=rd.first_cjk(), reason=f"深色, 没有支付宝的线索, 字太少({ncjk} 个汉字)")
+        return out
     sub = ""
     t2 = txt.replace("成功后", "后")          # "付款成功后请截图" 是平台页的提示, 不是标题
     for kw in ("账单详情", "转账成功", "到账成功", "支付成功", "代付成功", "付款成功", "交易成功"):
@@ -757,6 +859,12 @@ def _blue(out, bgr, small, use_ocr, head, btop):
     if inset_window(small):
         # 平台收银台里嵌的转账成功浮窗、安卓多任务界面: 不是整页的支付宝结果页, 不能交给蓝图的模型
         return _x(out, why + ", 蓝色结果页是浮窗(两边不是蓝的), 像平台页里嵌的截图", "", "浮窗")
+    if out.get("state") in BLUE_ABNORMAL:
+        # v2: 到账失败 / 提交成功 / 等待对方领取 的页头图标(status_icon 看图定的), 不用读字。
+        #   census 里 8 张到账失败被分进了 B3 支付成功、提交成功在 B2、等待对方领取在 B0, 钱没到的页不能交给成功页的模型
+        k = out["state"]
+        out.update(cls="B4", sub=k, title=k, reason=why + f", 页头图标是 {k}(看图)")
+        return out
     if not use_ocr:
         btn = notify_button(bgr)
         out.update(cls="B0", sub="有通知卡片(转账或到账)" if btn else "",
@@ -787,17 +895,44 @@ def _blue(out, bgr, small, use_ocr, head, btop):
     if not code or head != "蓝底" or x_words(head_txt) or platform_hit(head_txt, ""):
         rd.detect(ts, BLUE_FRAC)
         rd.read(lambda b: True)
+    cls, sub, title, reason = _blue_decide(rd, bgr, why, head, code, kw, how, in_title, BLUE_FRAC)
+    if cls == "B0" and not sub and not code:
+        # v2: 0~0.34 没定下来(标题被通知条盖住、字段不够), 再读 0.34~0.60: 支付有礼 / 到账时间 / 立即通知收款人 多在这一段;
+        #   从 0.37 起的半屏到账成功浮层也要这一段才看得到(census B0 里一张)。只有定不下来的才多读, 大部分蓝图不受影响
+        rd.detect(BLUE_FRAC, 0.60)
+        rd.read(lambda b: True)
+        c2 = _blue_decide(rd, bgr, why, head, code, kw, how, in_title, 0.60)
+        if c2[0] != "B0" or c2[1]:
+            cls, sub, title, reason = c2[0], c2[1], c2[2], c2[3] + ("" if c2[0] == "X" else ", 读到 0.60")
+    out["ocr"] = f"[{len(rd.text)}] " + rd.joined()[:120]
+    if cls == "B0":
+        out.update(cls="B0", sub=sub, title=title or rd.first_cjk(in_title),
+                   reason=why + ", " + (reason or "没读到标题和分得开的字段"))
+        return out
+    out.update(cls=cls, sub=sub, title=title, reason=reason)
+    return out
+
+
+def _blue_decide(rd, bgr, why, head, code, kw, how, in_title, ylim):
+    """蓝图读完字以后的判定: 返回 (类别, 子类, 标题, 理由)。类别 B0 时理由不带开头的 why(调用方补)。
+    ylim: 字段找 ¥ 金额只看这个高度以上(第一次 0.34, 再读一段以后 0.60)。"""
     txt = rd.joined()
     lat = rd.latin()
-    out["ocr"] = f"[{len(rd.text)}] " + txt[:120]
     pf = platform_hit(txt, lat)
     if pf:
         # 平台收银台里嵌的支付宝截图: 订单号 / 付款方式 / 收款方都有, 支付宝的字总比平台的多, 所以不比多少
-        return _x(out, why + ", 平台收银台: " + pf, kw or rd.first_cjk(in_title), "平台页")
+        return "X", "平台页", kw or rd.first_cjk(in_title), why + ", 平台收银台: " + pf
     al = alipay_hits(txt)
     xs = _xcheck(txt, al, lat)
     if xs and len(xs) > len(al):
-        return _x(out, why + ", 不是支付宝: " + "/".join(xs[:3]), kw or rd.first_cjk(in_title))
+        return "X", "", kw or rd.first_cjk(in_title), why + ", 不是支付宝: " + "/".join(xs[:3])
+    ab = abnormal_text(txt, lat, rd.joined(in_title))
+    if ab:
+        return "B4", ab[0], ab[0], why + ", " + ab[1]
+    ym = yue_hit(txt, lat)
+    if ym:
+        # v2: 余额明细详情的导航栏是蓝的(页头算蓝底), 本地一张 v1 判 B0、加了读 0.60 以后被商家名带成了 B3
+        return "W4", "", rd.first_cjk(in_title) or "余额明细", why + f", 余额明细详情: 有 {ym}"
     sub = "代付成功" if "代付" in kw else ""
     if not code:
         code, kw = title_code(txt)
@@ -808,20 +943,68 @@ def _blue(out, bgr, small, use_ocr, head, btop):
         if pc:
             code, how = pc, "标题汉字没读出来, 按上面的拼音"
     if not code:
-        code, sub, how = _blue_fields(rd, txt, lat, bgr)
+        sp = _blue_special(txt)
+        if sp:
+            c, s, t, h = sp
+            return c, s, t, (why + ", " + h) if c != "B0" else h
+        code, sub, how = _blue_fields(rd, txt, lat, bgr, ylim)
         how = "没读到标题, " + how if how else ""
     if not code or code == "B0":
-        # 通知按钮在 _blue_fields 里已经找过(找得到就是 B1 了)
-        out.update(cls="B0", sub=sub, title=rd.first_cjk(in_title),
-                   reason=why + ", " + (how or "没读到标题和分得开的字段"))
-        return out
+        return "B0", sub, rd.first_cjk(in_title), how
     sure = al or (head == "蓝底" and (kw in dict(BLUE_TITLES) or kw == "付成功"))
-    out.update(cls=code, sub=sub, title=kw or rd.first_cjk(in_title),
-               reason=why + ", " + how + ("" if sure else ", ★ 没读到支付宝的字段"))
-    return out
+    return code, sub, kw or rd.first_cjk(in_title), why + ", " + how + ("" if sure else ", ★ 没读到支付宝的字段")
 
 
-def _blue_fields(rd, txt: str, lat: str, bgr):
+def abnormal_text(txt: str, lat: str, tt: str):
+    """v2: 蓝图异常页按读到的字定(页头图标被通知条盖住、拼音字体看不出图标的): 返回 (种类, 理由) 或 None。
+    ★ 原路退回 不单独认: 等待对方领取 页上也有"逾期未完善资金将原路退回"; 资金将原路返回 是到账失败页那一句。
+    ★ 话费充值页(提交成功 -> 运营商处理中 -> 充值成功)的 提交成功 是进度, 不算, 交给 _blue_fields 记 B0 话费充值。"""
+    if "到账失败" in txt or "资金将原路返回" in txt or "daozhangshibai" in lat:
+        return "到账失败", "读到 " + ("到账失败" if "到账失败" in txt else "资金将原路返回" if "资金将原路返回" in txt else "daozhangshibai")
+    if "等待对方领取" in txt:
+        return "等待对方领取", "读到 等待对方领取"
+    if re.search(r"运营商|充值成功|充值中|话费充值", txt):
+        return None
+    if "提交成功" in tt:
+        return "提交成功", "标题 提交成功"
+    if "提交成功" in txt and "到账" in txt:
+        return "提交成功", "读到 提交成功 + 到账"
+    return None
+
+
+def _blue_special(txt: str):
+    """v2: 没读到标题的蓝图里不是三种结果页的(census 核出来的): 返回 (类别, 子类, 标题, 理由) 或 None。
+        收款码图(支付宝个人收款码海报) / 平台扫码收银台(订单金额 复制 上传截图)        -> X
+        授权成功(订单金额 + 付款方式, 没有商家那一行, 不是支付成功的模板) / 订单展示     -> B0 子类"""
+    m = QR_RE.search(txt)
+    if m:
+        sub = "平台页" if re.search(r"订单金额|复制|上传|取消订单|已付款", txt) else "收款码图"
+        return "X", sub, "", f"没读到标题, 有 {m.group()}(收款码 / 扫码付款页)"
+    if "授权成功" in txt:
+        return "B0", "授权成功", "授权成功", "标题 授权成功(不是支付成功的模板)"
+    if "订单展示" in txt:
+        return "B0", "订单展示", "订单展示", "有 订单展示"
+    return None
+
+
+def _bank_row(rd, ys, W: int) -> str:
+    """右边 ¥ 金额那一行(框左边 > 0.55 W)左边的字里有 银行名 + 卡尾号 4 位(到账成功的收款银行卡), 返回那段字; 没有返回空。
+    ¥ 和银行卡读成一个框的也算。census: 72 张 B2 每张都有这一行, B3 一张都没有(B3 那一行是商家名)。"""
+    items = rd.items()
+    for y in ys:
+        if BANK_TAIL.search(norm(y[4])):
+            return norm(y[4])[:16]
+        if y[0] <= 0.55 * W:
+            continue
+        yc, h = (y[1] + y[3]) / 2, y[3] - y[1]
+        left = "".join(norm(b[4]) for b in items
+                       if b[2] <= y[0] + 2 and abs((b[1] + b[3]) / 2 - yc) < 0.6 * max(h, b[3] - b[1]))
+        if BANK_TAIL.search(left):
+            return left[:16]
+    return ""
+
+
+def _blue_fields(rd, txt: str, lat: str, bgr, ylim: float = BLUE_FRAC):
     """蓝图标题没读到(多半是通知条盖住了标题和大金额的上半截)时按字段分, 返回 (类别, 子类, 理由)。
     各条线索在标题读得到的蓝图上量过(run2 随机 B1 150 / B2 100 / B3 150 张, 读 0~0.34):
                       B1    B2    B3
@@ -829,11 +1012,13 @@ def _blue_fields(rd, txt: str, lat: str, bgr):
         通知按钮       137    55     7      两个 ¥              2  99 145      商家名(有限公司 ...) 1   0  60
     所以顺序是:
         话费充值页(提交成功 -> 运营商处理中 -> 充值成功)单独记 B0, 不是到账成功
-        提交成功 + 到账 = 银行卡转账还在处理(到账成功的模板)
+        (v2: 提交成功 + 到账 改在 abnormal_text 里记 B4, 不再算到账成功)
         到账时间 / 使用转账凭证 / 预计..到账 / 查看到账进度 / 拼音 daozhangshi -> 到账成功
             ★ 不能认拼音 daozhang: 支付成功页的券"红包已到账"读出来是 hongbaoyidaozhang
         立即通知收款人 / 预约转账 / 通知TA、收款方(读坏的 收默方 / 收款芳 / 收款王涛 也算)-> 转账成功
             ★ 要在 支付有礼 前面: 转账成功页也有 支付有礼 卡片(本地有一张)
+            ★ v2: 收款姓名 不算(平台扫码收银台的, census 3 张因此判成了 B1)
+        v2: 右边 ¥ 那一行左边是 银行名 + 卡尾号 -> 到账成功(census 3 张标题读坏的到账成功被判成了支付成功)
         读到 账成功(第一个字丢了): 只能是转账 / 到账, 两个 ¥ -> 到账成功(银行卡那一行带 ¥), 有通知按钮 -> 转账成功
         交易商家 / 交易方式 / 给商家 / 支付有礼 / 商家名 -> 支付成功
         通知按钮: 右边没有 ¥ 金额 -> 转账成功; 有的分不开到账 / 支付, 记 B0
@@ -841,8 +1026,6 @@ def _blue_fields(rd, txt: str, lat: str, bgr):
     H, W = rd.H, rd.W
     if re.search(r"运营商|充值成功|充值中|话费充值", txt):
         return "B0", "话费充值", "话费充值页"
-    if "提交成功" in txt and "到账" in txt:
-        return "B2", "提交成功", "提交成功 + 到账"
     b2 = hits(txt, ["到账时间", "使用转账凭证"])
     m = re.search(r"预计.{0,8}到账|查看到账进度", txt)
     if m:
@@ -854,10 +1037,13 @@ def _blue_fields(rd, txt: str, lat: str, bgr):
     b1 = hits(txt, ["立即通知收款人", "预约转账"]) + (["通知TA"] if "通知ta" in txt.lower() else [])
     if b1:
         return "B1", "", "有 " + "/".join(b1)
-    m = re.search(r"(?<!码)收[款默](?!方全称|方式|码)", txt)
+    m = re.search(r"(?<!码)收[款默](?!方全称|方式|码|姓名)", txt)
     if m:
         return "B1", "", f"有 {m.group()}(收款方)"
-    ys = [b for b in rd.items(lambda b: (b[1] + b[3]) / 2 < BLUE_FRAC * H) if YEN.search(b[4])]
+    ys = [b for b in rd.items(lambda b: (b[1] + b[3]) / 2 < ylim * H) if YEN.search(b[4])]
+    bank = _bank_row(rd, ys, W)
+    if bank:
+        return "B2", "", f"右边 ¥ 那一行是银行卡({bank})"
     btn = notify_button(bgr) > 0
     if "账成功" in txt:
         if len(ys) >= 2 or any(b[0] > 0.55 * W for b in ys):
@@ -882,6 +1068,48 @@ def _blue_fields(rd, txt: str, lat: str, bgr):
     if any(b[0] > 0.55 * W for b in ys) and re.search(r"付款方式|[付符]款|付默", txt):
         return "B3", "", "商家那一行有 ¥ 金额 + 付款方式"
     return None, "", ""
+
+
+def yue_hit(txt: str, lat: str) -> str:
+    """v2: 余额明细详情页(W4)的线索, 返回读到的那段, 没有返回空。
+    census + 拼音库 + 本地 5.5 万行: 余额明细 / 额明細(读坏的)只出现在余额明细详情上(进了 U 47 / W1 4 / X 3);
+    明细详情 单独不算: 银行 App 的"明细详情"有 28 张(X), 它们没有 关联账单。"""
+    m = re.search(r"余额明[细細]|额明[细細]", txt)
+    if m:
+        return m.group()
+    if "mingxixiangqing" in lat:
+        return "mingxixiangqing"
+    if "关联账单" in txt and ("查看账单详情" in txt or re.search(r"明[细細]详?情", txt)):
+        return "关联账单 + 查看账单详情"
+    return ""
+
+
+def title_icon(bgr, items) -> str:
+    """v2: 白底 支付成功 / 付款成功 标题(连同左边的图标)的颜色: 'green' 微信 / 'blue' 支付宝 / '' 说不清。
+    微信支付结果页: 标题左边绿色的微信支付图标、标题字也是绿的(#07C160, OpenCV 色相 ~74);
+    支付宝的白底支付成功: 蓝色 支 字图标、标题字蓝(#1677FF, 色相 ~107)。
+    census: U 里 83 张"只有标题 支付成功、没有支付宝的线索"全是微信支付的结果页(返回商家在 0.75~0.85, 上面 70% 读不到)。
+    ★ 不用 wechat_green: 它看整条页头, 状态栏 / 灵动岛上的支付宝蓝图标会把它否掉(census 两张)。"""
+    H, W = bgr.shape[:2]
+    for b in items:
+        if (b[1] + b[3]) / 2 > 0.35 * H or not re.search(r"支付成功|付款成功", norm(b[4])):
+            continue
+        h = b[3] - b[1]
+        x0, x1 = max(0, int(b[0] - 2.5 * h)), min(W, int(b[2]))
+        y0, y1 = max(0, int(b[1] - 0.6 * h)), min(H, int(b[3] + 0.6 * h))
+        if x1 - x0 < 4 or y1 - y0 < 4:
+            continue
+        hsv = cv2.cvtColor(bgr[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
+        hh, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+        g = int(((hh >= 65) & (hh <= 85) & (s >= 120) & (v >= 100)).sum())
+        bl = int(((hh >= 95) & (hh <= 120) & (s >= 120) & (v >= 100)).sum())
+        n = (y1 - y0) * (x1 - x0)
+        if g >= 0.02 * n and g > 3 * bl:
+            return "green"
+        if bl >= 0.02 * n and bl > 3 * g:
+            return "blue"
+        return ""
+    return ""
 
 
 def _white(out, bgr, small, use_ocr, head):
@@ -938,21 +1166,53 @@ def _white(out, bgr, small, use_ocr, head):
             rd.detect(ts, 0.62, 0.18, 1.0)
             rd.read(lambda b: b[2] - b[0] < 0.55 * W)
     else:
+        # v2: 先只读标题条。标题是 转账凭证 的(支付宝 转账凭证 页面的截图, 导航栏的标题)直接定 W2 页面截图, 不读下面 ——
+        #   这种页 21 个框左右, v1 平均 25 秒一张, 占 census 全部 CPU 的四分之一。只再读 0.70~0.95 一段, 看有没有微信 / 财付通。
+        #   census + 拼音库 + 本地 5.5 万行: 标题附近有 转账凭证 的 1,127 张是 W2, 另有 3 张凭证页 v1 判错了, 没有银行 / 微信的页
+        #   ★ 标题条用另一个 Reader 读: 识别是一批一批做的、按一批里最宽的框补边, 标题的框单独一批识别,
+        #     正文的框读出来就和 v1 不一样了(本地 8 张拼音账单因此 商家订单号 读成 家军号, 从 W1 掉成了 U)。
+        #     所以不是凭证的页, 下面照 v1 原样(标题条 + 正文一起检测、一批识别), 多花的只是标题条的几个框
+        tr = Reader(bgr, rd.pinyin)
+        tr.detect(0.0, ts)
+        tr.read(lambda b: True)
+        t0 = tr.joined(in_title) + tr.latin(in_title)
+        if W2_TITLE.search(t0) or "zhuanzhangpingzheng" in t0:
+            low = tr.band(0.70, 0.95)
+            xl = [k for k in X_STRONG if k in low]
+            if not xl and not platform_hit(tr.joined(), tr.latin()):
+                out["ocr"] = f"[{len(tr.text)}] " + tr.joined()[:120]
+                out.update(cls="W2", sub="页面截图", title="转账凭证",
+                           reason=f"{head}, 标题区是 转账凭证(凭证页面的截图), 只读了标题和下面一段")
+                return out
         rd.detect(ts, PAGE_FRAC)
         rd.read(lambda b: True)
-    txt = rd.joined()
-    lat = rd.latin()
-    tt = rd.joined(in_title)
+    # v2: 苹果从别的 App 跳过来时状态栏左上角的"◀ 支付宝"(返回支付宝)不算支付宝的字(census: 一张商城的订单页因此进了 W3)
+    nobl = lambda b: not ((b[1] + b[3]) / 2 < 0.06 * H and b[0] < 0.3 * W and norm(b[4]) == "支付宝")   # noqa: E731
+    items = rd.items(nobl)
+    txt = rd.joined(nobl)
+    lat = rd.latin(nobl)
+    tt = rd.joined(lambda b: in_title(b) and nobl(b))
     first = rd.first_cjk(in_title)
     out["ocr"] = f"[{len(rd.text)}] " + txt[:120]
     # ---- 平台收银台 / 存款页: 在一切支付宝模板之前(它们常嵌一张账单详情 / 转账成功截图)
     pf = platform_hit(txt, lat)
     if pf:
         return _x(out, "平台收银台 / 存款页: " + pf, first, "平台页")
-    al = alipay_hits(txt)
+    # ---- v2: 余额明细详情(W4), 在"不是支付宝的字"之前: 它正文里的 明细详情 / 资金明细 / 可用余额 都在 X 的字里
+    ym = yue_hit(txt, lat)
+    if ym:
+        out.update(cls="W4", sub="", title=first or "余额明细", reason=f"{head}, 余额明细详情: 有 {ym}")
+        return out
+    al = alipay_hits(txt, items)
     xs = _xcheck(txt, al, lat, strict_card=card == "A")
     if xs and not (rule_w1 and len(al) >= len(xs)):
         return _x(out, "不是支付宝: " + "/".join(xs[:4]), first)
+    # ---- v2: 支付消息列表, 在账单详情的规则之前(卡片闸门会把它的卡片当成账单详情)
+    pm = PAYMSG_RE.search(txt)
+    if pm and not hits(txt, ["创建时间", "支付时间", "订单号", "商品说明"]):
+        out.update(cls="W3", sub="支付消息", title=first or "支付消息",
+                   reason=f"{head}, 支付消息列表: 有 {pm.group()}, 没有账单详情的时间 / 订单号标签")
+        return out
     w2 = hits(txt, W2_KW)
     if len(w2) >= 2 or (w2 and (has(txt, "转账凭证") or "转出成功" in txt)):
         # 不是凭证尺寸、按字认的: 微信的"向银行卡转账电子凭证"字段很像, 财付通的章在 0.76 上下, 再读下面一段看看
@@ -960,22 +1220,18 @@ def _white(out, bgr, small, use_ocr, head):
         xl = [k for k in X_STRONG if k in low]
         if xl:
             return _x(out, "像转账凭证, 但下面有 " + "/".join(xl), first)
-        out.update(cls="W2", sub="其它尺寸", title="转账凭证",
+        out.update(cls="W2", sub=_w2_sub(txt, tt, W, H), title="转账凭证",
                    reason=f"尺寸 {W}x{H} 不对, 但有 " + "/".join(w2[:3]))
-        return out
-    if not rule_w1 and re.search(r"余额明细|明细详情", tt):
-        # 余额明细详情页有"查看账单详情"的链接, 以前读到 账单详情 就算了 W1(run2 约 12 张)
-        out.update(cls="U", sub="余额明细", title=first, reason=f"{head}, 标题是 余额明细 / 明细详情, 不是账单详情")
         return out
     trade = TRADE_NO.search(txt)
     w1l = hits(txt, W1_LABELS)
-    if not rule_w1 and has(tt, "账单详情") and len(al) >= 3:
+    if not rule_w1 and zd_hit(tt) and len(al) >= 3:
         rule_w1 = "标题 账单详情 + " + "/".join([k for k in al if k != "账单详情"][:3])
     if not rule_w1 and len(w1l) >= 2:
         rule_w1 = "没有卡片, 但读到账单详情的标签 " + "/".join(w1l[:3])
     # 装饰字体 / 很淡的拼音字体: 卡片闸门过不了、标签只读出 1 个, 但交易号的数字还读得准
     extra = (["交易号"] if trade else []) + [k for k in ("交易成功", "全部账单") if k in txt]
-    if re.search(r"单详情|账单情", tt):
+    if re.search(r"(?<!订)单详情|账单情", tt):           # v2: 订单详情 不算
         extra.append("账单详情")
     if not rule_w1 and ar >= 2 and (extra or w1l or al):
         # 箭头行 + 随便一个支付宝的字(拼音字体的账单常只读出 付款方式); 亲情卡页一个都没有
@@ -984,8 +1240,16 @@ def _white(out, bgr, small, use_ocr, head):
         rule_w1 = f"读到账单标签 {w1l[0]} + " + "/".join(extra)
     if rule_w1:
         sub, why = _w1_sub(txt)
-        out.update(cls="W1", sub=sub, title="账单详情" if has(txt, "账单详情") else first,
+        out.update(cls="W1", sub=sub, title="账单详情" if zd_hit(txt) else first,
                    reason=rule_w1 + (", " + why if why else ""))
+        return out
+    # ---- v2: 不是结果页的支付宝页: 转账首页(卡片上有 到账成功 / 转账成功)、交易中断的付款页
+    home = sorted({m.group() for m in HOME_RE.finditer(txt)})
+    if len(home) >= 2:
+        out.update(cls="U", sub="转账首页", title=first, reason=f"{head}, 支付宝转账首页: 有 " + "/".join(home))
+        return out
+    if "交易中断" in txt:
+        out.update(cls="U", sub="交易中断", title=first, reason=f"{head}, 交易中断(付款没成功)")
         return out
     h5 = h5_hit(txt, lat)
     if h5:
@@ -995,8 +1259,11 @@ def _white(out, bgr, small, use_ocr, head):
         if kw in txt:
             out.update(cls="W3", sub=sub, title=kw, reason=f"{head}, 没有账单详情卡片, 有 {kw}")
             return out
+    # ---- v2: 微信 零钱提现 详情页(它的 到账成功 / 银行处理中 会被当成白底结果页)
+    wp = WX_PAGE.search(txt)
+    if wp and not (trade or card == "A" or blue_logo(bgr)):
+        return _x(out, f"{head}, 微信 {wp.group()}", first, "微信")
     # ---- 白底原生支付成功页(扫码付款常见): 标题是拼音手写字体读不出来, 但右上 完成、上面的 ¥ 金额、收款方 认得出
-    items = rd.items()
     done = any(norm(b[4]) == "完成" for b in items)
     yen = any(YEN.search(b[4]) for b in items if (b[1] + b[3]) / 2 < 0.35 * H)
     payee = re.search(r"收款方(?!.?称|式)", txt)            # ★ 收款方式 是平台收银台的, 收款方金称 是读坏的 收款方全称
@@ -1011,19 +1278,34 @@ def _white(out, bgr, small, use_ocr, head):
         return out
     code, kw = title_code(txt.replace("成功后", "后"))      # "付款成功后请截图" 是平台页的提示, 不是标题
     if code:
+        # v2: 标题(连左边的图标)是微信绿的 -> 微信支付的结果页(census U 里 83 张; 支付宝的是蓝的)
+        if title_icon(bgr, items) == "green" and not (trade or card == "A"):
+            return _x(out, f"{head}, 标题 {kw} 和左边的图标是微信绿", first, "微信")
         # 只有一个标题: 要有支付宝的线索(支付宝的字 / H5 / 交易号 / 蓝色 支 字图标), 不然微信账单的"当前状态 支付成功"、
         # 别的商城 H5 页也会进来(run2 两张)
         if not (al or trade or blue_logo(bgr)):
             xw = x_words(txt)
             if xw:
                 return _x(out, f"只有标题 {kw}, 没有支付宝的线索, 有 " + "/".join(xw[:3]), first)
+            # v2: 微信支付结果页的 返回商家 / 摇一摇 在 0.75~0.92(上面 70% 读不到), 读一下这一段
+            k = [w for w in WX_LOW if w in rd.band(0.75, 0.92)]
+            if k:
+                return _x(out, f"{head}, 只有标题 {kw}, 下面有 " + "/".join(k), first, "微信")
             out.update(cls="U", title=kw, reason=f"{head}, 只有标题 {kw}, 没有支付宝的线索")
             return out
         sub = kw if head == "白底" else f"{kw}(页头{head})"
         if code == "B1" and (title_code(tt)[0] != "B1" or "通知ta" in txt.lower() or "liaotian" in lat):
             sub = "聊天转账"         # 聊天里的转账气泡: 转账成功 不在标题区, 后面跟着 马上通知TA
+        elif code == "B3" and not yen and len(rd.text) <= 9:
+            # v2: H5 收银台的结果页只有 支 字图标 + 支付成功 / 付款成功, 没有金额(浏览器 / App 里的网页, census 36 张记成了 支付成功)
+            sub = "H5支付成功"
         out.update(cls="W3", sub=sub, title=kw, reason=f"{head}, 没有账单详情卡片, 标题 {kw}")
         return out
+    # ---- v2: 没有标题的收款码图 / 平台扫码收银台(页头被盖住的蓝图那一路现在要上半截蓝 >= 0.30, 低于它的走到这里)
+    m = QR_RE.search(txt)
+    if m:
+        sub = "平台页" if re.search(r"订单金额|复制|上传|取消订单|已付款", txt) else "收款码图"
+        return _x(out, f"{head}, 有 {m.group()}(收款码 / 扫码付款页)", first, sub)
     ncjk = sum("一" <= c <= "鿿" for c in txt)
     if card == "O" and not al:
         return _x(out, "左标签右取值但整页白、取值不是 #333, 没有支付宝的字", first)
@@ -1044,6 +1326,21 @@ def _white(out, bgr, small, use_ocr, head):
     return out
 
 
+def _w2_sub(txt: str, tt: str, W: int, H: int) -> str:
+    """v2: 按字认出来的转账凭证的子类(census 821 张里: 页面截图 628 / 凭证图 184 / 转账回执 8)。
+        转账回执   通知对方已转账 ... XX向你转账 ... 收款人账号(支付宝的回执分享卡片)
+        转账凭证图 存下来又缩小 / 裁过的凭证图: 高宽比 1.45~1.66(凭证图 1304x2038 / 1304x2122 的比例; 手机截图 1.77 以上)
+        页面截图   转账凭证 页面的截图: 标题区有 转账凭证, 或者下面的 保存图片 / 分享给好友
+        其它尺寸   都不是"""
+    if re.search(r"通知对方已转账|收款人账号", txt):
+        return "转账回执"
+    if VOUCHER_RATIO[0] <= H / W <= VOUCHER_RATIO[1]:
+        return "转账凭证图"
+    if W2_TITLE.search(tt) or re.search(r"保存图片|分享给好友", txt):
+        return "页面截图"
+    return "其它尺寸"
+
+
 def _w1_sub(txt: str) -> tuple[str, str]:
     """账单详情的子类。先看标签; 拼音手写字体的标签常读坏, 再看时间标签, 最后按取值的样子猜。
     ★ 时间标签: 商户付款(含收钱码)是 支付时间, 转账是 创建时间。run2 里按"打码的账号"猜成转给个人的 387 张,
@@ -1054,6 +1351,11 @@ def _w1_sub(txt: str) -> tuple[str, str]:
     m = re.search(r"收钱码|收码收款|钱码收款", txt)
     if m:
         return "收钱码", "有 " + m.group()
+    # v2: 余额充值 / 找人代充 / 余额宝转入 / 退款转账 都是"其它"(census: 15 + 2 + 4 + 6 张分进了 商户消费 / 转给个人);
+    #   ★ 充值专营店(游戏充值商家, 约 580 张)是真的商户消费, 正则里没有"充值"两个字单独出现的
+    m = re.search(r"充值说明|余额充值|代充值|余额宝.{0,2}转入|退款转账|退款方式", txt)
+    if m:
+        return "其它", "有 " + m.group()
     k = hits(txt, SUB_PERSON)
     if k:
         return "转给个人", "有 " + k[0]
@@ -1072,6 +1374,15 @@ def _w1_sub(txt: str) -> tuple[str, str]:
         return "商户消费", "按取值猜: 有 " + m.group()
     if re.search(r"\*{2,}\d{2}", txt) or re.search(r"@[0-9a-z]+(com|cn|net)", txt, re.I):
         return "转给个人", "按取值猜: 有打码的账号"
+    # v2: 拼音页标签读坏了的, 按订单号的样子猜(census + 拼音库 + 本地已经分好子类的 W1 上量过):
+    #   20xxxxxx20004001...  转给个人 435 / 商户消费 12 / 银行卡转账 7 / 收钱码 2
+    #   20xxxxxx2[123]00...  商户消费 259 / 收钱码 81 / 转给个人 7;   品明(商品说明读坏的) 商户消费 1,397 / 收钱码 415 / 转给个人 25
+    if re.search(r"20\d{6}20004001", txt):
+        return "转给个人", "按订单号猜: 20xxxxxx20004001 是转账的"
+    if re.search(r"20\d{6}2[123]00\d", txt):
+        return "商户消费", "按订单号猜: 20xxxxxx2x00 是商户付款的"
+    if "品明" in txt:
+        return "商户消费", "有 品明(拼音字体读坏的 商品说明)"
     return "其它", ""
 
 
@@ -1143,7 +1454,7 @@ def dedupe_gwcz(todo):
     return keep, len(todo) - len(keep)
 
 
-KEYS = ["path", "W", "H", "cls", "name", "sub", "header", "dark", "flat", "pinyin", "device", "title", "reason", "secs",
+KEYS = ["path", "W", "H", "cls", "name", "sub", "state", "header", "dark", "flat", "pinyin", "device", "title", "reason", "secs",
         "src", "card", "mode", "ocr"]
 
 
@@ -1185,6 +1496,10 @@ def summary(rows, a, wall) -> list[str]:
         sub = Counter(r.get("sub", "") for r in rows if r["cls"] == k)
         L.append(f"  {k:<3}{NAMES[k]:<8}{c[k]:>7,}  {c[k] / max(1, n):>6.1%}   "
                  + "  ".join(f"{s or '-'} {m:,}" for s, m in sub.most_common(6)))
+    L.append("")
+    L.append("  ---- 异常页(state, status_icon 只看图: 钱没到 / 退回 / 还在处理) x 类别 ----")
+    ab = [r for r in rows if r.get("state")]
+    L += table(ab, "state", "cls") if ab else ["  (没有)"]
     L.append("")
     L.append("  ---- 各类 x 来源 ----")
     L += table(rows, "src", "cls")
@@ -1236,7 +1551,8 @@ def _tile(r, tw=270, th=600):
     pil = Image.fromarray(cv2.cvtColor(np.vstack([bar, page]), cv2.COLOR_BGR2RGB))
     d = ImageDraw.Draw(pil)
     if font:
-        d.text((3, 1), f"{r['_i']}. {r['cls']} {r.get('sub', '')}  {r.get('W', '')}x{r.get('H', '')}"
+        old = f"{r['_old']} -> " if r.get("_old") else ""          # v2: --compare 的 diff 联系表写上一版的类别
+        d.text((3, 1), f"{r['_i']}. {old}{r['cls']} {r.get('sub', '')}  {r.get('W', '')}x{r.get('H', '')}"
                        f"{'  拼音' if str(r.get('pinyin')) == '1' else ''}", font=font, fill=(190, 0, 0))
         d.text((3, 19), f"标题 {r.get('title', '')}  页头 {r.get('header', '')}", font=font, fill=(0, 0, 160))
         d.text((3, 37), str(r.get("reason", ""))[:30], font=font, fill=(60, 60, 60))
@@ -1270,7 +1586,7 @@ def main() -> None:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001
         pass
-    ap = argparse.ArgumentParser(description="整页分类(第一版, 规则 + OCR 关键词)")
+    ap = argparse.ArgumentParser(description="整页分类(第二版, 规则 + OCR 关键词)")
     ap.add_argument("--src", nargs="+", required=True, help="目录(递归)或名单(.txt 一行一个路径 / .csv)")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--n", type=int, default=0, help="随机抽这么多张(0 = 全部)")
@@ -1278,6 +1594,9 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) - 1))
     ap.add_argument("--sheets", type=int, default=2, help="每类最多出几张联系表(每张 12 格), 0 = 不出")
     ap.add_argument("--no-ocr", action="store_true", help="只跑规则, 不做 OCR")
+    ap.add_argument("--compare", type=Path, default=None,
+                    help="上一版的 page_type.csv: 类别 / 子类变了的写进 diff.csv, 再出 diff 联系表(只看变了的, 不用拷图)")
+    ap.add_argument("--diff-sheets", type=int, default=30, help="diff 联系表最多几张(每张 12 格; 每种变法最多 2 张)")
     a = ap.parse_args()
 
     todo = collect(a.src)
@@ -1322,7 +1641,50 @@ def main() -> None:
             for _dst in pool.map(make_sheet, jobs):
                 pass
             print(f"  联系表 {len(jobs)} 张 -> {sd}", flush=True)
+        if a.compare:
+            compare(rows, a, pool)
     print(f"  -> {a.out / 'page_type.csv'}", flush=True)
+
+
+def compare(rows, a, pool) -> None:
+    """v2: 和上一版的 page_type.csv 逐张比(按路径), 类别或子类变了的写 diff.csv、在 summary.txt 后面加一张变法表、
+    出 diff 联系表(每种变法最多 24 格, 一共最多 --diff-sheets 张)。人眼只核变了的, 不用把图拷回来。"""
+    with a.compare.open(encoding="utf-8-sig", newline="") as f:
+        old = {r["path"]: r for r in csv.DictReader(f)}
+    ch = []
+    for r in rows:
+        o = old.get(r["path"])
+        if o and (o.get("cls", ""), o.get("sub", "")) != (r.get("cls", ""), r.get("sub", "")):
+            ch.append(dict(r, _old=f"{o.get('cls', '')}/{o.get('sub', '')}", _new=f"{r.get('cls', '')}/{r.get('sub', '')}"))
+    keys = ["path", "_old", "_new", "state", "title", "reason", "ocr"]
+    with (a.out / "diff.csv").open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=keys, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(ch)
+    cnt = Counter((r["_old"], r["_new"]) for r in ch)
+    lines = ["", f"  ---- 和上一版比({a.compare.name}): 比得上的 {sum(1 for r in rows if r['path'] in old):,} 张, "
+                 f"类别或子类变了 {len(ch):,} 张 ----"]
+    lines += [f"  {n:>6,}  {o:<22} -> {nw}" for (o, nw), n in cnt.most_common()]
+    with (a.out / "summary.txt").open("a", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print("\n".join(lines), flush=True)
+    if not a.diff_sheets or not ch:
+        return
+    dd = a.out / "diff_sheets"
+    dd.mkdir(exist_ok=True)
+    pick = []
+    for (o, nw), _n in cnt.most_common():
+        rs = [r for r in ch if (r["_old"], r["_new"]) == (o, nw)]
+        random.Random(a.seed).shuffle(rs)
+        pick += rs[:24]
+    pick = pick[:12 * a.diff_sheets]
+    jobs = []
+    for j in range(0, len(pick), 12):
+        part = [dict(r, _i=j + i) for i, r in enumerate(pick[j:j + 12], 1)]
+        jobs.append((part, str(dd / f"diff_{j // 12 + 1:02d}.png")))
+    for _dst in pool.map(make_sheet, jobs):
+        pass
+    print(f"  diff 联系表 {len(jobs)} 张 -> {dd}", flush=True)
 
 
 if __name__ == "__main__":
