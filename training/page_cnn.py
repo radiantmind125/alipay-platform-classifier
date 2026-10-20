@@ -390,6 +390,83 @@ def sheet(cache: Path, rows: list, final: list, conf: list, dst: Path) -> None:
     cv2.imencode(".png", grid)[1].tofile(str(dst))
 
 
+class _OnnxWrap(nn.Module):
+    """导 ONNX 用: 输入 uint8 NHWC BGR(OpenCvSharp 的 Mat 数据直接喂, 不用在 C# 里归一化), 输出各类概率。"""
+
+    def __init__(self, model: PageNet) -> None:
+        super().__init__()
+        self.model = model
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x.permute(0, 3, 1, 2).float()).softmax(1)
+
+
+def export(a) -> None:
+    """单视图模型 -> ONNX(opset 13, 旧导出器, 固定 [1,H,W,3] uint8)+ 对拍 + .contract.json。
+    ★ C# ORT 1.23.2 最多认 IR 11, 导出来超了就停; 对拍用缓存里的真缩略图和随机图, 概率差 < 1e-4、最大类一样。"""
+    import hashlib
+    import onnx
+    import onnxruntime as ort
+    pay = torch.load(a.ckpt, map_location="cpu", weights_only=False)
+    views = tuple(pay["views"])
+    if len(views) != 1:
+        print("  ★ 只支持单视图模型导 ONNX", flush=True)
+        sys.exit(2)
+    v = views[0]
+    hgt, wid = SIZE[v]
+    model = PageNet(views, width=pay["width"])
+    model.load_state_dict(pay["model_state"])
+    model.eval()
+    wrap = _OnnxWrap(model).eval()
+    a.out.parent.mkdir(parents=True, exist_ok=True)
+    dummy = torch.zeros(1, hgt, wid, 3, dtype=torch.uint8)
+    torch.onnx.export(wrap, (dummy,), str(a.out), input_names=["image"], output_names=["probabilities"],
+                      opset_version=13, do_constant_folding=True, dynamo=False)
+    om = onnx.load(str(a.out))
+    onnx.checker.check_model(om)
+    print(f"  ONNX {a.out}  IR {om.ir_version}  opset {om.opset_import[0].version}  "
+          f"算子 {sorted({n.op_type for n in om.graph.node})}", flush=True)
+    if om.ir_version > 10:
+        print("  ★ IR 版本 > 10, C# ORT 1.23.2 读不了, 停", flush=True)
+        sys.exit(3)
+    so = ort.SessionOptions()
+    so.intra_op_num_threads, so.inter_op_num_threads = 1, 1
+    sess = ort.InferenceSession(str(a.out), so, providers=["CPUExecutionProvider"])
+    rows = [r for r in load_rows(a.cache) if r["split"] in ("test", "test_py")] if a.cache else []
+    rng = np.random.default_rng(0)
+    rows = [rows[i] for i in rng.choice(len(rows), min(a.n, len(rows)), replace=False)] if rows else []
+    imgs = [cv2.imdecode(np.fromfile(f"{a.cache}/{v}/{r['id']}.jpg", np.uint8), cv2.IMREAD_COLOR) for r in rows]
+    imgs += [rng.integers(0, 256, (hgt, wid, 3), dtype=np.uint8) for _ in range(8)]
+    worst, same = 0.0, 0
+    with torch.no_grad():
+        for img in imgs:
+            x = np.ascontiguousarray(img)[None]
+            pt = wrap(torch.from_numpy(x)).numpy()[0]
+            po = sess.run(None, {"image": x})[0][0]
+            worst = max(worst, float(np.abs(pt - po).max()))
+            same += int(pt.argmax() == po.argmax())
+    print(f"  对拍 {len(imgs)} 张(缓存缩略图 {len(rows)} + 随机 8): 概率最大差 {worst:.2e}, 最大类一样 {same}/{len(imgs)}", flush=True)
+    if worst > 1e-4 or same != len(imgs):
+        print("  ★ torch 和 ONNX 对不上, 停", flush=True)
+        sys.exit(4)
+    th = json.load(open(a.thresholds, encoding="utf-8")) if a.thresholds else {}
+    sha = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()  # noqa: E731
+    contract = {
+        "kind": "page_type_head_v1",
+        "input": {"name": "image", "shape": [1, hgt, wid, 3], "dtype": "uint8", "layout": "NHWC", "color": "BGR",
+                  "preprocess": f"cv2.imdecode(IMREAD_COLOR, 截断的 JPEG 补 FFD9 再解); 取上面 round({HEAD_FRAC} * H) 行; "
+                                f"cv2.resize 到 {wid}x{hgt}(宽 x 高), INTER_AREA。归一化在图里, 不用自己做"},
+        "output": {"name": "probabilities", "shape": [1, len(CLASSES)], "labels": list(CLASSES)},
+        "postprocess": th,
+        "checkpoint_sha256": sha(a.ckpt), "onnx_sha256": sha(a.out),
+        "ir_version": om.ir_version, "opset": om.opset_import[0].version,
+        "versions": {"torch": torch.__version__, "onnx": onnx.__version__, "onnxruntime": ort.__version__},
+        "parity": {"images": len(imgs), "max_abs_diff": worst},
+    }
+    Path(str(a.out) + ".contract.json").write_text(json.dumps(contract, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"  -> {a.out}.contract.json", flush=True)
+
+
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description="整页分类小 CNN")
@@ -412,7 +489,16 @@ def main() -> None:
     e.add_argument("--batch", type=int, default=128)
     e.add_argument("--device", default="cuda")
     e.add_argument("--target", type=float, default=0.995)
+    x = sub.add_parser("export")
+    x.add_argument("--ckpt", type=Path, required=True)
+    x.add_argument("--out", type=Path, required=True, help="输出 .onnx")
+    x.add_argument("--cache", type=Path, default=None, help="缩略图缓存(对拍用真图)")
+    x.add_argument("--thresholds", type=Path, default=None, help="门槛 json(写进 contract)")
+    x.add_argument("--n", type=int, default=64, help="对拍用几张缓存缩略图")
     a = ap.parse_args()
+    if a.cmd == "export":
+        export(a)
+        return
     if a.cmd == "train":
         best = train(a)
         evaluate(a, best)

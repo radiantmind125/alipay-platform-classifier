@@ -58,13 +58,16 @@ def decode(path: str):
     return bgr
 
 
+def head_view(bgr):
+    """head 视图: 上面 round(HEAD_FRAC * H) 行拉伸到 HEAD_W x HEAD_H, INTER_AREA。训练、快速分类、C# 都必须这样做。"""
+    hh = max(1, int(round(HEAD_FRAC * bgr.shape[0])))
+    return cv2.resize(bgr[:hh], (HEAD_W, HEAD_H), interpolation=cv2.INTER_AREA)
+
+
 def views(bgr):
     """一张原图 -> (page, head) 两个 uint8 BGR 缩略图。以后推理(Python / C#)必须用同一个做法。"""
-    H, W = bgr.shape[:2]
     page = cv2.resize(bgr, (PAGE_W, PAGE_H), interpolation=cv2.INTER_AREA)
-    hh = max(1, int(round(HEAD_FRAC * H)))
-    head = cv2.resize(bgr[:hh], (HEAD_W, HEAD_H), interpolation=cv2.INTER_AREA)
-    return page, head
+    return page, head_view(bgr)
 
 
 def gid(path: str) -> str:
