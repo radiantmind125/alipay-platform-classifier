@@ -13,8 +13,11 @@ page_type.py(规则 + OCR)一张 3 ~ 5 秒, 9 月 206 万张要 4 ~ 5 天; 这�
                                      [--workers 20] [--resume] [--limit N]
   python training/page_fast.py lists --csv 输出目录\\page_fast.csv --policy policy.json --out 清单目录
   python training/page_fast.py compare --csv page_fast.csv --labels page_type.csv [--set census]   (和 OCR 版的标签比)
+  python training/page_fast.py folders --csv 蓝图库\\page_fast.csv 白图库\\page_fast.csv --policy policy.json
+                                     [--lists 蓝图库清单目录 白图库清单目录] [--classes B2 W1] [--mode link|copy --copy-to 目录] [--dry-run]
+                                     (每一类的原图放进一个文件夹; 默认硬链接, 不占硬盘)
 输出: page_fast.csv(一张一行), summary.txt; lists: 每类一个 csv(GWCZ编号, 上传时间, 图库, 类别, 怎么定的, 把握, 拼音, 异常页) + summary.txt
-★ 只读原图, 不改不挪。
+★ 只读原图, 不改不挪(folders 只在别的文件夹里建硬链接或拷副本)。
 """
 from __future__ import annotations
 
@@ -241,6 +244,26 @@ def upload_time(path: str) -> str:
     return f"{d[:4]}-{d[4:6]}-{d[6:]} {t[:2]}:{t[2:4]}:{t[4:]}"
 
 
+def iter_final(fcsv: Path, policy: dict, broken: list):
+    """一行一行读 page_fast.csv, 按门槛(policy)定最后的类别(规则定的不看门槛)。列数不对的行跳过, 记在 broken[0]。
+    lists 和 folders 都用这一个, 两边的类别保证一样。"""
+    with fcsv.open(encoding="utf-8-sig", newline="") as f:
+        for r in csv.DictReader(f):
+            if None in r or any(v is None for v in r.values()):
+                broken[0] += 1
+                continue
+            if not r["rule"] and r["pred"]:
+                r["cls"] = decide(r["pred"], float(r["p"]), policy)
+            yield r
+
+
+def load_final(fcsv: Path, policy: dict) -> tuple:
+    """返回 (全部行, 列数不对跳过的行数)。"""
+    broken = [0]
+    rows = list(iter_final(fcsv, policy, broken))
+    return rows, broken[0]
+
+
 def write_lists(fcsv: Path, policy: dict, out: Path, dups: int = -1) -> None:
     """按门槛(policy)重新定类别, 每类一个清单 + 汇总。规则定的不看门槛。
     ★ 先删掉 out 里旧的清单和汇总: 换了门槛重出时, 变成 0 张的类别不能留着旧文件。列数不对的行(半截)跳过、记数。"""
@@ -250,15 +273,7 @@ def write_lists(fcsv: Path, policy: dict, out: Path, dups: int = -1) -> None:
             old.unlink()
     if dups < 0 and (fcsv.parent / "dups.txt").exists():
         dups = int((fcsv.parent / "dups.txt").read_text(encoding="utf-8").strip() or 0)
-    rows, broken = [], 0
-    with fcsv.open(encoding="utf-8-sig", newline="") as f:
-        for r in csv.DictReader(f):
-            if None in r or any(v is None for v in r.values()):
-                broken += 1
-                continue
-            if not r["rule"] and r["pred"]:
-                r["cls"] = decide(r["pred"], float(r["p"]), policy)
-            rows.append(r)
+    rows, broken = load_final(fcsv, policy)
     by = defaultdict(list)
     for r in rows:
         by[r["cls"]].append(r)
@@ -378,6 +393,152 @@ def pick(a) -> None:
     print(f"  挑出 {len(sel)} 张, 拷了 {n} 张 -> {a.out}", flush=True)
 
 
+README_LINK = """9 月图库按类别放好的原图(和 9月图库分类清单 一样的分法)
+- 蓝图库在 E 盘, 白图库在 D 盘(硬链接只能和原图在同一个盘): 盘符:\\{root}\\图库名\\类别\\
+- 张数多的类别({over:,} 张以上)按上传日期再分一层
+- 这里的每个文件都是原图的硬链接: 不占硬盘, 和原图是同一个文件
+  * 删这里的文件没关系, 原图还在; 整个文件夹删掉就恢复原样
+  * 不要在这里改图, 改了原图也跟着变
+  * 看文件夹属性时大小会算上, 其实没多占硬盘
+  * 原图删了以后, 只要这里还有链接, 硬盘空间就不会放出来; 要腾硬盘时这里也要一起删
+- 清单数.csv: 每个文件夹几张
+"""
+README_COPY = """9 月图库按类别拷出来的原图(和 9月图库分类清单 一样的分法)
+- 图库名\\类别\\, 张数多的类别({over:,} 张以上)按上传日期再分一层
+- 这些是拷出来的副本, 改了删了都不影响原图
+- 清单数.csv: 每个文件夹几张
+"""
+
+
+def folders(a) -> None:
+    """按清单把每一类的原图放进一个文件夹, 给人一类一类地看、拷。类别和 lists 完全一样(同一个 iter_final + 同一个门槛)。
+    link(默认): 硬链接, 不占硬盘, 原图不动。硬链接只能建在原图同一个盘上 -> 根目录 = 原图所在盘:\\{root-name}\\图库名\\类别\\[日期]\\
+    copy: 拷一份到 --copy-to\\{root-name}\\... (先算空间够不够)。
+    已经有的跳过: 中途停了再跑一遍就接着做。最后数每个类别文件夹的张数对不对, 每类抽 30 张核是不是同一个文件。
+    ★ 省内存(两个图库 206 万行): 只留 (路径, 类别), 一类一类地做。"""
+    import random
+    import shutil
+    policy = json.load(open(a.policy, encoding="utf-8"))
+    if a.lists and len(a.lists) != len(a.csv):
+        print("  ★ --lists 要和 --csv 一样多, 一一对应", flush=True)
+        sys.exit(2)
+    want = set(a.classes) if a.classes else None
+    groups = defaultdict(list)
+    for k, fcsv in enumerate(a.csv):
+        broken, got = [0], Counter()
+        for r in iter_final(fcsv, policy, broken):
+            got[r["cls"]] += 1
+            if want is None or r["cls"] in want:
+                groups[(Path(r["path"]).parent.name, r["cls"])].append(r["path"])
+        if broken[0]:
+            print(f"  ★ {fcsv} 里有 {broken[0]} 行列数不对, 先看看", flush=True)
+            sys.exit(2)
+        if a.lists:
+            # ★ 和交出去的清单对一遍: 每类张数一样才做(门槛文件或 page_fast.csv 不是那一版就停)
+            lst = Counter()
+            for fn in Path(a.lists[k]).glob("*.csv"):
+                with fn.open(encoding="utf-8-sig", newline="") as f:
+                    lst[fn.name.split("_")[0]] += sum(1 for _ in f) - 1
+            if got != lst:
+                print(f"  ★ 和清单 {a.lists[k]} 对不上: 这里 {dict(sorted(got.items()))} 清单 {dict(sorted(lst.items()))}", flush=True)
+                sys.exit(4)
+            print(f"  和清单对上了: {fcsv.parent.name} {sum(got.values()):,} 张", flush=True)
+    if not groups:
+        print("  ★ 没有要放的图(--classes 写错了?)", flush=True)
+        sys.exit(2)
+    info, roots = [], {}
+    for (pool, c), ps in sorted(groups.items()):
+        drives = {Path(p).drive for p in ps}
+        if a.mode == "link" and len(drives) != 1:
+            print(f"  ★ {pool} 的图不在同一个盘上: {sorted(drives)}", flush=True)
+            sys.exit(2)
+        base = Path(a.copy_to) if a.mode == "copy" else Path(drives.pop() + "\\")
+        root = base / a.root_name
+        roots[str(root)] = root
+        info.append((pool, c, ps, len(ps) > a.by_day_over, str(root / pool / f"{c}_{pt.NAMES.get(c, c)}"), str(root)))
+    total = sum(len(ps) for _, _, ps, _, _, _ in info)
+    print(f"  要放 {total:,} 张, {a.mode}, 根目录 {', '.join(sorted(roots))}", flush=True)
+    for pool, c, ps, byday, cf, root in info:
+        names = {os.path.basename(p) for p in ps}
+        if len(names) != len(ps):
+            print(f"  ★ {pool} {c} 里有同名的图, 不做", flush=True)
+            sys.exit(2)
+        print(f"    {pool:14} {c:2} {pt.NAMES.get(c, c):8} {len(ps):>10,}" + ("  按日期分" if byday else ""), flush=True)
+    if a.mode == "copy":
+        need = sum(os.path.getsize(p) for _, _, ps, _, _, _ in info for p in ps if os.path.exists(p))
+        free = shutil.disk_usage(a.copy_to).free
+        print(f"  要拷 {need / 2**30:.1f} GB, {a.copy_to} 剩 {free / 2**30:.1f} GB", flush=True)
+        if need * 1.05 > free:
+            print("  ★ 空间不够, 不拷", flush=True)
+            sys.exit(5)
+    if a.dry_run:
+        print("  (只看不做)", flush=True)
+        return
+    for root in roots.values():
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "说明.txt").write_text((README_COPY if a.mode == "copy" else README_LINK).format(root=a.root_name, over=a.by_day_over),
+                                     encoding="utf-8")
+    made = have = missing = err = done = bad = 0
+    errs, lines, smp = [], defaultdict(list), []
+    random.seed(0)
+    t0 = time.time()
+    step = max(10000, total // 50)
+    for pool, c, ps, byday, cf, root in info:
+        miss_here, mk = 0, set()
+        for src in ps:
+            d = os.path.join(cf, upload_time(src)[:10] or "未知日期") if byday else cf
+            if d not in mk:
+                os.makedirs(d, exist_ok=True)
+                mk.add(d)
+            dst = os.path.join(d, os.path.basename(src))
+            try:
+                if a.mode == "copy":
+                    if os.path.exists(dst):
+                        have += 1
+                    else:
+                        shutil.copy2(src, dst)
+                        made += 1
+                else:
+                    os.link(src, dst)
+                    made += 1
+            except FileExistsError:
+                have += 1
+            except FileNotFoundError:
+                missing += 1
+                miss_here += 1
+                if len(errs) < 10:
+                    errs.append(f"原图没了 {src}")
+            except OSError as e:
+                err += 1
+                if len(errs) < 10:
+                    errs.append(f"{src}: {e}")
+            done += 1
+            if done % step == 0 or done == total:
+                el = time.time() - t0
+                print(f"    {done:,}/{total:,}  {done / max(el, 1e-9):.0f} 张/秒  新建 {made:,} 已有 {have:,} 原图没了 {missing:,} 出错 {err:,}",
+                      flush=True)
+        # 核对这一类: 文件夹里(含日期子目录)的张数 = 要放的 - 原图没了的(多了少了都算对不上); 抽 30 张核是不是同一个文件
+        on_disk = sum(len(fs) for _, _, fs in os.walk(cf))
+        exp = len(ps) - miss_here
+        ok = on_disk == exp
+        bad += 0 if ok else 1
+        print(f"    核对 {pool:14} {c:2} 文件夹里 {on_disk:>10,} 张  应有 {exp:>10,}" + ("" if ok else "  ★ 对不上"), flush=True)
+        lines[root].append(f"{pool},{c},{os.path.basename(cf)},{on_disk},{'是' if byday else ''}")
+        for src in random.sample(ps, min(30, len(ps))):
+            d = os.path.join(cf, upload_time(src)[:10] or "未知日期") if byday else cf
+            smp.append((src, os.path.join(d, os.path.basename(src))))
+    for e in errs:
+        print("    ★ " + e, flush=True)
+    for k, root in roots.items():
+        (root / "清单数.csv").write_text("\n".join(["图库,类别,文件夹,张数,按日期分"] + lines[k]) + "\n", encoding="utf-8-sig")
+    chk = [(s, d) for s, d in smp if os.path.exists(s) and os.path.exists(d)]
+    same = sum(1 for s, d in chk if (os.path.samefile(s, d) if a.mode == "link" else os.path.getsize(s) == os.path.getsize(d)))
+    print(f"  抽 {len(chk)} 张核对: {'同一个文件' if a.mode == 'link' else '大小一样'} {same} 张", flush=True)
+    print(f"  用时 {time.time() - t0:.0f} 秒  新建 {made:,}  已有 {have:,}  原图没了 {missing:,}  出错 {err:,}  文件夹对不上 {bad}", flush=True)
+    if err or bad or same != len(chk):
+        sys.exit(3)
+
+
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description="整页分类快速版(只看图)")
@@ -404,6 +565,16 @@ def main() -> None:
     pk = sub.add_parser("pick")
     pk.add_argument("--preds", type=Path, required=True, help="page_cnn 评估出的 preds.csv")
     pk.add_argument("--out", type=Path, required=True)
+    fo = sub.add_parser("folders")
+    fo.add_argument("--csv", type=Path, nargs="+", required=True, help="page_fast.csv(蓝图库、白图库各一个)")
+    fo.add_argument("--policy", type=Path, required=True)
+    fo.add_argument("--lists", type=Path, nargs="*", default=None, help="交出去的清单目录, 和 --csv 一一对应: 每类张数对上才做")
+    fo.add_argument("--classes", nargs="*", default=None, help="只放这几类(默认全部)")
+    fo.add_argument("--mode", choices=("link", "copy"), default="link")
+    fo.add_argument("--copy-to", default="", help="copy 时放到哪(盘或目录)")
+    fo.add_argument("--root-name", default="分图_9月")
+    fo.add_argument("--by-day-over", type=int, default=50000, help="超过这么多张的类别按上传日期再分一层")
+    fo.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
     if a.cmd == "run":
         run(a)
@@ -411,6 +582,10 @@ def main() -> None:
         write_lists(a.csv, json.load(open(a.policy, encoding="utf-8")), a.out)
     elif a.cmd == "pick":
         pick(a)
+    elif a.cmd == "folders":
+        if a.mode == "copy" and not a.copy_to:
+            ap.error("--mode copy 要给 --copy-to")
+        folders(a)
     else:
         compare(a)
 
