@@ -296,6 +296,8 @@ def main() -> None:
                     help="★ 调试用: 拿训练集当验证集。跑不到接近 100% 就说明有 bug, "
                          "不是数据不够 —— 几十条样本任何正常模型都该背得下来")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--init", type=Path, default=None,
+                    help="从这个 rec_best.pt 接着训(微调), 不从头训。★ 字表要和 --data 里的 charset.txt 一字不差, 不一样就停")
     a = ap.parse_args()
 
     torch.manual_seed(a.seed)
@@ -331,6 +333,16 @@ def main() -> None:
                        batch_sampler=BucketSampler(w_va, a.batch, False))
 
     model = CRNN(len(cs)).to(dev)
+    if a.init:
+        # ★ 微调: 输出层的第 k 个类就是字表第 k 个字, 字表差一个字整层就错位了, 所以必须一字不差
+        ck = torch.load(a.init, map_location="cpu")
+        if ck.get("chars") != chars:
+            print(f"  ★ {a.init} 的字表({len(ck.get('chars') or [])} 字)和 {a.data / 'charset.txt'}({len(chars)} 字)不一样, 不能接着训")
+            raise SystemExit(2)
+        model.load_state_dict(ck["model"])
+        print(f"  从 {a.init} 接着训(字表 {len(chars)} 字一致)")
+        with (out_dir / "train_log.txt").open("a", encoding="utf-8") as f:
+            f.write(f"init {a.init}\tlr {a.lr}\tepochs {a.epochs}\tseed {a.seed}\n")
     # ★ zero_infinity: 有的样本标签比时间步还长(超宽的段被夹到 MAX_W),
     #   那一条的 loss 会是 inf。不置零会把整个 batch 的梯度污染掉。
     crit = nn.CTCLoss(blank=0, zero_infinity=True)
