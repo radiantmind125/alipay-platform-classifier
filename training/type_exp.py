@@ -14,6 +14,8 @@
                                    --set blue=B0,B1,B2,B3,B4 --set B1=B1 --set B2=B2 --set B3=B3
   python training/type_exp.py evalval --val 某组\\val.txt --labels page_type.csv [...] --model h=路径.onnx all=... --out 表.csv
   python training/type_exp.py gold --gold 答案目录 [...] --labels ... --model h=... --route 分流名:B1=模型,B2=模型,B3=模型 --base h
+                                   [--compare 甲:乙 ...] [--dump 逐段.csv]
+  python training/type_exp.py valreport --csv evalval 出的逐段表 --route ... --base h --compare 甲:乙   (老师标签上同样的比法)
 """
 from __future__ import annotations
 
@@ -153,8 +155,50 @@ def sign_p(win: int, lose: int) -> float:
     return min(1.0, 2 * p)
 
 
+def report(cls: list, rel: list, truth: list, preds: dict, routes: list, base: str, compares: list, title: str) -> None:
+    """按页面类型出表 + 分流组合 + 配对符号检验。gold(标准答案)和 valreport(老师标签)共用。
+    分流: 名字:B1=模型,B2=模型,... 某类的段交给那一类的模型, 别的类交给 base。preds 里会加上分流的结果。"""
+    from score_gold import lenient
+    for spec in routes:
+        name, rest = spec.split(":", 1)
+        rt = dict(x.split("=", 1) for x in rest.split(","))
+        preds[name] = [preds[rt.get(c, base)][i] for i, c in enumerate(cls)]
+    ok = {k: [lenient(p) == lenient(t) for p, t in zip(v, truth)] for k, v in preds.items()}
+    groups = [("B1", lambda i: cls[i] == "B1"), ("B2", lambda i: cls[i] == "B2"), ("B3", lambda i: cls[i] == "B3"),
+              ("蓝图B1-3", lambda i: cls[i] in ("B1", "B2", "B3")),
+              ("蓝图B1-3 KEY", lambda i: cls[i] in ("B1", "B2", "B3") and rel[i] == "KEY"),
+              ("白图", lambda i: not cls[i].startswith("B")), ("全部", lambda i: True)]
+    print("=" * 100)
+    print(f"  {title}")
+    print(f"  {'':<14}{'段':>6}  " + "".join(f"{k:>14}" for k in preds))
+    for gname, f in groups:
+        idx = [i for i in range(len(cls)) if f(i)]
+        if idx:
+            print(f"  {gname:<14}{len(idx):>6}  " + "".join(f"{sum(ok[k][i] for i in idx) / len(idx):>14.1%}" for k in preds))
+    print("-" * 100)
+    print("  配对比(赢:输, 双侧符号检验 p)  只算两边一对一错的段")
+    for pair in compares:
+        x, y = pair.split(":", 1)
+        for gname, f in groups:
+            idx = [i for i in range(len(cls)) if f(i)]
+            win = sum(1 for i in idx if ok[x][i] and not ok[y][i])
+            lose = sum(1 for i in idx if ok[y][i] and not ok[x][i])
+            if win + lose:
+                print(f"    {x} vs {y}  {gname:<14} {win:>3}:{lose:<3}  p {sign_p(win, lose):.3f}")
+
+
+def valreport(a) -> None:
+    """evalval 出的逐段表(老师标签)上做和 gold 一样的比法。段多(蓝图验证集 3,600 段), 但对的是老师标签, 不是标准答案。"""
+    with a.csv.open(encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    names = [k for k in rows[0] if k not in ("path", "cls", "label")]
+    preds = {k: [r[k] for r in rows] for k in names}
+    report([r["cls"] for r in rows], [""] * len(rows), [r["label"] for r in rows], preds, a.route, a.base, a.compare,
+           f"验证集(老师标签) {a.csv.name}: {len(rows):,} 段   (整段全对, 宽口径)")
+
+
 def gold(a) -> None:
-    from score_gold import SKIP, lenient, run_model
+    from score_gold import SKIP, run_model
     lab = load_labels(a.labels)
     segs = []                       # (答案目录, id, 文件, 页面类别, 答案, 重要性)
     for g in a.gold:
@@ -172,33 +216,8 @@ def gold(a) -> None:
     for k, m in _models(a.model):
         print(f"  读 {k} ...", flush=True)
         preds[k] = run_model(m, files)
-    # 分流: 某类的段交给那一类的模型, 别的类交给 --base
-    for spec in a.route:
-        name, rest = spec.split(":", 1)
-        rt = dict(x.split("=", 1) for x in rest.split(","))
-        preds[name] = [preds[rt.get(s[3], a.base)][i] for i, s in enumerate(segs)]
-    ok = {k: [lenient(p) == lenient(s[4]) for p, s in zip(v, segs)] for k, v in preds.items()}
-    groups = [("B1", lambda s: s[3] == "B1"), ("B2", lambda s: s[3] == "B2"), ("B3", lambda s: s[3] == "B3"),
-              ("蓝图B1-3", lambda s: s[3] in ("B1", "B2", "B3")), ("蓝图B1-3 KEY", lambda s: s[3] in ("B1", "B2", "B3") and s[5] == "KEY"),
-              ("白图", lambda s: not s[3].startswith("B")), ("全部", lambda s: True)]
-    print("=" * 100)
-    print(f"  标准答案 {', '.join(g.name for g in a.gold)}: 计分 {len(segs):,} 段   (整段全对, 宽口径)")
-    print(f"  {'':<14}{'段':>6}  " + "".join(f"{k:>14}" for k in preds))
-    for gname, f in groups:
-        idx = [i for i, s in enumerate(segs) if f(s)]
-        if not idx:
-            continue
-        print(f"  {gname:<14}{len(idx):>6}  " + "".join(f"{sum(ok[k][i] for i in idx) / len(idx):>14.1%}" for k in preds))
-    print("-" * 100)
-    print("  配对比(赢:输, 双侧符号检验 p)  只算两边一对一错的段")
-    for pair in a.compare:
-        x, y = pair.split(":", 1)
-        for gname, f in groups:
-            idx = [i for i, s in enumerate(segs) if f(s)]
-            win = sum(1 for i in idx if ok[x][i] and not ok[y][i])
-            lose = sum(1 for i in idx if ok[y][i] and not ok[x][i])
-            if win + lose:
-                print(f"    {x} vs {y}  {gname:<14} {win:>3}:{lose:<3}  p {sign_p(win, lose):.3f}")
+    report([s[3] for s in segs], [s[5] for s in segs], [s[4] for s in segs], preds, a.route, a.base, a.compare,
+           f"标准答案 {', '.join(g.name for g in a.gold)}: 计分 {len(segs):,} 段   (整段全对, 宽口径)")
     if a.dump:
         with a.dump.open("w", encoding="utf-8-sig", newline="") as f:
             w = csv.writer(f)
@@ -232,8 +251,13 @@ def main() -> None:
     g.add_argument("--base", default="h")
     g.add_argument("--compare", nargs="*", default=[], help="甲:乙 配对比")
     g.add_argument("--dump", type=Path, default=None)
+    v = sub.add_parser("valreport")
+    v.add_argument("--csv", type=Path, required=True, help="evalval 出的逐段表")
+    v.add_argument("--route", nargs="*", default=[])
+    v.add_argument("--base", default="h")
+    v.add_argument("--compare", nargs="*", default=[])
     a = ap.parse_args()
-    {"sets": sets, "evalval": evalval, "gold": gold}[a.cmd](a)
+    {"sets": sets, "evalval": evalval, "gold": gold, "valreport": valreport}[a.cmd](a)
 
 
 if __name__ == "__main__":
