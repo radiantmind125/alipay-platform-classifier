@@ -164,7 +164,11 @@ namespace Ssp
         static List<Row> FindRows(byte[] g, byte[] s, int W, int H)
         {
             int x0 = (int)(0.45 * W);
-            int rw = W - x0;
+            // 最右边 3% 宽不看: 箭头离右边至少 3% 宽(下面 margin 的条件), 那一条里不会有箭头。
+            // 从大截图里切下来的图右边常带一条 1 像素的深色边(2026-10-21 的一张假图),
+            // 以前每行最右边那一段就成了这条边, 箭头找不到, 判不了(锚点不对)
+            int x1 = W - (int)(0.03 * W);
+            int rw = x1 - x0;
             bool Ink(int y, int x) => g[y * W + x] < InkGray && s[y * W + x] < InkSat;
             bool Dark(int y, int x) => g[y * W + x] < DarkGray && s[y * W + x] < InkSat;
 
@@ -172,7 +176,7 @@ namespace Ssp
             for (int y = 0; y < H; y++)
             {
                 int n = 0;
-                for (int x = x0; x < W && n < 2; x++) if (Ink(y, x)) n++;
+                for (int x = x0; x < x1 && n < 2; x++) if (Ink(y, x)) n++;
                 on[y] = n >= 2;
             }
             var outRows = new List<Row>();
