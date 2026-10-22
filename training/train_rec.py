@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import time
 from pathlib import Path
@@ -151,9 +152,29 @@ class BucketSampler(Sampler):
         return (len(self.widths) + self.bs - 1) // self.bs
 
 
+def jitter_crop(img: np.ndarray, j: float, rng: random.Random) -> np.ndarray:
+    """上下边随机抖一下(只在训练时): 各 50% 机会从上 / 下裁掉最多 j 倍高, 30% 机会上下补最多 j 倍高(复制边上那一行)。
+    ★ 为什么(2026-10-23): 模型对裁图上下边很敏感 —— 金标准只换切法不重训, 3~4% 的段读法就变了;
+      上线时裁图来自别人的检测框, 边不会和我们一样。训练时抖一抖, 紧的松的都见过。至少留 70% 高。"""
+    h = img.shape[0]
+    if h < 8 or j <= 0:
+        return img
+    lim = int(j * h)
+    top = rng.randint(0, lim) if rng.random() < 0.5 else 0
+    bot = rng.randint(0, lim) if rng.random() < 0.5 else 0
+    if h - top - bot < 0.7 * h:
+        top, bot = top // 2, bot // 2
+    img = img[top:h - bot] if bot else img[top:]
+    if rng.random() < 0.3:
+        pt, pb = rng.randint(0, lim), rng.randint(0, lim)
+        img = cv2.copyMakeBorder(img, pt, pb, 0, 0, cv2.BORDER_REPLICATE)
+    return img
+
+
 class SegDataset(Dataset):
-    def __init__(self, rows, cs: Charset, train: bool):
-        self.rows, self.cs, self.train = rows, cs, train
+    def __init__(self, rows, cs: Charset, train: bool, jitter: float = 0.0):
+        self.rows, self.cs, self.train, self.jitter = rows, cs, train, jitter
+        self.rng = None     # ★ 每个 DataLoader 子进程第一次用时各自起一个(Windows 上子进程拿的是同一份拷贝, 在这里建会全都一样)
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -163,6 +184,10 @@ class SegDataset(Dataset):
         img = cv2.imdecode(np.fromfile(path, np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             img = np.zeros((IMG_H, MIN_W, 3), np.uint8)
+        if self.train and self.jitter > 0:
+            if self.rng is None:
+                self.rng = random.Random(int.from_bytes(os.urandom(8), "little"))
+            img = jitter_crop(img, self.jitter, self.rng)
         x = prep(img)
         y = self.cs.encode(txt)
         if not y:
@@ -296,6 +321,8 @@ def main() -> None:
                     help="★ 调试用: 拿训练集当验证集。跑不到接近 100% 就说明有 bug, "
                          "不是数据不够 —— 几十条样本任何正常模型都该背得下来")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--jitter", type=float, default=0.0,
+                    help="训练时裁图上下边随机抖动的幅度(倍高, 比如 0.15); 0 = 不抖(和以前一样)。验证集不抖")
     ap.add_argument("--init", type=Path, default=None,
                     help="从这个 rec_best.pt 接着训(微调), 不从头训。★ 字表要和 --data 里的 charset.txt 一字不差, 不一样就停")
     a = ap.parse_args()
@@ -325,7 +352,11 @@ def main() -> None:
     print("  量一遍图宽好按宽度分桶(只读文件头, 不解码)...")
     w_tr = image_widths(tr, "train")
     w_va = image_widths(va, "val")
-    dl_tr = DataLoader(SegDataset(tr, cs, True), collate_fn=collate,
+    if a.jitter > 0:
+        print(f"  训练时上下边抖动 {a.jitter}(验证集不抖)")
+        with (out_dir / "train_log.txt").open("a", encoding="utf-8") as f:
+            f.write(f"jitter {a.jitter}\n")
+    dl_tr = DataLoader(SegDataset(tr, cs, True, a.jitter), collate_fn=collate,
                        num_workers=a.workers,
                        batch_sampler=BucketSampler(w_tr, a.batch, True, drop_last=True))
     dl_va = DataLoader(SegDataset(va, cs, False), collate_fn=collate,

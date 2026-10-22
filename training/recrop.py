@@ -40,6 +40,7 @@ CAP = 2.0          # 每边最多往外扩几倍行高
 V_OVERLAP = 0.3    # 字块和行的 label 边至少重叠自身高度的这么多
 CENTER = 0.35      # 字块中心离这一行的 label 边不能超过这么多倍行高(大号金额底对齐, 中心正好在行顶附近)
 TALL = 2.4         # 比行高这么多倍还高的是竖线 / 框 / 一列图标, 不算字(核对图: 大号金额最高 2.0 倍, 图标列 2.49 倍)
+CONTAINER_H, CONTAINER_N = 1.2, 3   # 比行高 1.2 倍高、外接框里整个装着 >= 3 块别的: 按钮外圈 / 图标 / 头像, 不算字
 
 
 def layout(img: np.ndarray) -> dict:
@@ -69,29 +70,53 @@ def layout(img: np.ndarray) -> dict:
     return out
 
 
+def _encloses(st, i: int, near: list) -> int:
+    """第 i 块的外接框里整个装着几块别的(按钮外圈、图标、头像里面都装着字或花纹; 字基本不装)。"""
+    x, y, w, h = (int(v) for v in st[i][:4])
+    n = 0
+    for j in near:
+        if j == i:
+            continue
+        xj, yj, wj, hj = (int(v) for v in st[j][:4])
+        if xj > x and yj > y and xj + wj < x + w and yj + hj < y + h:
+            n += 1
+    return n
+
+
 def seg_extent(L: dict, la: int, lb: int, a: int, b: int):
-    """这一段自己的字块的上下沿 (top, bottom); 一个都没有返回 None。"""
-    st, kept, bands = L["st"], L["kept"], L["bands"]
+    """这一段自己的字块的上下沿 (top, bottom); 一个都没有返回 None。(numpy 一次筛完, 51 万段也快)"""
+    st, bands = L["st"], L["bands"]
+    if "kept_mask" not in L:
+        km = np.zeros(len(st), bool)
+        km[[k for k in L["kept"] if k < len(st)]] = True
+        L["kept_mask"] = km
     row_h = max(1, lb - la)
-    top = bot = None
-    for i in range(1, len(st)):
-        x, y, w, h, area = (int(v) for v in st[i])
-        if area < 6 or i in kept:
-            continue
-        if h > TALL * row_h or (w > 3 * row_h and h < 0.25 * row_h):
-            continue
-        if min(x + w, b) - max(x, a) < 0.5 * w:
-            continue
-        if min(y + h, lb) - max(y, la) < V_OVERLAP * h:
-            continue
-        cy = y + h / 2
-        if any(p <= cy <= q for p, q in bands):
-            continue
-        if not (la - CENTER * row_h <= cy <= lb + CENTER * row_h):
-            continue                    # 中心离这一行太远: 是上一行 / 下一行的字(行边夹在两行中间时会这样)
-        top = y if top is None else min(top, y)
-        bot = y + h if bot is None else max(bot, y + h)
-    return None if top is None else (top, bot)
+    X, Y, Wc, Hc, A = (st[:, k].astype(np.int64) for k in range(5))
+    idx = np.arange(len(st))
+    sel = (idx > 0) & (A >= 6) & ~L["kept_mask"]
+    sel &= ~((Hc > TALL * row_h) | ((Wc > 3 * row_h) & (Hc < 0.25 * row_h)))
+    sel &= (np.minimum(X + Wc, b) - np.maximum(X, a)) >= 0.5 * Wc
+    sel &= (np.minimum(Y + Hc, lb) - np.maximum(Y, la)) >= V_OVERLAP * Hc
+    cy = Y + Hc / 2
+    for p, q in bands:
+        sel &= ~((cy >= p) & (cy <= q))
+    sel &= (cy >= la - CENTER * row_h) & (cy <= lb + CENTER * row_h)
+    cand = np.nonzero(sel)[0]
+    if len(cand) and (Hc[cand] > CONTAINER_H * row_h).any():
+        nearm = (idx > 0) & (A >= 6) & (np.minimum(X + Wc, b) > np.maximum(X, a)) & (Y < lb + 3 * row_h) & (Y + Hc > la - 3 * row_h)
+        near = np.nonzero(nearm)[0]
+        keep = []
+        for i in cand:
+            if Hc[i] > CONTAINER_H * row_h:
+                inside = ((X[near] > X[i]) & (Y[near] > Y[i]) & (X[near] + Wc[near] < X[i] + Wc[i]) & (Y[near] + Hc[near] < Y[i] + Hc[i])
+                          & (near != i)).sum()
+                if inside >= CONTAINER_N:
+                    continue            # 外圈: 按钮框 / 图标 / 头像, 里面装着别的块 —— 不按它扩(10-23: 免费领 92 -> 157 像素, 字被缩小)
+            keep.append(i)
+        cand = np.array(keep, dtype=np.int64)
+    if not len(cand):
+        return None
+    return int(Y[cand].min()), int((Y[cand] + Hc[cand]).max())
 
 
 def neighbours(L: dict, la: int, lb: int) -> tuple:
@@ -296,6 +321,160 @@ def regold(a) -> None:
     print("REGOLD_OK", flush=True)
 
 
+def load_index(files: list) -> dict:
+    """文件名(小写) -> 现在的路径: 从 page_type.csv 的 path 列来(原图搬过家时按文件名找)。"""
+    import csv
+    index = {}
+    for fn in files:
+        if Path(fn).exists():
+            with open(fn, encoding="utf-8-sig", newline="") as f:
+                for r in csv.DictReader(f):
+                    index.setdefault(Path(r["path"]).name.lower(), r["path"])
+    return index
+
+
+def resolve_path(src: str, index: dict) -> tuple:
+    """(现在的路径或 None, 怎么找到的)。原路径 -> 按文件名查 index -> 换盘符。"""
+    if Path(src).exists():
+        return src, "orig"
+    q = index.get(Path(src).name.lower())
+    if q and Path(q).exists():
+        return q, "index"
+    if len(src) > 2 and src[1] == ":":
+        for drv in "EDCF":
+            q = drv + src[1:]
+            if Path(q).exists():
+                return q, "drive"
+    return None, "missing"
+
+
+_INDEX = {}
+
+
+def _recut_init(index: dict) -> None:
+    global _INDEX
+    cv2.setNumThreads(1)
+    _INDEX = index
+
+
+def _recut_page(job) -> list:
+    """一张原图: 解码一次、算一次字块, 把它的每一段重切到 seg_input_rc。
+    每段先按旧切法切, 和 seg_input 里存的逐像素比; 对不上(行 / 段 / 原图不一致)就**原样拷旧图**, 不拿新切法冒险。
+    已经切过的(seg_input_rc 里有了)跳过 —— 停了再跑接着做。"""
+    src, items = job
+    out = []
+    todo = [it for it in items if not (Path(it["dir"]) / "seg_input_rc" / it["file"]).exists()]
+    for it in items:
+        if it not in todo:
+            out.append((it["dir"], it["file"], "done_before", 0, 0))
+    if not todo:
+        return out
+    path, how = resolve_path(src, _INDEX)
+    img = None
+    if path:
+        try:
+            img = cv2.imdecode(np.fromfile(path, np.uint8), cv2.IMREAD_COLOR)
+        except Exception:  # noqa: BLE001
+            img = None
+    L = layout(img) if img is not None else None
+    for it in todo:
+        d = Path(it["dir"])
+        dst = d / "seg_input_rc" / it["file"]
+        stored_p = d / "seg_input" / it["file"]
+        if img is None:
+            if stored_p.exists():
+                dst.write_bytes(stored_p.read_bytes())
+            out.append((it["dir"], it["file"], "page_missing", 0, 0))
+            continue
+        la, lb, ia, ib, x0, x1 = (int(it[k]) for k in ("la", "lb", "ia", "ib", "x0", "x1"))
+        stored = cv2.imdecode(np.fromfile(str(stored_p), np.uint8), cv2.IMREAD_COLOR) if stored_p.exists() else None
+        old = img[ia:ib, x0:x1]
+        if stored is None or stored.shape != old.shape or not np.array_equal(stored, old):
+            if stored_p.exists():
+                dst.write_bytes(stored_p.read_bytes())
+            out.append((it["dir"], it["file"], "old_mismatch", 0, 0))
+            continue
+        ia2, ib2 = new_box(L, la, lb, ia, ib, x0, x1)
+        cv2.imencode(".png", img[ia2:ib2, x0:x1])[1].tofile(str(dst))
+        out.append((it["dir"], it["file"], "ok_" + how, ia - ia2, ib2 - ib))
+    return out
+
+
+def recut(a) -> None:
+    """训练集的段全部按新切法重切到 <目录>\\seg_input_rc\\ (旧的 seg_input 一张不动)。只切在训练里的段(bad != 1 而且有字)。
+    按原图分组并行; 每段先核对旧切法 == 存的 seg_input(对不上的原样拷旧图); 出 _recut_log.csv 和纯 ASCII 的 RECUT_STATS。"""
+    import csv
+    from collections import Counter
+    from concurrent.futures import ProcessPoolExecutor
+    index = load_index(a.page_index)
+    print(f"  按文件名找原图的表 {len(index):,} 张", flush=True)
+    for d in a.pairs:
+        with (d / "_pairs_labeled.csv").open(encoding="utf-8-sig", newline="") as f:
+            rows = {r["file"]: r for r in csv.DictReader(f)}
+        jobs = {}
+        n_skip = 0
+        with (d / "_segments.csv").open(encoding="utf-8-sig", newline="") as f:
+            for s in csv.DictReader(f):
+                if s.get("bad") == "1" or not (s.get("text") or "").strip():
+                    n_skip += 1
+                    continue
+                r = rows.get(s["row_file"])
+                if r is None:
+                    n_skip += 1
+                    continue
+                jobs.setdefault(s["source"], []).append({
+                    "dir": str(d), "file": s["file"], "x0": s["x0"], "x1": s["x1"],
+                    "la": r["label_y0"], "lb": r["label_y1"], "ia": r["input_y0"], "ib": r["input_y1"]})
+        (d / "seg_input_rc").mkdir(exist_ok=True)
+        n_seg = sum(len(v) for v in jobs.values())
+        print(f"  {d.name}: 原图 {len(jobs):,} 张  要切 {n_seg:,} 段  (不在训练里 / 找不到行 跳过 {n_skip:,})", flush=True)
+        cnt, log = Counter(), []
+        done = 0
+        with ProcessPoolExecutor(a.workers, initializer=_recut_init, initargs=(index,)) as ex:
+            for res in ex.map(_recut_page, list(jobs.items()), chunksize=4):
+                for dd, fn, st_, up, down in res:
+                    cnt[st_.split("_")[0] if st_.startswith("ok") else st_] += 1
+                    if st_.startswith("ok") and (up or down):
+                        cnt["changed"] += 1
+                    log.append((fn, st_, up, down))
+                done += 1
+                if done % 2000 == 0:
+                    print(f"    {done:,}/{len(jobs):,} 张图", flush=True)
+        with (d / "_recut_log.csv").open("w", encoding="utf-8-sig", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["file", "status", "up", "down"])
+            w.writerows(log)
+        print(f"RECUT_STATS {d.name} total={n_seg} ok={cnt['ok']} changed={cnt['changed']} old_mismatch={cnt['old_mismatch']} "
+              f"page_missing={cnt['page_missing']} done_before={cnt['done_before']}", flush=True)
+    print("RECUT_OK", flush=True)
+
+
+def relist(a) -> None:
+    """训练集清单换成重切的图: 路径里 \\seg_input\\ 换成 \\seg_input_rc\\(新图在才换, 不在就留旧图并记数), 字表原样拷。标签一字不动。"""
+    import shutil
+    if a.out.exists():
+        print(f"  ★ {a.out} 已经有了, 不覆盖", flush=True)
+        sys.exit(2)
+    a.out.mkdir(parents=True)
+    tot = rc = 0
+    for name in ("train.txt", "val.txt"):
+        lines_out = []
+        for ln in (a.src / name).read_text(encoding="utf-8").splitlines():
+            if "\t" not in ln:
+                continue
+            p, txt = ln.split("\t", 1)
+            q = p.replace("\\seg_input\\", "\\seg_input_rc\\").replace("/seg_input/", "/seg_input_rc/")
+            tot += 1
+            if q != p and Path(q).exists():
+                rc += 1
+                p = q
+            lines_out.append(f"{p}\t{txt}")
+        (a.out / name).write_text("\n".join(lines_out) + "\n", encoding="utf-8")
+    shutil.copyfile(a.src / "charset.txt", a.out / "charset.txt")
+    print(f"  {a.src.name} -> {a.out.name}: {tot:,} 段, 换成重切图的 {rc:,} ({rc / max(1, tot):.2%})", flush=True)
+    print(f"RELIST_STATS total={tot} rc={rc}", flush=True)
+
+
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description="切图修正: 每段按自己的字定上下边")
@@ -314,11 +493,22 @@ def main() -> None:
     g.add_argument("--suffix", default="_rc", help="新答案目录名 = 原名 + 这个")
     g.add_argument("--page-index", nargs="*", default=[r"E:\_move_logs\pagetype_pinyin_v4\page_type.csv", r"E:\_move_logs\pagetype_census_v4\page_type.csv"],
                    help="原图搬过家时按文件名找现在的路径(page_type.csv 的 path 列)")
+    c = sub.add_parser("recut")
+    c.add_argument("--pairs", type=Path, nargs="+", required=True, help="配对目录(里面有 _segments.csv / _pairs_labeled.csv / seg_input)")
+    c.add_argument("--workers", type=int, default=8)
+    c.add_argument("--page-index", nargs="*", default=[r"E:\_move_logs\pagetype_pinyin_v4\page_type.csv", r"E:\_move_logs\pagetype_census_v4\page_type.csv"])
+    rl = sub.add_parser("relist")
+    rl.add_argument("--src", type=Path, required=True, help="原训练集目录(train.txt / val.txt / charset.txt)")
+    rl.add_argument("--out", type=Path, required=True)
     a = ap.parse_args()
     if a.cmd == "demo":
         demo(a)
     elif a.cmd == "regold":
         regold(a)
+    elif a.cmd == "recut":
+        recut(a)
+    elif a.cmd == "relist":
+        relist(a)
 
 
 if __name__ == "__main__":
