@@ -31,7 +31,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import random
 import time
 from pathlib import Path
@@ -152,10 +151,15 @@ class BucketSampler(Sampler):
         return (len(self.widths) + self.bs - 1) // self.bs
 
 
+JITTER_MAX = 0.3
+
+
 def jitter_crop(img: np.ndarray, j: float, rng: random.Random) -> np.ndarray:
-    """上下边随机抖一下(只在训练时): 各 50% 机会从上 / 下裁掉最多 j 倍高, 30% 机会上下补最多 j 倍高(复制边上那一行)。
+    """上下边随机抖一下(只在训练时): 各 50% 机会从上 / 下裁掉最多 j 倍高, 30% 机会上下补最多 j 倍高(补底色)。
     ★ 为什么(2026-10-23): 模型对裁图上下边很敏感 —— 金标准只换切法不重训, 3~4% 的段读法就变了;
-      上线时裁图来自别人的检测框, 边不会和我们一样。训练时抖一抖, 紧的松的都见过。至少留 70% 高。"""
+      别人的检测框裁的图, 边不会和我们一样。训练时抖一抖, 紧的松的都见过。j <= 0.3 时至少留 70% 高。
+    ★ 裁会切进字一点点(新切法字下面只留 2 像素): 故意的 —— 紧的框(旧切法、别人的检测框)本来就这样, 最多 j 倍高, 不会切掉半个字。
+    ★ 补的是这张图的底色(中位色), 不是复制边上那一行: 边上那行有字时会拉出一道道竖条, 真实的松框里没有(10-23 复核)。"""
     h = img.shape[0]
     if h < 8 or j <= 0:
         return img
@@ -167,14 +171,16 @@ def jitter_crop(img: np.ndarray, j: float, rng: random.Random) -> np.ndarray:
     img = img[top:h - bot] if bot else img[top:]
     if rng.random() < 0.3:
         pt, pb = rng.randint(0, lim), rng.randint(0, lim)
-        img = cv2.copyMakeBorder(img, pt, pb, 0, 0, cv2.BORDER_REPLICATE)
+        bg = [int(v) for v in np.median(img.reshape(-1, img.shape[2]), axis=0)]
+        img = cv2.copyMakeBorder(img, pt, pb, 0, 0, cv2.BORDER_CONSTANT, value=bg)
     return img
 
 
 class SegDataset(Dataset):
     def __init__(self, rows, cs: Charset, train: bool, jitter: float = 0.0):
         self.rows, self.cs, self.train, self.jitter = rows, cs, train, jitter
-        self.rng = None     # ★ 每个 DataLoader 子进程第一次用时各自起一个(Windows 上子进程拿的是同一份拷贝, 在这里建会全都一样)
+        self.rng = None     # ★ 每个 DataLoader 子进程第一次用时各自起一个(Windows 上子进程拿的是同一份拷贝, 在这里建会全都一样);
+                            #   种子用 torch.initial_seed(): 子进程里是 torch 给的(--seed 定的, 每轮每个子进程不同), 同一个 --seed 抖法能复现
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -186,7 +192,7 @@ class SegDataset(Dataset):
             img = np.zeros((IMG_H, MIN_W, 3), np.uint8)
         if self.train and self.jitter > 0:
             if self.rng is None:
-                self.rng = random.Random(int.from_bytes(os.urandom(8), "little"))
+                self.rng = random.Random(torch.initial_seed())
             img = jitter_crop(img, self.jitter, self.rng)
         x = prep(img)
         y = self.cs.encode(txt)
@@ -326,6 +332,8 @@ def main() -> None:
     ap.add_argument("--init", type=Path, default=None,
                     help="从这个 rec_best.pt 接着训(微调), 不从头训。★ 字表要和 --data 里的 charset.txt 一字不差, 不一样就停")
     a = ap.parse_args()
+    if not 0 <= a.jitter <= JITTER_MAX:
+        ap.error(f"--jitter 要在 0 ~ {JITTER_MAX} 之间(再大裁掉的会超过 30% 高, 1.0 以上能裁成空图)")
 
     torch.manual_seed(a.seed)
     random.seed(a.seed)

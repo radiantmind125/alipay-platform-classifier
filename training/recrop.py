@@ -21,6 +21,8 @@ make_pinyin_pairs 切行时, 行的上下边取的是这一行所有字块的**�
 ----
     python training/recrop.py demo --src 图目录或名单 [...] --out 输出目录 [--n 40]      # 出前后对比核对图
     python training/recrop.py regold --gold 答案目录 [...] --out-root 输出 [--min-ext 0.15 --suffix _rcB]   # 金标准从原图重切
+    python training/recrop.py recut --pairs 配对目录 [...] [--workers 20]      # 训练集的段重切到 <目录>\seg_input_rc (可接着跑)
+    python training/recrop.py relist --src 旧训练集目录 --out 新训练集目录 [--min-rc 0.97]   # 清单换成重切图
 """
 from __future__ import annotations
 
@@ -348,6 +350,28 @@ def resolve_path(src: str, index: dict) -> tuple:
     return None, "missing"
 
 
+def recut_version() -> str:
+    """新切法的指纹: 常数 + 切行切段那几个函数的源码。代码一改指纹就变 —— 接着跑时不会拿上一版切的图充数。"""
+    import hashlib
+    import inspect
+    import erase_pinyin
+    import make_pinyin_pairs
+    fns = (layout, _encloses, seg_extent, neighbours, new_box, make_pinyin_pairs._pinyin_bands, make_pinyin_pairs._rows,
+           erase_pinyin.annotation_labels, erase_pinyin.text_mask, erase_pinyin.local_background)
+    consts = (f"PAD_Y={PAD_Y} CAP={CAP} V_OVERLAP={V_OVERLAP} CENTER={CENTER} TALL={TALL} CONTAINER={CONTAINER_H},{CONTAINER_N} "
+              f"LABEL_PAD={LABEL_PAD} FALLBACK={FALLBACK_SHIFT_RATIO} MIN_ROW_H={MIN_ROW_H}")
+    src = consts + "".join(inspect.getsource(f).replace("\r\n", "\n") for f in fns)
+    return hashlib.sha1(src.encode("utf-8")).hexdigest()[:12]
+
+
+def _done(p: Path) -> bool:
+    """切好了: 文件在而且不是空的(写的时候先写 .tmp 再改名, 半截文件不会顶着正式名字)。"""
+    try:
+        return p.stat().st_size > 0
+    except OSError:
+        return False
+
+
 _INDEX = {}
 
 
@@ -359,14 +383,19 @@ def _recut_init(index: dict) -> None:
 
 def _recut_page(job) -> list:
     """一张原图: 解码一次、算一次字块, 把它的每一段重切到 seg_input_rc。
-    每段先按旧切法切, 和 seg_input 里存的逐像素比; 对不上(行 / 段 / 原图不一致)就**原样拷旧图**, 不拿新切法冒险。
-    已经切过的(seg_input_rc 里有了)跳过 —— 停了再跑接着做。"""
+    每段先按旧切法切, 和 seg_input 里存的逐像素比; 对不上(行 / 段 / 原图不一致)或原图找不到的**什么都不写**,
+    relist 时这些段自然留旧图、算进覆盖率; 再跑一遍会重试它们(2026-10-23 复核: 以前拷旧图进 seg_input_rc,
+    再跑时被当成"切过了", 闸门和覆盖率都看不出来)。
+    已经切好的(seg_input_rc 里有、不是空的)跳过 —— 停了再跑接着做; 指纹不对的整个目录在 recut() 里就拦下了。"""
+    import os
     src, items = job
     out = []
-    todo = [it for it in items if not (Path(it["dir"]) / "seg_input_rc" / it["file"]).exists()]
+    todo = []
     for it in items:
-        if it not in todo:
+        if _done(Path(it["dir"]) / "seg_input_rc" / it["file"]):
             out.append((it["dir"], it["file"], "done_before", 0, 0))
+        else:
+            todo.append(it)
     if not todo:
         return out
     path, how = resolve_path(src, _INDEX)
@@ -382,37 +411,48 @@ def _recut_page(job) -> list:
         dst = d / "seg_input_rc" / it["file"]
         stored_p = d / "seg_input" / it["file"]
         if img is None:
-            if stored_p.exists():
-                dst.write_bytes(stored_p.read_bytes())
             out.append((it["dir"], it["file"], "page_missing", 0, 0))
             continue
         la, lb, ia, ib, x0, x1 = (int(it[k]) for k in ("la", "lb", "ia", "ib", "x0", "x1"))
         stored = cv2.imdecode(np.fromfile(str(stored_p), np.uint8), cv2.IMREAD_COLOR) if stored_p.exists() else None
         old = img[ia:ib, x0:x1]
         if stored is None or stored.shape != old.shape or not np.array_equal(stored, old):
-            if stored_p.exists():
-                dst.write_bytes(stored_p.read_bytes())
             out.append((it["dir"], it["file"], "old_mismatch", 0, 0))
             continue
         ia2, ib2 = new_box(L, la, lb, ia, ib, x0, x1)
-        cv2.imencode(".png", img[ia2:ib2, x0:x1])[1].tofile(str(dst))
+        tmp = dst.with_name(dst.name + ".tmp")
+        cv2.imencode(".png", img[ia2:ib2, x0:x1])[1].tofile(str(tmp))
+        os.replace(tmp, dst)
         out.append((it["dir"], it["file"], "ok_" + how, ia - ia2, ib2 - ib))
     return out
 
 
 def recut(a) -> None:
     """训练集的段全部按新切法重切到 <目录>\\seg_input_rc\\ (旧的 seg_input 一张不动)。只切在训练里的段(bad != 1 而且有字)。
-    按原图分组并行; 每段先核对旧切法 == 存的 seg_input(对不上的原样拷旧图); 出 _recut_log.csv 和纯 ASCII 的 RECUT_STATS。"""
+    按原图分组并行; 每段先核对旧切法 == 存的 seg_input(对不上的不写); 出 _recut_log.csv(追加, 每次带时间)和纯 ASCII 的 RECUT_STATS。
+    seg_input_rc 里记着切法指纹(_recut_version.txt): 和现在的代码对不上就整个停下(RECUT_VERSION_MISMATCH), 不混两版的图。"""
     import csv
+    import time
     from collections import Counter
     from concurrent.futures import ProcessPoolExecutor
+    ver = recut_version()
+    print(f"  切法指纹 {ver}", flush=True)
+    for d in a.pairs:                                  # 先全部核对一遍再动手, 不切到一半才发现
+        rc_dir = d / "seg_input_rc"
+        vf = rc_dir / "_recut_version.txt"
+        if rc_dir.exists() and any(q.suffix.lower() == ".png" for q in rc_dir.iterdir()):
+            have = vf.read_text(encoding="utf-8").strip() if vf.exists() else "none"
+            if have != ver:
+                print(f"RECUT_VERSION_MISMATCH {d.name} have={have} code={ver}", flush=True)
+                sys.exit(3)
     index = load_index(a.page_index)
     print(f"  按文件名找原图的表 {len(index):,} 张", flush=True)
+    run = time.strftime("%Y-%m-%d %H:%M:%S")
     for d in a.pairs:
         with (d / "_pairs_labeled.csv").open(encoding="utf-8-sig", newline="") as f:
             rows = {r["file"]: r for r in csv.DictReader(f)}
         jobs = {}
-        n_skip = 0
+        n_skip = n_row_missing = 0
         with (d / "_segments.csv").open(encoding="utf-8-sig", newline="") as f:
             for s in csv.DictReader(f):
                 if s.get("bad") == "1" or not (s.get("text") or "").strip():
@@ -420,14 +460,18 @@ def recut(a) -> None:
                     continue
                 r = rows.get(s["row_file"])
                 if r is None:
-                    n_skip += 1
+                    n_row_missing += 1                 # 在训练里但找不到行: 单独记, 给闸门看(留旧图)
                     continue
                 jobs.setdefault(s["source"], []).append({
                     "dir": str(d), "file": s["file"], "x0": s["x0"], "x1": s["x1"],
                     "la": r["label_y0"], "lb": r["label_y1"], "ia": r["input_y0"], "ib": r["input_y1"]})
-        (d / "seg_input_rc").mkdir(exist_ok=True)
+        rc_dir = d / "seg_input_rc"
+        rc_dir.mkdir(exist_ok=True)
+        (rc_dir / "_recut_version.txt").write_text(ver + "\n", encoding="utf-8")
+        for t in rc_dir.glob("*.tmp"):                 # 上次停在写到一半的
+            t.unlink()
         n_seg = sum(len(v) for v in jobs.values())
-        print(f"  {d.name}: 原图 {len(jobs):,} 张  要切 {n_seg:,} 段  (不在训练里 / 找不到行 跳过 {n_skip:,})", flush=True)
+        print(f"  {d.name}: 原图 {len(jobs):,} 张  要切 {n_seg:,} 段  (不在训练里 跳过 {n_skip:,}, 在训练里但找不到行 {n_row_missing:,})", flush=True)
         cnt, log = Counter(), []
         done = 0
         with ProcessPoolExecutor(a.workers, initializer=_recut_init, initargs=(index,)) as ex:
@@ -436,27 +480,33 @@ def recut(a) -> None:
                     cnt[st_.split("_")[0] if st_.startswith("ok") else st_] += 1
                     if st_.startswith("ok") and (up or down):
                         cnt["changed"] += 1
-                    log.append((fn, st_, up, down))
+                    log.append((run, fn, st_, up, down))
                 done += 1
                 if done % 2000 == 0:
                     print(f"    {done:,}/{len(jobs):,} 张图", flush=True)
-        with (d / "_recut_log.csv").open("w", encoding="utf-8-sig", newline="") as f:
+        lp = d / "_recut_log.csv"
+        new = not lp.exists()
+        with lp.open("a", encoding="utf-8-sig" if new else "utf-8", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["file", "status", "up", "down"])
+            if new:
+                w.writerow(["run", "file", "status", "up", "down"])
             w.writerows(log)
         print(f"RECUT_STATS {d.name} total={n_seg} ok={cnt['ok']} changed={cnt['changed']} old_mismatch={cnt['old_mismatch']} "
-              f"page_missing={cnt['page_missing']} done_before={cnt['done_before']}", flush=True)
+              f"page_missing={cnt['page_missing']} done_before={cnt['done_before']} row_missing={n_row_missing}", flush=True)
     print("RECUT_OK", flush=True)
 
 
 def relist(a) -> None:
-    """训练集清单换成重切的图: 路径里 \\seg_input\\ 换成 \\seg_input_rc\\(新图在才换, 不在就留旧图并记数), 字表原样拷。标签一字不动。"""
+    """训练集清单换成重切的图: 路径里 \\seg_input\\ 换成 \\seg_input_rc\\(新图在才换, 不在就留旧图并记数), 字表原样拷。标签一字不动。
+    换成新图的不到 --min-rc 就什么都不写(RELIST_LOW): 目录在 = 覆盖率过了关。train.txt 最后写(先 .tmp 再改名), 它在 = 写完了。
+    ★ val.txt 也换成新图: run 目录里 train_log 的验证集数字和旧模型(旧图验证)不能直接比, 新旧模型只在金标准上比。"""
+    import os
     import shutil
-    if a.out.exists():
+    if (a.out / "train.txt").exists():
         print(f"  ★ {a.out} 已经有了, 不覆盖", flush=True)
         sys.exit(2)
-    a.out.mkdir(parents=True)
     tot = rc = 0
+    lists = {}
     for name in ("train.txt", "val.txt"):
         lines_out = []
         for ln in (a.src / name).read_text(encoding="utf-8").splitlines():
@@ -465,14 +515,24 @@ def relist(a) -> None:
             p, txt = ln.split("\t", 1)
             q = p.replace("\\seg_input\\", "\\seg_input_rc\\").replace("/seg_input/", "/seg_input_rc/")
             tot += 1
-            if q != p and Path(q).exists():
+            if q != p and _done(Path(q)):
                 rc += 1
                 p = q
             lines_out.append(f"{p}\t{txt}")
-        (a.out / name).write_text("\n".join(lines_out) + "\n", encoding="utf-8")
-    shutil.copyfile(a.src / "charset.txt", a.out / "charset.txt")
-    print(f"  {a.src.name} -> {a.out.name}: {tot:,} 段, 换成重切图的 {rc:,} ({rc / max(1, tot):.2%})", flush=True)
+        lists[name] = lines_out
+    cov = rc / max(1, tot)
+    print(f"  {a.src.name} -> {a.out.name}: {tot:,} 段, 换成重切图的 {rc:,} ({cov:.2%})", flush=True)
     print(f"RELIST_STATS total={tot} rc={rc}", flush=True)
+    if cov < a.min_rc:
+        print(f"RELIST_LOW cov={cov:.4f} min={a.min_rc} - nothing written", flush=True)
+        sys.exit(4)
+    a.out.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(a.src / "charset.txt", a.out / "charset.txt")
+    (a.out / "val.txt").write_text("\n".join(lists["val.txt"]) + "\n", encoding="utf-8")
+    tmp = a.out / "train.txt.tmp"
+    tmp.write_text("\n".join(lists["train.txt"]) + "\n", encoding="utf-8")
+    os.replace(tmp, a.out / "train.txt")
+    print("RELIST_OK", flush=True)
 
 
 def main() -> None:
@@ -500,6 +560,7 @@ def main() -> None:
     rl = sub.add_parser("relist")
     rl.add_argument("--src", type=Path, required=True, help="原训练集目录(train.txt / val.txt / charset.txt)")
     rl.add_argument("--out", type=Path, required=True)
+    rl.add_argument("--min-rc", type=float, default=0.97, help="换成重切图的段至少这么多, 不够就什么都不写")
     a = ap.parse_args()
     if a.cmd == "demo":
         demo(a)
