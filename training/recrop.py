@@ -182,6 +182,30 @@ def regold(a) -> None:
     import csv
     import shutil
     seg_cache, pl_cache = {}, {}
+    # ★ _segments.csv 里记的原图路径是切图那天的(比如 D 盘的 alipay-ai-data, 后来整个搬到了 E 盘 —— 2026-10-23 服务器上就是这样报错的)。
+    #   找不到时: 按文件名查 page_type.csv(服务器上新跑的, 路径是现在的) -> 再试换盘符 -> 都没有才算找不到(用旧图, 记下来)
+    index = {}
+    for fn in a.page_index:
+        if Path(fn).exists():
+            with open(fn, encoding="utf-8-sig", newline="") as f:
+                for r in csv.DictReader(f):
+                    index.setdefault(Path(r["path"]).name.lower(), r["path"])
+    how = {"原路径": 0, "按文件名找到": 0, "换盘符找到": 0}
+
+    def resolve(src: str):
+        if Path(src).exists():
+            how["原路径"] += 1
+            return src
+        q = index.get(Path(src).name.lower())
+        if q and Path(q).exists():
+            how["按文件名找到"] += 1
+            return q
+        for drv in "EDCF":
+            q = drv + src[1:]
+            if len(src) > 2 and src[1] == ":" and Path(q).exists():
+                how["换盘符找到"] += 1
+                return q
+        return None
 
     def segs_of(d: Path) -> dict:
         if d not in seg_cache:
@@ -223,14 +247,20 @@ def regold(a) -> None:
                 log[r["id"]] = (r["id"], r["file"], "段或行找不到, 用旧图", 0, 0)
                 continue
             jobs.setdefault(s_["source"], []).append((r, s_, row))
-        for src, items in jobs.items():
-            img = cv2.imdecode(np.fromfile(src, np.uint8), cv2.IMREAD_COLOR)
+        for src0, items in jobs.items():
+            src = resolve(src0)
+            img = None
+            if src:
+                try:
+                    img = cv2.imdecode(np.fromfile(src, np.uint8), cv2.IMREAD_COLOR)
+                except Exception:  # noqa: BLE001
+                    img = None
             L = layout(img) if img is not None else None
             for r, s_, row in items:
                 if img is None:
                     missing += 1
                     shutil.copyfile(g / "img" / r["file"], out / "img" / r["file"])
-                    log[r["id"]] = (r["id"], r["file"], "原图读不出, 用旧图", 0, 0)
+                    log[r["id"]] = (r["id"], r["file"], "原图找不到或读不出, 用旧图", 0, 0)
                     continue
                 la, lb = int(row["label_y0"]), int(row["label_y1"])
                 ia, ib = int(row["input_y0"]), int(row["input_y1"])
@@ -254,10 +284,15 @@ def regold(a) -> None:
             w = csv.writer(f)
             w.writerow(["id", "file", "status", "up", "down"])
             w.writerows(log)
+        print(f"  {g.name}: 原图 {len(jobs)} 张  " + "  ".join(f"{k} {v}" for k, v in how.items()), flush=True)
+        for k in how:
+            how[k] = 0
         print(f"  {g.name}: 段 {len(cand)}  旧切法和存的裁图逐像素一样 {same}  不一样 {differ}  找不到 {missing}  新切法上下边变了 {changed}"
               f"  -> {out}", flush=True)
         if differ:
             print(f"  ★ {g.name}: 有 {differ} 段旧切法对不上存的裁图(行 / 段 / 原图不一致), 先看看", flush=True)
+        # 给服务器脚本读的(纯 ASCII)
+        print(f"REGOLD_STATS {g.name} total={len(cand)} same={same} differ={differ} missing={missing} changed={changed}", flush=True)
     print("REGOLD_OK", flush=True)
 
 
@@ -277,6 +312,8 @@ def main() -> None:
     g.add_argument("--pairs-root", type=Path, default=Path(r"E:\alipay-ai-data"), help="src_path 里的目录找不到时到这里按目录名找")
     g.add_argument("--min-ext", type=float, default=0.0, help="新边比旧边多出不到这么多倍行高就不动(0 = 全按新切法)")
     g.add_argument("--suffix", default="_rc", help="新答案目录名 = 原名 + 这个")
+    g.add_argument("--page-index", nargs="*", default=[r"E:\_move_logs\pagetype_pinyin_v4\page_type.csv", r"E:\_move_logs\pagetype_census_v4\page_type.csv"],
+                   help="原图搬过家时按文件名找现在的路径(page_type.csv 的 path 列)")
     a = ap.parse_args()
     if a.cmd == "demo":
         demo(a)
