@@ -318,6 +318,8 @@ def regold(a) -> None:
               f"  -> {out}", flush=True)
         if differ:
             print(f"  ★ {g.name}: 有 {differ} 段旧切法对不上存的裁图(行 / 段 / 原图不一致), 先看看", flush=True)
+        # 切法指纹: 和训练图(seg_input_rc)的对得上, 新旧切法的比较才是同一版切的
+        (out / "_recut_version.txt").write_text(recut_version() + "\n", encoding="utf-8")
         # 给服务器脚本读的(纯 ASCII)
         print(f"REGOLD_STATS {g.name} total={len(cand)} same={same} differ={differ} missing={missing} changed={changed}", flush=True)
     print("REGOLD_OK", flush=True)
@@ -350,16 +352,23 @@ def resolve_path(src: str, index: dict) -> tuple:
     return None, "missing"
 
 
+def _num_consts(mod) -> str:
+    """一个模块里所有大写的数字常数(按名字排好): 切法函数读的 OVERLAP / DIFF_THRESHOLD / MIN_RUN ... 一个不漏。
+    只取数字 —— 集合之类的 repr 顺序每个进程不一样, 放进来指纹就不稳了。"""
+    return " ".join(f"{k}={v!r}" for k, v in sorted(vars(mod).items())
+                    if k.isupper() and isinstance(v, (int, float)) and not isinstance(v, bool))
+
+
 def recut_version() -> str:
-    """新切法的指纹: 常数 + 切行切段那几个函数的源码。代码一改指纹就变 —— 接着跑时不会拿上一版切的图充数。"""
+    """新切法的指纹: 三个模块的数字常数 + 切行切段那几个函数的源码。代码一改指纹就变 —— 接着跑时不会拿上一版切的图充数。
+    金标准重切(regold)也记同一个指纹, 服务器脚本核对训练图和金标准图是同一版切的。"""
     import hashlib
     import inspect
     import erase_pinyin
     import make_pinyin_pairs
     fns = (layout, _encloses, seg_extent, neighbours, new_box, make_pinyin_pairs._pinyin_bands, make_pinyin_pairs._rows,
            erase_pinyin.annotation_labels, erase_pinyin.text_mask, erase_pinyin.local_background)
-    consts = (f"PAD_Y={PAD_Y} CAP={CAP} V_OVERLAP={V_OVERLAP} CENTER={CENTER} TALL={TALL} CONTAINER={CONTAINER_H},{CONTAINER_N} "
-              f"LABEL_PAD={LABEL_PAD} FALLBACK={FALLBACK_SHIFT_RATIO} MIN_ROW_H={MIN_ROW_H}")
+    consts = "|".join(_num_consts(m) for m in (sys.modules[__name__], make_pinyin_pairs, erase_pinyin))
     src = consts + "".join(inspect.getsource(f).replace("\r\n", "\n") for f in fns)
     return hashlib.sha1(src.encode("utf-8")).hexdigest()[:12]
 
@@ -561,6 +570,7 @@ def main() -> None:
     rl.add_argument("--src", type=Path, required=True, help="原训练集目录(train.txt / val.txt / charset.txt)")
     rl.add_argument("--out", type=Path, required=True)
     rl.add_argument("--min-rc", type=float, default=0.97, help="换成重切图的段至少这么多, 不够就什么都不写")
+    sub.add_parser("version", help="打印现在代码的切法指纹(RECUT_VERSION xxx), 给服务器脚本核对")
     a = ap.parse_args()
     if a.cmd == "demo":
         demo(a)
@@ -570,6 +580,8 @@ def main() -> None:
         recut(a)
     elif a.cmd == "relist":
         relist(a)
+    elif a.cmd == "version":
+        print(f"RECUT_VERSION {recut_version()}", flush=True)
 
 
 if __name__ == "__main__":
