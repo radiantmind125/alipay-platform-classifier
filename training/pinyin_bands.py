@@ -107,6 +107,7 @@ def has_ink(img: np.ndarray, split: int) -> bool:
 def params_text() -> str:
     """参数 + 切法代码 + 读音表的指纹: 改了任何一样, 接着跑就停(不混两版的图)。"""
     src = "".join(inspect.getsource(f) for f in (band_rows, has_ink, _cut, label_of, clean_icons))
+    src += "".join(sorted(NUMERAL)) + "|".join(ICON_PREFIX)           # 去图标规则用的两张表也算在内
     code = hashlib.sha1(src.replace("\r\n", "\n").encode("utf-8")).hexdigest()[:10]
     tab = hashlib.sha1(TABLE.read_bytes().replace(b"\r\n", b"\n")).hexdigest()[:10]
     return f"bands-v2 MARGIN={MARGIN} MIN_MARGIN={MIN_MARGIN} MIN_SPLIT={MIN_SPLIT} INK={INK_DIFF},{INK_MIN} code={code} table={tab}\n"
