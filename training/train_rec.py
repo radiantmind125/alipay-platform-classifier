@@ -41,8 +41,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, Sampler
 
-IMG_H = 48           # 和常见识别器一致
-MAX_W = 640          # 实测 95% 的段缩到高 48 之后不超过 640
+IMG_H = 48           # 和常见识别器一致(认字模型; 拼音行读取器用 --img-h 24)
+MAX_W = 640          # 实测 95% 的段缩到高 48 之后不超过 640(拼音行又扁又长, 用 --max-w 放宽)
 MIN_W = 16
 DOWN_W = 4           # 网络在宽度方向下采样的倍数
 
@@ -86,24 +86,24 @@ def load_list(p: Path) -> list[tuple[str, str]]:
     return rows
 
 
-def prep(img: np.ndarray) -> np.ndarray:
-    """缩到高 IMG_H, 保持长宽比, 宽度夹在 [MIN_W, MAX_W]。"""
+def prep(img: np.ndarray, img_h: int = IMG_H, max_w: int = MAX_W) -> np.ndarray:
+    """缩到高 img_h, 保持长宽比, 宽度夹在 [MIN_W, max_w]。"""
     h, w = img.shape[:2]
-    nw = max(MIN_W, min(MAX_W, int(round(w * IMG_H / max(1, h)))))
-    im = cv2.resize(img, (nw, IMG_H), interpolation=cv2.INTER_LINEAR)
+    nw = max(MIN_W, min(max_w, int(round(w * img_h / max(1, h)))))
+    im = cv2.resize(img, (nw, img_h), interpolation=cv2.INTER_LINEAR)
     im = im.astype(np.float32) / 127.5 - 1.0
     return im.transpose(2, 0, 1)          # HWC -> CHW
 
 
-def image_widths(rows, tag: str) -> list[int]:
-    """把每张图缩到高 48 之后会有多宽 —— 只读文件头, 不解码整张图。"""
+def image_widths(rows, tag: str, img_h: int = IMG_H, max_w: int = MAX_W) -> list[int]:
+    """把每张图缩到高 img_h 之后会有多宽 —— 只读文件头, 不解码整张图。"""
     from PIL import Image
     out = []
     for i, (path, _t) in enumerate(rows, 1):
         try:
             with Image.open(path) as im:
                 w, h = im.size
-            out.append(max(MIN_W, min(MAX_W, int(round(w * IMG_H / max(1, h))))))
+            out.append(max(MIN_W, min(max_w, int(round(w * img_h / max(1, h))))))
         except Exception:                      # noqa: BLE001
             out.append(MIN_W)
         if i % 50000 == 0:
@@ -154,18 +154,20 @@ class BucketSampler(Sampler):
 JITTER_MAX = 0.3
 
 
-def jitter_crop(img: np.ndarray, j: float, rng: random.Random) -> np.ndarray:
+def jitter_crop(img: np.ndarray, j: float, rng: random.Random, top_frac: float = 1.0) -> np.ndarray:
     """上下边随机抖一下(只在训练时): 各 50% 机会从上 / 下裁掉最多 j 倍高, 30% 机会上下补最多 j 倍高(补底色)。
     ★ 为什么(2026-10-23): 模型对裁图上下边很敏感 —— 金标准只换切法不重训, 3~4% 的段读法就变了;
       别人的检测框裁的图, 边不会和我们一样。训练时抖一抖, 紧的松的都见过。j <= 0.3 时至少留 70% 高。
     ★ 裁会切进字一点点(新切法字下面只留 2 像素): 故意的 —— 紧的框(旧切法、别人的检测框)本来就这样, 最多 j 倍高, 不会切掉半个字。
-    ★ 补的是这张图的底色(中位色), 不是复制边上那一行: 边上那行有字时会拉出一道道竖条, 真实的松框里没有(10-23 复核)。"""
+    ★ 补的是这张图的底色(中位色), 不是复制边上那一行: 边上那行有字时会拉出一道道竖条, 真实的松框里没有(10-23 复核)。
+    ★ top_frac: 拼音带的上边就是裁图的上边(推理时也不变), 裁掉 2~3 像素会把 b d h l 的上半截去掉, 标签却还是 b d h l(10-23 复核)。"""
     h = img.shape[0]
     if h < 8 or j <= 0:
         return img
     lim = int(j * h)
     top = rng.randint(0, lim) if rng.random() < 0.5 else 0
     bot = rng.randint(0, lim) if rng.random() < 0.5 else 0
+    top = int(top * top_frac)       # 拼音行读取器 top_frac=0: 上边不裁(见下面 ★); 随机数照样抽, 1.0 时和以前一模一样
     if h - top - bot < 0.7 * h:
         top, bot = top // 2, bot // 2
     img = img[top:h - bot] if bot else img[top:]
@@ -177,8 +179,11 @@ def jitter_crop(img: np.ndarray, j: float, rng: random.Random) -> np.ndarray:
 
 
 class SegDataset(Dataset):
-    def __init__(self, rows, cs: Charset, train: bool, jitter: float = 0.0):
+    def __init__(self, rows, cs: Charset, train: bool, jitter: float = 0.0, img_h: int = IMG_H, max_w: int = MAX_W,
+                 jitter_top: float = 1.0):
         self.rows, self.cs, self.train, self.jitter = rows, cs, train, jitter
+        self.jitter_top = jitter_top
+        self.img_h, self.max_w = img_h, max_w     # ★ 放在对象上, 不改模块常数: Windows 上 DataLoader 子进程重新 import, 改了的常数到不了子进程
         self.rng = None     # ★ 每个 DataLoader 子进程第一次用时各自起一个(Windows 上子进程拿的是同一份拷贝, 在这里建会全都一样);
                             #   种子用 torch.initial_seed(): 子进程里是 torch 给的(--seed 定的, 每轮每个子进程不同), 同一个 --seed 抖法能复现
 
@@ -189,12 +194,12 @@ class SegDataset(Dataset):
         path, txt = self.rows[i]
         img = cv2.imdecode(np.fromfile(path, np.uint8), cv2.IMREAD_COLOR)
         if img is None:
-            img = np.zeros((IMG_H, MIN_W, 3), np.uint8)
+            img = np.zeros((self.img_h, MIN_W, 3), np.uint8)
         if self.train and self.jitter > 0:
             if self.rng is None:
                 self.rng = random.Random(torch.initial_seed())
-            img = jitter_crop(img, self.jitter, self.rng)
-        x = prep(img)
+            img = jitter_crop(img, self.jitter, self.rng, self.jitter_top)
+        x = prep(img, self.img_h, self.max_w)
         y = self.cs.encode(txt)
         if not y:
             y = [0]
@@ -212,7 +217,7 @@ def collate(batch):
     xs, ys, txts = zip(*batch)
     W = max(x.shape[2] for x in xs)
     W = max(W, DOWN_W * 4)
-    out = torch.empty(len(xs), 3, IMG_H, W)
+    out = torch.empty(len(xs), 3, xs[0].shape[1], W)     # 高从图上拿(认字 48 / 拼音行 24); collate 在子进程里跑, 不能靠模块常数
     widths = []
     for i, x in enumerate(xs):
         w = x.shape[2]
@@ -232,9 +237,10 @@ def collate(batch):
 # 模型
 # --------------------------------------------------------------------------
 class CRNN(nn.Module):
-    """CNN 把高压成 1, 宽压成 1/4, 再上双向 LSTM, 最后 CTC。"""
+    """CNN 把高压成 1, 宽压成 1/4, 再上双向 LSTM, 最后 CTC。
+    img_h 48 = 认字模型(和以前一模一样); 24 = 拼音行读取器(少一个 512 的块, 高 24 -> 1)。"""
 
-    def __init__(self, n_class: int):
+    def __init__(self, n_class: int, img_h: int = IMG_H):
         super().__init__()
 
         def blk(i, o, pool):
@@ -243,16 +249,29 @@ class CRNN(nn.Module):
                 layers.append(nn.MaxPool2d(pool, pool))
             return layers
 
-        self.cnn = nn.Sequential(
-            *blk(3, 64, (2, 2)),        # 48x W   -> 24 x W/2
-            *blk(64, 128, (2, 2)),      #         -> 12 x W/4
-            *blk(128, 256, None),
-            *blk(256, 256, (2, 1)),     #         ->  6 x W/4
-            *blk(256, 512, None),
-            *blk(512, 512, (2, 1)),     #         ->  3 x W/4
-            nn.Conv2d(512, 512, (3, 1)),  #       ->  1 x W/4
-            nn.BatchNorm2d(512), nn.ReLU(True),
-        )
+        if img_h == 48:
+            self.cnn = nn.Sequential(
+                *blk(3, 64, (2, 2)),        # 48x W   -> 24 x W/2
+                *blk(64, 128, (2, 2)),      #         -> 12 x W/4
+                *blk(128, 256, None),
+                *blk(256, 256, (2, 1)),     #         ->  6 x W/4
+                *blk(256, 512, None),
+                *blk(512, 512, (2, 1)),     #         ->  3 x W/4
+                nn.Conv2d(512, 512, (3, 1)),  #       ->  1 x W/4
+                nn.BatchNorm2d(512), nn.ReLU(True),
+            )
+        elif img_h == 24:
+            self.cnn = nn.Sequential(
+                *blk(3, 64, (2, 2)),        # 24x W   -> 12 x W/2
+                *blk(64, 128, (2, 2)),      #         ->  6 x W/4
+                *blk(128, 256, None),
+                *blk(256, 256, (2, 1)),     #         ->  3 x W/4
+                *blk(256, 512, None),
+                nn.Conv2d(512, 512, (3, 1)),  #       ->  1 x W/4
+                nn.BatchNorm2d(512), nn.ReLU(True),
+            )
+        else:
+            raise ValueError(f"img_h 只支持 48 / 24, 给的是 {img_h}")
         self.rnn = nn.LSTM(512, 256, num_layers=2, bidirectional=True,
                            batch_first=True, dropout=0.1)
         self.fc = nn.Linear(512, n_class)
@@ -329,11 +348,18 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--jitter", type=float, default=0.0,
                     help="训练时裁图上下边随机抖动的幅度(倍高, 比如 0.15); 0 = 不抖(和以前一样)。验证集不抖")
+    ap.add_argument("--img-h", type=int, default=IMG_H, choices=[48, 24],
+                    help="输入高: 48 = 认字模型(默认, 和以前一样); 24 = 拼音行读取器(拼音带又矮又长)")
+    ap.add_argument("--max-w", type=int, default=MAX_W, help="缩放后最宽多少(默认 640; 拼音行用 1024)")
+    ap.add_argument("--jitter-top", type=float, default=1.0,
+                    help="抖动时上边裁掉的量再乘这个(默认 1 = 和以前一样; 拼音行读取器用 0, 上边不裁)")
     ap.add_argument("--init", type=Path, default=None,
                     help="从这个 rec_best.pt 接着训(微调), 不从头训。★ 字表要和 --data 里的 charset.txt 一字不差, 不一样就停")
     a = ap.parse_args()
     if not 0 <= a.jitter <= JITTER_MAX:
         ap.error(f"--jitter 要在 0 ~ {JITTER_MAX} 之间(再大裁掉的会超过 30% 高, 1.0 以上能裁成空图)")
+    if not 0 <= a.jitter_top <= 1:
+        ap.error("--jitter-top 要在 0 ~ 1 之间")
 
     torch.manual_seed(a.seed)
     random.seed(a.seed)
@@ -358,23 +384,32 @@ def main() -> None:
     print("=" * 60)
 
     print("  量一遍图宽好按宽度分桶(只读文件头, 不解码)...")
-    w_tr = image_widths(tr, "train")
-    w_va = image_widths(va, "val")
+    w_tr = image_widths(tr, "train", a.img_h, a.max_w)
+    w_va = image_widths(va, "val", a.img_h, a.max_w)
+    if (a.img_h, a.max_w) != (IMG_H, MAX_W):
+        print(f"  输入高 {a.img_h}  最宽 {a.max_w}")
+        with (out_dir / "train_log.txt").open("a", encoding="utf-8") as f:
+            f.write(f"img_h {a.img_h}\tmax_w {a.max_w}\n")
     if a.jitter > 0:
         print(f"  训练时上下边抖动 {a.jitter}(验证集不抖)")
         with (out_dir / "train_log.txt").open("a", encoding="utf-8") as f:
             f.write(f"jitter {a.jitter}\n")
-    dl_tr = DataLoader(SegDataset(tr, cs, True, a.jitter), collate_fn=collate,
+            if a.jitter_top != 1.0:
+                f.write(f"jitter_top {a.jitter_top}\n")
+    dl_tr = DataLoader(SegDataset(tr, cs, True, a.jitter, a.img_h, a.max_w, a.jitter_top), collate_fn=collate,
                        num_workers=a.workers,
                        batch_sampler=BucketSampler(w_tr, a.batch, True, drop_last=True))
-    dl_va = DataLoader(SegDataset(va, cs, False), collate_fn=collate,
+    dl_va = DataLoader(SegDataset(va, cs, False, 0.0, a.img_h, a.max_w), collate_fn=collate,
                        num_workers=a.workers,
                        batch_sampler=BucketSampler(w_va, a.batch, False))
 
-    model = CRNN(len(cs)).to(dev)
+    model = CRNN(len(cs), a.img_h).to(dev)
     if a.init:
         # ★ 微调: 输出层的第 k 个类就是字表第 k 个字, 字表差一个字整层就错位了, 所以必须一字不差
         ck = torch.load(a.init, map_location="cpu")
+        if ck.get("img_h", IMG_H) != a.img_h:
+            print(f"  ★ {a.init} 是输入高 {ck.get('img_h', IMG_H)} 的模型, 这次 --img-h {a.img_h}, 不能接着训")
+            raise SystemExit(2)
         if ck.get("chars") != chars:
             print(f"  ★ {a.init} 的字表({len(ck.get('chars') or [])} 字)和 {a.data / 'charset.txt'}({len(chars)} 字)不一样, 不能接着训")
             raise SystemExit(2)
@@ -424,15 +459,17 @@ def main() -> None:
                                              time.time() - t0))
         if acc > best:
             best = acc
-            torch.save({"model": model.state_dict(), "chars": chars},
-                       out_dir / "rec_best.pt")
+            ck_out = {"model": model.state_dict(), "chars": chars}
+            if a.img_h != IMG_H:
+                ck_out["img_h"] = a.img_h          # 认字模型(48)的存档和以前一字不差
+            torch.save(ck_out, out_dir / "rec_best.pt")
             print(f"      ★ 存了 {out_dir / 'rec_best.pt'}  (字准确率 {acc:.2%})")
 
     if a.export:
         ck = torch.load(out_dir / "rec_best.pt", map_location="cpu")
         model.load_state_dict(ck["model"])
         model.eval().cpu()
-        dummy = torch.randn(1, 3, IMG_H, 320)
+        dummy = torch.randn(1, 3, a.img_h, 320)
         # ★ torch 2.13 默认走 dynamo 那条新路, 要额外装 onnxscript。
         #   这里显式用老的 TorchScript 导出, 少一个依赖; 新路装了也能用。
         kw = dict(input_names=["x"], output_names=["logits"],
