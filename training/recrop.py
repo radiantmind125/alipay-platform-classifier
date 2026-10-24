@@ -23,6 +23,14 @@ make_pinyin_pairs 切行时, 行的上下边取的是这一行所有字块的**�
     python training/recrop.py regold --gold 答案目录 [...] --out-root 输出 [--min-ext 0.15 --suffix _rcB]   # 金标准从原图重切
     python training/recrop.py recut --pairs 配对目录 [...] [--workers 20]      # 训练集的段重切到 <目录>\seg_input_rc (可接着跑)
     python training/recrop.py relist --src 旧训练集目录 --out 新训练集目录 [--min-rc 0.97]   # 清单换成重切图
+    (v3 用 --rc-name seg_input_rc3: 新切法的图放另一个目录, 和 v2 的 seg_input_rc 不混; 指纹不一样也会被拦)
+
+v3(10-24, step 45): 券面大数字(中心落在 元 的拼音带里被当成拼音)、实心按钮(白字是按钮里的洞, 不是块)、
+    蓝图 回首页(两行上下交叠)还被切的三个原因, 加了 P1-P7 七条规则(见常数旁边的说明)。原因是在本地 9,068 张页面上找的;
+    段边变了多少: 300 张拼音页 1.6%、113 张蓝图 6.1%(10-24 复核在 2,500 张拼音页上 2.15%), 没有一段比旧切法还小;
+    端口版和量过的补丁 8,919 / 8,919 段一模一样。
+    已知的小毛病(10-24 复核, 不影响训练): FRAG 段的行带夹在两行中间时, 上下两行的字都擦边, 会切成两行(569 段 FRAG 里 31 段);
+    试过要求字真伸进带里, 但会把 去看看 / 通知TA / 回首页 这种本来就只擦边几像素的又切掉一截(83 段), 所以不改。
 """
 from __future__ import annotations
 
@@ -43,6 +51,32 @@ V_OVERLAP = 0.3    # 字块和行的 label 边至少重叠自身高度的这么�
 CENTER = 0.35      # 字块中心离这一行的 label 边不能超过这么多倍行高(大号金额底对齐, 中心正好在行顶附近)
 TALL = 2.4         # 比行高这么多倍还高的是竖线 / 框 / 一列图标, 不算字(核对图: 大号金额最高 2.0 倍, 图标列 2.49 倍)
 CONTAINER_H, CONTAINER_N = 1.2, 3   # 比行高 1.2 倍高、外接框里整个装着 >= 3 块别的: 按钮外圈 / 图标 / 头像, 不算字
+# ---- v3(10-24, step 45): 券面大数字 / 实心按钮 / 蓝图 回首页 还被切的三个原因, 原因在本地 9,068 张页面上找的(RECROP-GAP-2026-10-23.md) ----
+# P1 拼音带只挡"带那么大"的块: 块和带的重叠 >= 自身高度的这么多才算拼音。
+#    大号券面额(0.5元 的 0.5)中心正好落在 元 上面那排 yuán 的带里, 原来整块被当拼音扔掉 -> 金额顶上一截切掉。
+BAND_FRAC = 0.5
+# P2 实心按钮(红底 / 蓝底白字): text_mask 把整个按钮当一块墨, 白字是按钮里的"洞", 根本不是块。
+#    按钮本身永远不按它扩; 它的洞(字和字上的拼音)当字块用。判按钮: 宽 >= 1.8 倍高, 上下沿中间一半是连续的墨, 洞 >= 2 个。
+BTN_W, BTN_EDGE, BTN_HOLES = 1.8, 0.9, 2
+# 实心: 墨占外接框 >= BTN_FILL, 洞的总面积 <= 墨的面积。卡片外框 / 横幅边框 / 头像(10-23 核对图: 墨 0.04~0.14, 洞是墨的 5~27 倍)
+#   里面整个是洞, 不是按钮; 真按钮 0.54~0.84, 洞(字)是墨的 0.17~0.66
+BTN_FILL, BTN_HOLE_AREA = 0.45, 1.0
+# P3 FRAG: 这一段在 label 带里一个自己的字都没有(全是上一行 / 按钮 / 下一行伸进来的一截) ->
+#    按伸进带里的那些字块(按钮的话是它的洞)的全高切, 不按邻行卡(邻行就是这些字自己的那一行), 只按 CAP 卡(band_below 留着没用)。
+FRAG_MIN_H = 0.4   # 伸进来的块至少这么高(倍行高)才算字, 更小的是点 / 碎屑, 不为它扩
+FRAG_MIN_N = 2     # 伸进来的(不算按钮的洞)至少这么多块才按它扩: 单独一块多半是图标
+# P4 这一段"自己的字"其实全是旁边**交叠的那一行**的字(那一行的带把它们整个罩住, 比这一行罩得多):
+#    这一段是那一行的字伸进来的一截(蓝图 回首页: 回首页 一行 和 大标题 支付成功 一行上下交叠), 当 FRAG 处理, 不按邻行卡。
+#    只要有一个字更属于这一行(比如 澳門百老匯 和状态栏 16:19 交叠), 照旧按邻行卡 —— 不把别的行拉进正常段。
+# P5 比行高还高的块(大号金额), VOV 按行高算: 和 label 带重叠 >= 0.3 x min(自身高, 行高)。
+#    2元 的 2 高 1.26 倍行高、底伸进带里 0.32 倍行高, 按自身高只有 0.26 被当成上一行。中心规则(CENTER)照旧挡真正的上一行大字。
+# P6 自己的字被邻行的边卡住时(券卡: 2.46 的顶比左边标题行的底高 15 像素), 只在两样都满足时越过邻行的边扩到字的边:
+#    被卡的块和这一段里另一个没被卡的字**同色**(2.46 和旁边的 元 都是红的; 图标和旁边的字颜色不一样 —— 不按颜色时 10-23 核对图上
+#    主要是把图标补全), 而且被卡掉的那一截(段的 x 范围里)除了自己的字什么都没有。
+P6_COLOR = 40      # 同色: BGR 各通道均值差都不超过这么多
+P6_REF_A = 20      # 拿来比颜色的字块至少这么多像素(小数点 . 也算: 2.1元 的 元 和底下红条粘成一块, 只剩 . 能比)
+# P7 按钮的字(洞, >= FRAG_MIN_H 行高)碰到 label 带, 就把这个按钮上的字整个算进来 —— 不管按钮外框过不过 TALL / 中心 / 外圈。
+#    (段里同时有别的东西, 比如右边一条蓝色侧栏, 不走 FRAG, 按钮的字原来就没人管; 10-23 核对图: 去看看 立即领 通知TA 还是切掉一半)
 
 
 def layout(img: np.ndarray) -> dict:
@@ -54,7 +88,7 @@ def layout(img: np.ndarray) -> dict:
     _, kept, _, big = annotation_labels(mask)
     bands = _pinyin_bands(kept, st, big)
     rows = _rows(big, bands)
-    out = {"H": H, "W": W, "st": st, "kept": set(int(k) for k in kept), "bands": bands, "rows": []}
+    out = {"H": H, "W": W, "st": st, "kept": set(int(k) for k in kept), "bands": bands, "rows": [], "lab": _lab, "img": img}
     if not rows:
         return out
     char_h = float(np.median([b - a for a, b in rows]))
@@ -85,8 +119,38 @@ def _encloses(st, i: int, near: list) -> int:
     return n
 
 
-def seg_extent(L: dict, la: int, lb: int, a: int, b: int):
-    """这一段自己的字块的上下沿 (top, bottom); 一个都没有返回 None。(numpy 一次筛完, 51 万段也快)"""
+def _button_holes(L: dict, i: int):
+    """第 i 块是不是实心按钮(红底 / 蓝底, 白字是洞); 是的话返回洞的外接框 [(x, y, w, h, A)](页坐标), 不是返回 None。
+    判法: 宽 >= BTN_W 倍高; 上沿、下沿附近有一行在中间一半宽度上 >= BTN_EDGE 是墨(圆角长条的直边); 洞(墨围住、碰不到外接框边的空白)>= BTN_HOLES 个。
+    粗体字粘成一串也会有洞(口 日 0 8 的内圈), 但上下沿不是一整条直边; 描边按钮(白圈)里面是一整个洞, 不到 2 个。"""
+    cache = L.setdefault("btn", {})
+    if i in cache:
+        return cache[i]
+    x, y, w, h, A = (int(v) for v in L["st"][i][:5])
+    res = None
+    if h >= 8 and w >= BTN_W * h and A >= BTN_FILL * w * h:
+        m = (L["lab"][y:y + h, x:x + w] == i).astype(np.uint8)
+        c0, c1 = w // 4, w - w // 4
+        k = max(2, h // 10)
+        top = max(m[r, c0:c1].mean() for r in range(0, k + 1))
+        bot = max(m[h - 1 - r, c0:c1].mean() for r in range(0, k + 1))
+        if top >= BTN_EDGE and bot >= BTN_EDGE:
+            inv = cv2.copyMakeBorder(1 - m, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=1)
+            ffm = np.zeros((h + 4, w + 4), np.uint8)
+            cv2.floodFill(inv, ffm, (0, 0), 2)
+            holes = (inv[1:-1, 1:-1] == 1).astype(np.uint8)
+            n, _l, hs, _c = cv2.connectedComponentsWithStats(holes, connectivity=8)
+            boxes = [(x + int(s[0]), y + int(s[1]), int(s[2]), int(s[3]), int(s[4])) for s in hs[1:] if s[4] >= 6]
+            if len(boxes) >= BTN_HOLES and sum(bx[4] for bx in boxes) <= BTN_HOLE_AREA * A:
+                res = boxes
+    cache[i] = res
+    return res
+
+
+def seg_extent(L: dict, la: int, lb: int, a: int, b: int, with_mode: bool = False):
+    """这一段自己的字块的上下沿 (top, bottom); 一个都没有返回 None。(numpy 一次筛完, 51 万段也快)
+    补丁: P1 拼音带只挡带那么大的块; P2 实心按钮换成它的洞; P3 一个自己的字都没有时按伸进带里的字(FRAG)。
+    with_mode=True 时返回 (top, bottom, "own" | "frag")。"""
     st, bands = L["st"], L["bands"]
     if "kept_mask" not in L:
         km = np.zeros(len(st), bool)
@@ -95,30 +159,103 @@ def seg_extent(L: dict, la: int, lb: int, a: int, b: int):
     row_h = max(1, lb - la)
     X, Y, Wc, Hc, A = (st[:, k].astype(np.int64) for k in range(5))
     idx = np.arange(len(st))
-    sel = (idx > 0) & (A >= 6) & ~L["kept_mask"]
-    sel &= ~((Hc > TALL * row_h) | ((Wc > 3 * row_h) & (Hc < 0.25 * row_h)))
-    sel &= (np.minimum(X + Wc, b) - np.maximum(X, a)) >= 0.5 * Wc
-    sel &= (np.minimum(Y + Hc, lb) - np.maximum(Y, la)) >= V_OVERLAP * Hc
+    base = (idx > 0) & (A >= 6)
+    xin = (np.minimum(X + Wc, b) - np.maximum(X, a)) >= 0.5 * Wc
+    # P2: 段里、行附近的实心按钮 -> 按钮自己不算, 它的洞当字块(父块号记着, FRAG 时用)
+    nearb = np.nonzero(base & xin & (Y < lb + 3 * row_h) & (Y + Hc > la - 3 * row_h) & (Wc >= BTN_W * Hc) & (Hc >= 8))[0]
+    btn, ps = [], []
+    for i in nearb:
+        hb = _button_holes(L, int(i))
+        if hb:
+            btn.append(int(i))
+            ps.extend((hx, hy, hw, hh, ha, int(i)) for hx, hy, hw, hh, ha in hb)
+    is_btn = np.zeros(len(st), bool)
+    is_btn[btn] = True
+    kept = L["kept_mask"].copy()
+    parent = np.full(len(st), -1, np.int64)
+    if ps:
+        P = np.array(ps, dtype=np.int64)
+        X = np.concatenate([X, P[:, 0]]); Y = np.concatenate([Y, P[:, 1]]); Wc = np.concatenate([Wc, P[:, 2]])
+        Hc = np.concatenate([Hc, P[:, 3]]); A = np.concatenate([A, P[:, 4]])
+        kept = np.concatenate([kept, np.zeros(len(P), bool)])
+        is_btn = np.concatenate([is_btn, np.zeros(len(P), bool)])
+        parent = np.concatenate([parent, P[:, 5]])
+        idx = np.arange(len(X))
+        base = (idx > 0) & (A >= 6)
+        xin = (np.minimum(X + Wc, b) - np.maximum(X, a)) >= 0.5 * Wc
     cy = Y + Hc / 2
+    pin = np.zeros(len(X), bool)                       # P1: 中心在带里, 而且身子一半以上在带里 -> 拼音
     for p, q in bands:
-        sel &= ~((cy >= p) & (cy <= q))
-    sel &= (cy >= la - CENTER * row_h) & (cy <= lb + CENTER * row_h)
-    cand = np.nonzero(sel)[0]
-    if len(cand) and (Hc[cand] > CONTAINER_H * row_h).any():
-        nearm = (idx > 0) & (A >= 6) & (np.minimum(X + Wc, b) > np.maximum(X, a)) & (Y < lb + 3 * row_h) & (Y + Hc > la - 3 * row_h)
+        pin |= (cy >= p) & (cy <= q) & ((np.minimum(Y + Hc, q) - np.maximum(Y, p)) >= BAND_FRAC * Hc)
+    shape_ok = ~((Hc > TALL * row_h) | ((Wc > 3 * row_h) & (Hc < 0.25 * row_h)))
+    vov = (np.minimum(Y + Hc, lb) - np.maximum(Y, la)) >= V_OVERLAP * np.minimum(Hc, row_h)
+    ctr = (cy >= la - CENTER * row_h) & (cy <= lb + CENTER * row_h)
+    common = base & ~kept & ~is_btn & xin & ~pin
+    sel = common & shape_ok & vov & ctr
+    sel &= (parent < 0) | (Hc >= FRAG_MIN_H * row_h)  # 按钮的洞单个算字时至少这么高(6x4 的小洞不算, 10-23 去看看 只扩了 3 像素)
+    nreal = len(st)
+    # 按钮按原规则本来就算这一段的(过了 VOV / 中心 / TALL ...): 不按按钮外框扩, 按它的**全部**洞(字 + 字上的拼音)扩
+    #   (单个洞各判各的会把按钮字切掉: 行带比按钮字低时, 字的洞过不了 VOV —— 10-23 看进度 / 去查看 被切了底)
+    btn_pass = [int(i) for i in btn if (~kept[i] & xin[i] & ~pin[i] & shape_ok[i] & vov[i] & ctr[i])]
+    #   按钮上有一个洞(字)单独算进了这一段, 这个按钮上的字就整个算(字是一个整体, 10-23 通知TA 只扩到一半)
+    btn_pass = sorted(set(btn_pass) | set(int(p_) for p_ in parent[sel & (parent >= 0)]))
+    if len(btn):
+        touch_g = (parent >= 0) & (Hc >= FRAG_MIN_H * row_h) & ((np.minimum(Y + Hc, lb) - np.maximum(Y, la)) > 0) & xin
+        btn_pass = sorted(set(btn_pass) | set(int(p_) for p_ in parent[touch_g] if xin[int(p_)]))
+
+    def drop_containers(cand):
+        if not len(cand) or not (Hc[cand] > CONTAINER_H * row_h).any():
+            return cand
+        Xr, Yr, Wr, Hr, Ar = (st[:, k].astype(np.int64) for k in range(5))
+        ir = np.arange(nreal)
+        nearm = (ir > 0) & (Ar >= 6) & (np.minimum(Xr + Wr, b) > np.maximum(Xr, a)) & (Yr < lb + 3 * row_h) & (Yr + Hr > la - 3 * row_h)
         near = np.nonzero(nearm)[0]
         keep = []
         for i in cand:
-            if Hc[i] > CONTAINER_H * row_h:
-                inside = ((X[near] > X[i]) & (Y[near] > Y[i]) & (X[near] + Wc[near] < X[i] + Wc[i]) & (Y[near] + Hc[near] < Y[i] + Hc[i])
+            if i < nreal and Hc[i] > CONTAINER_H * row_h:
+                inside = ((Xr[near] > X[i]) & (Yr[near] > Y[i]) & (Xr[near] + Wr[near] < X[i] + Wc[i]) & (Yr[near] + Hr[near] < Y[i] + Hc[i])
                           & (near != i)).sum()
                 if inside >= CONTAINER_N:
                     continue            # 外圈: 按钮框 / 图标 / 头像, 里面装着别的块 —— 不按它扩(10-23: 免费领 92 -> 157 像素, 字被缩小)
             keep.append(i)
-        cand = np.array(keep, dtype=np.int64)
+        return np.array(keep, dtype=np.int64)
+
+    cand = drop_containers(np.nonzero(sel)[0])
+    if btn_pass:
+        cand = np.union1d(cand, np.nonzero(base & xin & np.isin(parent, btn_pass))[0]).astype(np.int64)
+    mode = "own"
+    if len(cand):
+        ov_self = (np.minimum(Y[cand] + Hc[cand], lb) - np.maximum(Y[cand], la)) / np.maximum(1, Hc[cand])
+        ov_other = np.zeros(len(cand))
+        for r in L["rows"]:
+            if r["la"] == la and r["lb"] == lb:
+                continue
+            if r["lb"] <= la - 3 * row_h or r["la"] >= lb + 3 * row_h:
+                continue
+            ov_other = np.maximum(ov_other, (np.minimum(Y[cand] + Hc[cand], r["lb"]) - np.maximum(Y[cand], r["la"])) / np.maximum(1, Hc[cand]))
+        if (ov_other >= ov_self).all() and (ov_other > ov_self).any():
+            cand = cand[:0]             # 全是别的行的字(两行的带都整个罩住的碎块算两边都行) -> 下面按 FRAG 切
+    if not len(cand):
+        # P3 FRAG: 带里只有伸进来的一截。碰到 label 带的字块(够高、不是拼音 / 竖线 / 横线 / 外圈), 加上碰到带的按钮的全部洞
+        touch = (np.minimum(Y + Hc, lb) - np.maximum(Y, la)) > 0
+        f = common & shape_ok & touch & (Hc >= FRAG_MIN_H * row_h) & (parent < 0)
+        cand = drop_containers(np.nonzero(f)[0])
+        if len(cand) < FRAG_MIN_N:
+            cand = cand[:0]             # 只有一块: 多半是图标 / 头像 / 圆圈, 不为它扩(10-23 核对图: 导航图标、闪购圆标)
+        btn_touch = [int(i) for i in np.nonzero(is_btn[:nreal] & touch[:nreal] & xin[:nreal])[0]]
+        if btn_touch:
+            cand = np.union1d(cand, np.nonzero(base & xin & np.isin(parent, btn_touch))[0]).astype(np.int64)
+        mode = "frag"
     if not len(cand):
         return None
-    return int(Y[cand].min()), int((Y[cand] + Hc[cand]).max())
+    top, bot = int(Y[cand].min()), int((Y[cand] + Hc[cand]).max())
+    if with_mode:
+        L["_own"] = (np.stack([X[cand], Y[cand], Wc[cand], Hc[cand]], 1), set(int(i) for i in cand if i < nreal) | set(int(p_) for p_ in parent[cand] if p_ >= 0))
+        L["_own_real"] = set(int(i) for i in cand if i < nreal and not is_btn[i])
+        hb = cand[parent[cand] >= 0]
+        L["_btn_ext"] = (int(Y[hb].min()), int((Y[hb] + Hc[hb]).max())) if len(hb) else None
+        return top, bot, mode
+    return top, bot
 
 
 def neighbours(L: dict, la: int, lb: int) -> tuple:
@@ -138,18 +275,81 @@ def neighbours(L: dict, la: int, lb: int) -> tuple:
     return up, down
 
 
+def band_below(L: dict, lb: int) -> int:
+    """这一行下面最近的拼音带顶(下一行的拼音), 没有就是页底。FRAG 往下扩只拿它卡。"""
+    down = L["H"]
+    for a, b in L["bands"]:
+        if a >= lb - 2:
+            down = min(down, a - 1)
+    return down
+
+
 def new_box(L: dict, la: int, lb: int, ia: int, ib: int, a: int, b: int) -> tuple:
     """这一段新的 input 上下边 (ia2, ib2): 原来的边和自己字块的外包, 只扩不收;
-    每边最多扩 CAP 倍行高, 而且不越过上下邻行(2026-10-23 核对图: 图标、按钮底色跨两行, 会把下一行带进来)。"""
-    ext = seg_extent(L, la, lb, a, b)
+    每边最多扩 CAP 倍行高, 而且不越过上下邻行(2026-10-23 核对图: 图标、按钮底色跨两行, 会把下一行带进来)。
+    补丁 P3: FRAG 段(带里只有别的行伸进来的一截)不按邻行卡 —— 那些字就是邻行的, 要切全; 只按 CAP 卡。"""
+    ext = seg_extent(L, la, lb, a, b, with_mode=True)
     if ext is None:
         return ia, ib
     row_h = max(1, lb - la)
-    top, bot = ext
+    top, bot, mode = ext
+    if mode == "frag":
+        # FRAG 不按邻行、也不按下面的拼音带卡: 要补全的字就在那儿(10-23 去看看 的字和下一行的拼音带同高), 只按 CAP
+        ia2 = max(0, int(ia - CAP * row_h), min(ia, top - PAD_Y))
+        ib2 = min(L["H"], int(ib + CAP * row_h), max(ib, bot + PAD_Y))
+        return ia2, ib2
     up, down = neighbours(L, la, lb)
     ia2 = max(0, int(ia - CAP * row_h), min(up, ia), min(ia, top - PAD_Y))
     ib2 = min(L["H"], int(ib + CAP * row_h), max(down, ib), max(ib, bot + PAD_Y))
+    be = L.get("_btn_ext")
+    if be:
+        # 按钮上的字被按钮圈住, 外面的东西进不来: 不按邻行卡, 只按 CAP(10-23: 去看看 的字和下一行的拼音带同高, 被 down 卡掉一半)
+        ia2 = min(ia2, max(0, int(ia - CAP * row_h), be[0] - PAD_Y))
+        ib2 = max(ib2, min(L["H"], int(ib + CAP * row_h), be[1] + PAD_Y))
+    if top - PAD_Y < ia2 or bot + PAD_Y > ib2:
+        own_ids = L["_own"][1]
+        real = [i for i in own_ids if i in L.get("_own_real", own_ids)]
+        st = L["st"]
+        refs = [i for i in real if st[i][1] >= ia2 and st[i][1] + st[i][3] <= ib2 and st[i][4] >= P6_REF_A]
+        if refs:
+            rc = [_color(L, i) for i in refs]
+            def same(i):
+                c = _color(L, i)
+                return any(np.abs(c - r_).max() <= P6_COLOR for r_ in rc)
+            up_c = [i for i in real if st[i][1] < ia2 and same(i)]
+            if up_c:
+                want_t = max(0, int(ia - CAP * row_h), min(ia, min(int(st[i][1]) for i in up_c) - PAD_Y))
+                if want_t < ia2 and _clean(L, a, b, want_t, ia2, own_ids, row_h):
+                    ia2 = want_t
+            dn_c = [i for i in real if st[i][1] + st[i][3] > ib2 and same(i)]
+            if dn_c:
+                want_b = min(L["H"], int(ib + CAP * row_h), max(ib, max(int(st[i][1] + st[i][3]) for i in dn_c) + PAD_Y))
+                if want_b > ib2 and _clean(L, a, b, ib2, want_b, own_ids, row_h):
+                    ib2 = want_b
     return ia2, ib2
+
+
+def _color(L: dict, i: int) -> np.ndarray:
+    """第 i 块墨的平均颜色(BGR)。"""
+    cache = L.setdefault("_col", {})
+    if i not in cache:
+        x, y, w, h = (int(v) for v in L["st"][i][:4])
+        m = L["lab"][y:y + h, x:x + w] == i
+        cache[i] = L["img"][y:y + h, x:x + w][m].reshape(-1, 3).mean(0) if m.any() else np.zeros(3)
+    return cache[i]
+
+
+def _clean(L: dict, a: int, b: int, z0: int, z1: int, own_ids: set, row_h: int) -> bool:
+    """[z0, z1) x [a, b) 这块地方除了这一段自己的字(和装着它们的按钮)以外没有别的墨(大底板 / 细横线不算)。"""
+    st = L["st"]
+    X, Y, Wc, Hc, A = (st[:, k].astype(np.int64) for k in range(5))
+    idx = np.arange(len(st))
+    m = (idx > 0) & (A >= 6) & (X < b) & (X + Wc > a) & (Y < z1) & (Y + Hc > z0)
+    m &= ~((Hc > TALL * row_h) | ((Wc > 3 * row_h) & (Hc < 0.25 * row_h)))
+    for i in np.nonzero(m)[0]:
+        if int(i) not in own_ids:
+            return False
+    return True
 
 
 def demo(a) -> None:
@@ -366,7 +566,8 @@ def recut_version() -> str:
     import inspect
     import erase_pinyin
     import make_pinyin_pairs
-    fns = (layout, _encloses, seg_extent, neighbours, new_box, make_pinyin_pairs._pinyin_bands, make_pinyin_pairs._rows,
+    fns = (layout, _encloses, seg_extent, neighbours, new_box, _button_holes, band_below, _color, _clean,
+           make_pinyin_pairs._pinyin_bands, make_pinyin_pairs._rows,
            erase_pinyin.annotation_labels, erase_pinyin.text_mask, erase_pinyin.local_background)
     consts = "|".join(_num_consts(m) for m in (sys.modules[__name__], make_pinyin_pairs, erase_pinyin))
     src = consts + "".join(inspect.getsource(f).replace("\r\n", "\n") for f in fns)
@@ -382,12 +583,14 @@ def _done(p: Path) -> bool:
 
 
 _INDEX = {}
+_RC = "seg_input_rc"
 
 
-def _recut_init(index: dict) -> None:
-    global _INDEX
+def _recut_init(index: dict, rc_name: str = "seg_input_rc") -> None:
+    global _INDEX, _RC
     cv2.setNumThreads(1)
     _INDEX = index
+    _RC = rc_name           # ★ 子进程拿不到主进程改的全局, 靠 initializer 传(Windows 是 spawn)
 
 
 def _recut_page(job) -> list:
@@ -401,7 +604,7 @@ def _recut_page(job) -> list:
     out = []
     todo = []
     for it in items:
-        if _done(Path(it["dir"]) / "seg_input_rc" / it["file"]):
+        if _done(Path(it["dir"]) / _RC / it["file"]):
             out.append((it["dir"], it["file"], "done_before", 0, 0))
         else:
             todo.append(it)
@@ -417,7 +620,7 @@ def _recut_page(job) -> list:
     L = layout(img) if img is not None else None
     for it in todo:
         d = Path(it["dir"])
-        dst = d / "seg_input_rc" / it["file"]
+        dst = d / _RC / it["file"]
         stored_p = d / "seg_input" / it["file"]
         if img is None:
             out.append((it["dir"], it["file"], "page_missing", 0, 0))
@@ -447,7 +650,7 @@ def recut(a) -> None:
     ver = recut_version()
     print(f"  切法指纹 {ver}", flush=True)
     for d in a.pairs:                                  # 先全部核对一遍再动手, 不切到一半才发现
-        rc_dir = d / "seg_input_rc"
+        rc_dir = d / a.rc_name
         vf = rc_dir / "_recut_version.txt"
         if rc_dir.exists() and any(q.suffix.lower() == ".png" for q in rc_dir.iterdir()):
             have = vf.read_text(encoding="utf-8").strip() if vf.exists() else "none"
@@ -474,7 +677,7 @@ def recut(a) -> None:
                 jobs.setdefault(s["source"], []).append({
                     "dir": str(d), "file": s["file"], "x0": s["x0"], "x1": s["x1"],
                     "la": r["label_y0"], "lb": r["label_y1"], "ia": r["input_y0"], "ib": r["input_y1"]})
-        rc_dir = d / "seg_input_rc"
+        rc_dir = d / a.rc_name
         rc_dir.mkdir(exist_ok=True)
         (rc_dir / "_recut_version.txt").write_text(ver + "\n", encoding="utf-8")
         for t in rc_dir.glob("*.tmp"):                 # 上次停在写到一半的
@@ -483,7 +686,7 @@ def recut(a) -> None:
         print(f"  {d.name}: 原图 {len(jobs):,} 张  要切 {n_seg:,} 段  (不在训练里 跳过 {n_skip:,}, 在训练里但找不到行 {n_row_missing:,})", flush=True)
         cnt, log = Counter(), []
         done = 0
-        with ProcessPoolExecutor(a.workers, initializer=_recut_init, initargs=(index,)) as ex:
+        with ProcessPoolExecutor(a.workers, initializer=_recut_init, initargs=(index, a.rc_name)) as ex:
             for res in ex.map(_recut_page, list(jobs.items()), chunksize=4):
                 for dd, fn, st_, up, down in res:
                     cnt[st_.split("_")[0] if st_.startswith("ok") else st_] += 1
@@ -522,7 +725,7 @@ def relist(a) -> None:
             if "\t" not in ln:
                 continue
             p, txt = ln.split("\t", 1)
-            q = p.replace("\\seg_input\\", "\\seg_input_rc\\").replace("/seg_input/", "/seg_input_rc/")
+            q = p.replace("\\seg_input\\", f"\\{a.rc_name}\\").replace("/seg_input/", f"/{a.rc_name}/")
             tot += 1
             if q != p and _done(Path(q)):
                 rc += 1
@@ -566,10 +769,12 @@ def main() -> None:
     c.add_argument("--pairs", type=Path, nargs="+", required=True, help="配对目录(里面有 _segments.csv / _pairs_labeled.csv / seg_input)")
     c.add_argument("--workers", type=int, default=8)
     c.add_argument("--page-index", nargs="*", default=[r"E:\_move_logs\pagetype_pinyin_v4\page_type.csv", r"E:\_move_logs\pagetype_census_v4\page_type.csv"])
+    c.add_argument("--rc-name", default="seg_input_rc", help="重切图放到 <目录>\\这个名字(v3 用 seg_input_rc3, 不和 v2 的混)")
     rl = sub.add_parser("relist")
     rl.add_argument("--src", type=Path, required=True, help="原训练集目录(train.txt / val.txt / charset.txt)")
     rl.add_argument("--out", type=Path, required=True)
     rl.add_argument("--min-rc", type=float, default=0.97, help="换成重切图的段至少这么多, 不够就什么都不写")
+    rl.add_argument("--rc-name", default="seg_input_rc", help="清单里 \\seg_input\\ 换成 \\这个名字\\")
     sub.add_parser("version", help="打印现在代码的切法指纹(RECUT_VERSION xxx), 给服务器脚本核对")
     a = ap.parse_args()
     if a.cmd == "demo":
