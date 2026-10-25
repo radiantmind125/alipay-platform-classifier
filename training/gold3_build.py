@@ -130,8 +130,8 @@ def cmd_prep(a) -> None:
         usable = sum(1 for r in rows if r.get("usable") == "1" and (r.get("text") or "").strip())
         pages = len({r["source"] for r in rows})
         snaps[name] = snap
-        nl = sum(1 for f in snap["files"] if f[0].startswith("label/"))
-        ni = sum(1 for f in snap["files"] if f[0].startswith("input/"))
+        nl = sum(1 for f in snap["files"] if f[0].startswith("label/") and f[0] != "label/")
+        ni = sum(1 for f in snap["files"] if f[0].startswith("input/") and f[0] != "input/")
         print(f"PREP_STATS {name} pages={pages} rows={len(rows)} usable={usable} label={nl} input={ni}", flush=True)
     (a.work / "_snapshot_prep.json").write_text(json.dumps(snaps, ensure_ascii=False, indent=1), encoding="utf-8")
     print("PREP_OK", flush=True)
