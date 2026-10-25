@@ -32,7 +32,7 @@ namespace Ssp
     public sealed class YenResult
     {
         public YenVerdict Verdict;
-        public double StemRatio;        // ★ 判据: ¥ 竖笔等效宽 / 数字笔画等效宽
+        public double StemRatio;        // ★ 判据一: ¥ 竖笔等效宽 / 数字笔画等效宽
         /// <summary>
         /// ¥ 横杠等效厚 / 数字笔画等效宽。**只输出, 现在不参与判定。**
         ///
@@ -51,7 +51,11 @@ namespace Ssp
         ///   (安卓真图中位 0.4072, 离苹果的 0.3161 很远, 必须单独标)。
         /// </summary>
         public double BarRatio;
-        public double YenHeightRatio;   // ¥ 高 / 数字高; 真图很稳, 用来确认抓到的确实是 ¥
+        /// <summary>
+        /// ★ 判据二(只在苹果上判): ¥ 高 / 数字高。真图很稳, 也用来确认抓到的确实是 ¥。
+        /// 苹果真图 0.718~0.735(¥ 73~75 像素 / 数字 101~103 像素), 2026-10-25 的假图 0.654。
+        /// </summary>
+        public double YenHeightRatio;
         /// <summary>
         /// (数字底 - ¥ 底) / 数字高。客户(玄武)说苹果真图这里应当为 0(底边齐平)。
         ///
@@ -76,14 +80,46 @@ namespace Ssp
         public double DigitStrokeNorm;
         public double StemWidth;        // ¥ 竖笔等效宽(像素, 亚像素)
         public int DigitCount;
-        public YenPlatform Platform;    // 原样回显调用方给的机型
+        public YenPlatform Platform;    // 判定用的机型: 调用方给的, 或者按 iPhone 原生截图尺寸认出来的
+        public string PlatformSource = "";   // "调用方" / "iPhone 原生截图尺寸" / ""(不知道机型)
         public bool Measured;           // 为 false 时上面几项无意义
         public string Reason = "";
     }
 
     /// <summary>
-    /// **蓝底转账页**金额前面那个 ¥ 的字形检查: ¥ 竖笔粗细 / 同一行数字笔画粗细。
-    /// 同一张图内部的比值, 不查表、不挑机型、不随分辨率变。
+    /// **蓝底页**(转账成功 / 支付成功 / 到账成功)金额前面那个 ¥ 的字形检查:
+    /// ¥ 竖笔粗细 / 同一行数字笔画粗细。同一张图内部的比值, 不随分辨率变。
+    ///
+    /// 原理(一句话)
+    /// ------------
+    /// 苹果真图的 ¥ 是系统字体画的, 比金额数字细一截, 也矮一截; P 图的人用别的字体把 ¥ 和数字一起打出来,
+    /// ¥ 就变粗变矮。所以量 **¥ 竖笔有多粗 ÷ 旁边数字笔画有多粗**, 再量 **¥ 有多高 ÷ 数字有多高**,
+    /// 都是同一张图里自己跟自己比, 图放大缩小都不影响。
+    /// 粗细不是数白点个数(抗锯齿边缘那一圈半白不白, 阈值一换就差一两个像素), 而是把笔画横截面的亮度
+    /// 加起来再除以"白字减蓝底"的亮度差, 半白的像素按比例算, 所以压缩、缩放都量得稳。
+    ///
+    /// 2026-10-25 更新(经理给的 1025 真假图: 真 转账成功 ¥1000.00 / 假 支付成功 ¥100.00, 都是 1320x2868)
+    /// ------------------------------------------------------------------------------------------
+    ///                          竖笔比     ¥高比     数字高
+    ///     真图 1025            0.5875    0.7255    102
+    ///     真图 支付成功 ¥100.00 0.5878    0.7255    102     (同机型同页型同金额, 7 月的图)
+    ///     假图 1025            0.6818    0.6542    107
+    ///
+    /// ★ 这张假图的 ¥ 比 9/16 那两张(0.7365 / 0.7392)细了一点, 离苹果上界 0.65 只剩 0.03,
+    ///   但它**矮了一截**(0.654, 苹果真图 0.718~0.735), 所以加了判据二。两条各自都能报它。
+    /// ★ 支付成功 / 到账成功页以前没有苹果真图验过。这次在本机找到 8 张支付成功 + 4 张到账成功的苹果真图
+    ///   (iPhone 原生尺寸, 去重后), 竖笔比 0.569~0.588、¥高比 0.7255~0.7327, 和转账成功页一样 —— 页型不改 ¥。
+    ///
+    /// 三处改动:
+    /// 1. **不传机型时, 图的尺寸正好是 iPhone 原生截图尺寸就按苹果判**(见 <see cref="IsIPhoneScreenshotSize"/>)。
+    ///    别的检查都是只传一个 Mat, 这样直接调 Check(mat) 也能报出这张假图; 尺寸对不上的照旧只量不判。
+    /// 2. 判据二 ¥高比, 只在苹果上判, 见 <see cref="AppleYenHeightLow"/>。
+    /// 3. "金额数字笔画粗细"那条**改成只在苹果上判**。原来排在机型判断前面, 不传机型也会报:
+    ///    本机 2,265 张蓝图(去重)里报出 79 张(3.5%), 几乎全是 1200x2640 / 1200x2652 / 1224x2700 这几种
+    ///    安卓机型, 整个机型的金额数字本来就粗(0.188~0.203), 是真图。iPhone 尺寸上只有 2 张, 都是攻击样本。
+    ///
+    /// v2 在本机的结果(不传机型): iPhone 原生尺寸的苹果蓝图真图 45 张(去重), 0 张报出;
+    /// 这张假图报出; 7 月 redteam 那 7 张"安卓图缩放成 iPhone 尺寸"的攻击样本全部报出; 别的尺寸一张都不下结论。
     ///
     /// 和谁的关系
     /// ----------
@@ -237,7 +273,11 @@ namespace Ssp
         public const double MinDigitHeight = 40;
 
         /// <summary>
-        /// 金额数字笔画粗细(笔画/字高)的正常区间 —— **和机型无关**, 苹果 0.1576 安卓 0.1582, 一样。
+        /// 金额数字笔画粗细(笔画/字高)的正常区间。**只在苹果上判**(2026-10-25 改)。
+        ///
+        /// ★★★★★ 原来写的是"和机型无关, 苹果 0.1576 安卓 0.1582 一样", 中位数确实一样, 但安卓有**整个机型**
+        ///   落在带外: 1200x2640 / 1200x2652 / 1224x2700 这几种金额数字本来就粗(0.188~0.203, 数值一张张都一样),
+        ///   不传机型时本机 2,265 张蓝图(去重)报出 79 张(3.5%)。苹果 5,199 张 0.1531~0.1753, 一张不出带, 所以只留在苹果上。
         ///
         /// ★★★★★ 这条是**测出来才加的**。拿阈值在语料上报出 11 张, 逐张看图 + 回查数值发现:
         ///   其中 9 张的 StemRatio 之所以低, 不是 ¥ 细, 是**数字粗**(0.188~0.204, 真图 p95 才 0.167)。
@@ -256,8 +296,63 @@ namespace Ssp
         /// </summary>
         public const double DigitStrokeNormLow = 0.145, DigitStrokeNormHigh = 0.178;
 
-        /// <summary>¥ 高 / 数字高 的护栏。真图实测 0.691~0.726, 卡宽一点。</summary>
+        /// <summary>¥ 高 / 数字高 的护栏(不管什么机型, 出了这个范围就不是 ¥, 不判)。真图实测 0.66~0.74, 卡宽一点。</summary>
         public const double YenHeightLow = 0.60, YenHeightHigh = 0.80;
+
+        /// <summary>
+        /// 判据二: 苹果真图 ¥高比 的正常区间(2026-10-25 加)。
+        ///
+        /// 本机 iPhone 原生尺寸的苹果蓝图真图 45 张(转账成功 / 支付成功 / 到账成功 / 代付等, 1170~1320 宽和 828 宽):
+        ///     0.7184 ~ 0.7353   就是 ¥ 73~75 像素 / 数字 101~103 像素, 只差一两个像素的量化
+        /// 2026-10-25 假图 0.6542(¥ 70 像素 / 数字 107 像素)。
+        /// 压缩缩放实测(132 个变体): 假图 0.6458~0.6729, 真图 0.6944~0.7273。
+        ///
+        /// ★ 下界 0.68: 比真图最小值低 5%, 比这张假图高 4%。上界 0.78 只是对称补位。
+        /// ★★ 安卓真图中位 0.69, 低的到 0.66(¥ 字形不一样), 所以**这条只在苹果上判**。
+        /// ★★ 这条只在本机 45 张上标过(9/16 那 5,199 张当时没存这一项), 比竖笔比那条薄;
+        ///   服务器普查清单上过一遍用 training/yen_census.py。
+        /// ★★ 这是整数像素高度之比, 图小了一个像素就差好几个百分点, 所以数字高不到
+        ///   <see cref="MinDigitHeightForYenHeight"/> 时这条不判(竖笔比那条照判)。
+        /// ★ 9/16 那两张假图这条是正常的(0.7196 / 0.7222), 它们靠竖笔比报。两条量的是不同的东西。
+        /// </summary>
+        public const double AppleYenHeightLow = 0.68, AppleYenHeightHigh = 0.78;
+
+        /// <summary>判据二要的最小数字高(像素)。原尺寸 iPhone 截图 @2x 约 68, @3x 约 102。</summary>
+        public const double MinDigitHeightForYenHeight = 60;
+
+        /// <summary>
+        /// iPhone 原生截图尺寸(竖屏, 宽 x 高)。调用方不给机型时, 图正好是其中之一就按苹果判。
+        ///
+        /// ★★★ 为什么这次敢用尺寸认苹果(9/16 说过"机型不要用分辨率去猜"):
+        ///   9/16 栽的是**反方向** —— 把"不是 iPhone 尺寸"的图当安卓, 结果裁过/缩过的 iPhone 截图被当成安卓报出来。
+        ///   正方向(尺寸正好是 iPhone 原生尺寸 -> 苹果)在 9/16 那 5,199 张上**误报 0 张**,
+        ///   本机这次 45 张 iPhone 尺寸的苹果蓝图真图, 也是 0 张。
+        ///   这 5,199 + 45 张的 ¥ 全是苹果的细 ¥ —— 要是有安卓机出这些尺寸, 它的粗 ¥ 早就被报出来了。
+        /// ★ 故意不收 1080x1920 / 1080x2340: iPhone 8 Plus / 13 mini 用这两个, 安卓也大量在用。
+        /// ★ 尺寸对不上(安卓 / 裁过 / 缩过 / 表里没有的新机型)一律不猜, 只量不判。
+        ///   要覆盖这些图, 调用方传状态栏设备模型给的机型。
+        /// ★ 安卓图被人缩放成 iPhone 尺寸(7 月 redteam 那种攻击)会按苹果判, 它的 ¥ 是安卓的粗 ¥, 照样报 ——
+        ///   这本来就是假图。
+        /// </summary>
+        static readonly HashSet<(int W, int H)> IPhoneSizes = new()
+        {
+            (640, 1136),                        // 5 / 5s / SE 一代
+            (750, 1334),                        // 6 / 7 / 8 / SE 二三代
+            (1242, 2208),                       // 6 Plus ~ 8 Plus
+            (828, 1792),                        // XR / 11
+            (1125, 2436),                       // X / XS / 11 Pro
+            (1242, 2688),                       // XS Max / 11 Pro Max
+            (1170, 2532),                       // 12 / 13 / 14 / 16e
+            (1284, 2778),                       // 12 Pro Max / 13 Pro Max / 14 Plus
+            (1179, 2556),                       // 14 Pro / 15 / 15 Pro / 16
+            (1290, 2796),                       // 14 Pro Max / 15 Plus / 15 Pro Max / 16 Plus
+            (1206, 2622),                       // 16 Pro / 17 / 17 Pro
+            (1320, 2868),                       // 16 Pro Max / 17 Pro Max
+            (1260, 2736),                       // iPhone Air
+        };
+
+        /// <summary>图的宽高是不是正好等于某款 iPhone 的原生截图尺寸(竖屏)。</summary>
+        public static bool IsIPhoneScreenshotSize(int width, int height) => IPhoneSizes.Contains((width, height));
 
         /// <summary>某一行的前景占 ¥ 宽度这个比例以上, 就算横杠所在行。</summary>
         const double BarFill = 0.70;
@@ -278,9 +373,9 @@ namespace Ssp
         ///   CannotDetermine, **不抛异常**。传进来的 Mat 不会被修改, 也不会被释放。
         /// </param>
         /// <param name="platform">
-        /// 这张图是苹果还是安卓, 由调用方的设备模型给。
-        /// ★ 不给(Unknown)时**照样把所有数量出来**, 只是不下判定 ——
-        ///   这样没接设备模型也能先看数, 接上之后不用改调用处。
+        /// 这张图是苹果还是安卓, 有设备模型的话由调用方给。
+        /// ★ 不给(Unknown)时: 图的尺寸正好是 iPhone 原生截图尺寸, 就按苹果判(见 <see cref="IsIPhoneScreenshotSize"/>);
+        ///   别的尺寸**照样把所有数量出来**, 只是不下判定(CannotDetermine)。
         /// </param>
         public static YenResult Check(Mat image, YenPlatform platform = YenPlatform.Unknown)
         {
@@ -288,6 +383,12 @@ namespace Ssp
 
             var res = new YenResult { Verdict = YenVerdict.CannotDetermine, Platform = platform };
             if (image.Empty()) { res.Reason = "图为空"; return res; }
+            if (platform != YenPlatform.Unknown) res.PlatformSource = "调用方";
+            else if (IsIPhoneScreenshotSize(image.Width, image.Height))
+            {
+                res.Platform = YenPlatform.Apple;
+                res.PlatformSource = "iPhone 原生截图尺寸";
+            }
 
             int cn = image.Channels();
             if (cn != 3 && cn != 4)
@@ -407,6 +508,7 @@ namespace Ssp
         }
 
         /// <param name="sub">已经裁好、已经转成灰度的金额行小块。</param>
+        /// <param name="res">量到的数和结论都写进这里(机型已经在 Check 里定好)。</param>
         static YenResult Measure(Mat sub, YenResult res)
         {
             int cw = sub.Width, ch = sub.Height;
@@ -514,31 +616,66 @@ namespace Ssp
                 return res;
             }
 
-            // ★★★ 先判数字自己的笔画 —— 这一条**和机型无关**, 所以不给机型也能判。
-            //   而且必须排在 StemRatio 前面: 数字粗了会把 StemRatio 的分母撑大,
+            switch (res.Platform)
+            {
+                case YenPlatform.Apple: return JudgeApple(res);
+                case YenPlatform.Android: return JudgeAndroid(res);
+                default:
+                    // ★ 安卓真图的数和苹果假图挨在一起, 不知道机型就只能量不能判
+                    res.Reason = $"竖笔比 {res.StemRatio:F4}, ¥高比 {res.YenHeightRatio:F4}; "
+                               + "不知道是安卓还是苹果(尺寸也不是 iPhone 原生截图), 只量不判";
+                    return res;
+            }
+        }
+
+        static YenResult JudgeApple(YenResult res)
+        {
+            string src = res.PlatformSource == "调用方" ? "" : "; 机型按 iPhone 截图尺寸认的";
+
+            // ★★★ 先判数字自己的笔画, 必须排在竖笔比前面: 数字粗了会把竖笔比的分母撑大,
             //   这时候报"¥ 竖笔比偏低"是**错的理由**。
             if (res.DigitStrokeNorm < DigitStrokeNormLow || res.DigitStrokeNorm > DigitStrokeNormHigh)
             {
                 res.Verdict = YenVerdict.Suspicious;
                 res.Reason = $"金额数字笔画 {res.DigitStrokeNorm:F4} 异常 "
-                           + $"(真图 {DigitStrokeNormLow}~{DigitStrokeNormHigh}), 问题在数字字体不在 ¥";
+                           + $"(苹果真图 {DigitStrokeNormLow}~{DigitStrokeNormHigh}), 问题在数字字体不在 ¥" + src;
                 return res;
             }
 
-            double lo, hi;
-            switch (res.Platform)
-            {
-                case YenPlatform.Apple: lo = AppleLow; hi = AppleHigh; break;
-                case YenPlatform.Android: lo = AndroidLow; hi = AndroidHigh; break;
-                default:
-                    // ★ 安卓真图的数和苹果假图挨在一起, 不知道机型就只能量不能判
-                    res.Reason = $"竖笔比 {res.StemRatio:F4}; 数字笔画正常; 不知道是安卓还是苹果, 只量不判";
-                    return res;
-            }
-            if (res.StemRatio < lo || res.StemRatio > hi)
+            // 两条判据量的是 ¥ 的两处不同地方(竖笔粗细 / 整体高度), 哪条出带都报, 理由都写上
+            var bad = new List<string>();
+            if (res.StemRatio < AppleLow || res.StemRatio > AppleHigh)
+                bad.Add($"¥ 竖笔比 {res.StemRatio:F4} (苹果真图 {AppleLow}~{AppleHigh})");
+            if (res.DigitHeight >= MinDigitHeightForYenHeight
+                && (res.YenHeightRatio < AppleYenHeightLow || res.YenHeightRatio > AppleYenHeightHigh))
+                bad.Add($"¥高比 {res.YenHeightRatio:F4} (苹果真图 {AppleYenHeightLow}~{AppleYenHeightHigh})");
+
+            if (bad.Count > 0)
             {
                 res.Verdict = YenVerdict.Suspicious;
-                res.Reason = $"¥ 竖笔比 {res.StemRatio:F4} (该机型正常 {lo}~{hi})";
+                res.Reason = string.Join("; ", bad) + src;
+            }
+            else
+            {
+                res.Verdict = YenVerdict.Ok;
+                res.Reason = $"¥ 竖笔比 {res.StemRatio:F4}, ¥高比 {res.YenHeightRatio:F4}" + src;
+            }
+            return res;
+        }
+
+        static YenResult JudgeAndroid(YenResult res)
+        {
+            // ★ 安卓有的机型金额数字本来就粗(见 DigitStrokeNormLow 的注释)。这时竖笔比的分母被撑大,
+            //   比值不可信, 也不能说图是假的 —— 不判。
+            if (res.DigitStrokeNorm < DigitStrokeNormLow || res.DigitStrokeNorm > DigitStrokeNormHigh)
+            {
+                res.Reason = $"金额数字笔画 {res.DigitStrokeNorm:F4}, 安卓有的机型本来就这样, 竖笔比不可信, 不判";
+                return res;
+            }
+            if (res.StemRatio < AndroidLow || res.StemRatio > AndroidHigh)
+            {
+                res.Verdict = YenVerdict.Suspicious;
+                res.Reason = $"¥ 竖笔比 {res.StemRatio:F4} (安卓真图 {AndroidLow}~{AndroidHigh})";
             }
             else
             {

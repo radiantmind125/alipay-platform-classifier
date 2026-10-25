@@ -56,14 +56,18 @@ r"""蓝图 ¥ 符号字形扫描 —— 不用模型, 只量 ¥ 的笔画粗细�
 ★ 报表里有**按分辨率分组的比值中位数**。明显分成两簇 = 苹果和安卓两种字形,
   和玄武说的对得上; 分不成两簇说明这个前提在数据上不成立, 要回头重看。
 
-★★★ 本脚本**只量不判**。真正的判定口径在 `demo/YenCheck.cs`, 而且是**两条判据**:
-    竖笔比(分机型, 苹果 [0.50,0.65] / 安卓 [0.64,0.80])
-    数字笔画粗细(不分机型, [0.145,0.175]) —— 落在带外说明**数字**字体不对, 不是 ¥ 的问题
-  重新标定的时候两条都要看, 只看竖笔比会把"数字偏粗"那一类算漏。
+★★★ 本脚本的 main **只量不判**。判定口径在 `demo/YenCheck.cs`, 这里的 `judge()` 是它的逐条翻版
+  (2026-10-25 v2):
+    机型: 调用方给; 不给时尺寸正好是 iPhone 原生截图尺寸就当苹果, 别的只量不判
+    苹果: 数字笔画粗细 [0.145,0.178] -> 竖笔比 [0.50,0.65] -> ¥高比 [0.68,0.78](数字高 >= 60 才判)
+    安卓: 数字笔画出带 = 不判(有的安卓机型数字本来就粗); 竖笔比 [0.64,0.80]
+  重新标定的时候几条都要看, 只看竖笔比会把"数字偏粗"那一类算漏。
 
-★★ 机型**不要用分辨率去猜**: 实测被裁过/缩过的 iPhone 截图会落到非 iPhone 分辨率上
-   (1260x2736 / 1280x2781 / 1280x2774 / 1280x2769 / 960x2079 整组 100% 像苹果),
-   拿分辨率当机型代理的话, 光这一项就造出 2.37% 的假报出。线上要用状态栏那个设备模型。
+★★ 机型**不要拿"不是 iPhone 尺寸"去猜安卓**: 实测被裁过/缩过的 iPhone 截图会落到非 iPhone 分辨率上
+   (1280x2781 / 1280x2774 / 1280x2769 / 960x2079 整组 100% 像苹果),
+   拿分辨率当机型代理的话, 光这一项就造出 2.37% 的假报出。要覆盖这些图得用状态栏那个设备模型。
+   反方向可以: **尺寸正好是 iPhone 原生截图尺寸就认苹果**, 9/16 那 5,199 张上 0 误报, v2 就这么做(IPHONE_SIZES)。
+   ★ 1260x2736 当时以为是缩过的 iPhone 图, 其实是 iPhone Air 的原生尺寸, 已收进 IPHONE_SIZES。
 
 **只读**: 只读图片, 只往 --out 写。
 """
@@ -99,6 +103,18 @@ _TS = re.compile(r"_(\d{8})\d{6}")   # 文件名里的时间戳, 形如 _2026090
 YEN_H_LOW, YEN_H_HIGH = 0.60, 0.80
 # 横杠判定: 某一行的前景占 ¥ 宽度的这个比例以上就算横杠所在行。
 BAR_FILL = 0.70
+
+# ---- 判定口径, 和 demo/YenCheck.cs 的常数一一对应(改一边必须改另一边) ----
+APPLE_LOW, APPLE_HIGH = 0.500, 0.650
+ANDROID_LOW, ANDROID_HIGH = 0.640, 0.800
+MIN_DIGIT_H = 40
+NORM_LOW, NORM_HIGH = 0.145, 0.178
+APPLE_YEN_H_LOW, APPLE_YEN_H_HIGH = 0.68, 0.78
+MIN_DIGIT_H_FOR_YEN_H = 60
+# iPhone 原生截图尺寸(竖屏)。1080x1920 / 1080x2340 和安卓撞车, 不收。
+IPHONE_SIZES = {(640, 1136), (750, 1334), (1242, 2208), (828, 1792), (1125, 2436), (1242, 2688),
+                (1170, 2532), (1284, 2778), (1179, 2556), (1290, 2796), (1206, 2622), (1320, 2868),
+                (1260, 2736)}
 
 
 def _run_spans(row: np.ndarray):
@@ -311,6 +327,40 @@ def measure(path):
     ), None
 
 
+def judge(r, platform=None):
+    """YenCheck.Check 的判定翻版。r 是 measure() 的结果(None = 没量到)。
+
+    platform: "apple" / "android" / None(不知道)。不知道时按 r 里的 W/H 认 iPhone 原生截图尺寸。
+    返回 (结论, 机型, 理由): 结论 0 = 判不了, 1 = 正常, 2 = 可疑, 和 C# 的 YenVerdict 一样。
+    ★ measure() 的比值四舍五入到 4 位, C# 不舍入; 正好压在阈值上的图两边可能差一位, 别的都一样。
+    """
+    if r is None:
+        return 0, platform, "没量到"
+    plat = platform
+    if plat is None and (r["W"], r["H"]) in IPHONE_SIZES:
+        plat = "apple"
+    if r["digit_h"] < MIN_DIGIT_H:
+        return 0, plat, f"数字高 {r['digit_h']} < {MIN_DIGIT_H}"
+    norm_bad = not (NORM_LOW <= r["stroke_norm"] <= NORM_HIGH)
+    if plat == "apple":
+        if norm_bad:
+            return 2, plat, f"金额数字笔画 {r['stroke_norm']:.4f} 异常"
+        bad = []
+        if not (APPLE_LOW <= r["stem_ratio"] <= APPLE_HIGH):
+            bad.append(f"¥ 竖笔比 {r['stem_ratio']:.4f}")
+        if r["digit_h"] >= MIN_DIGIT_H_FOR_YEN_H and \
+                not (APPLE_YEN_H_LOW <= r["yen_h_ratio"] <= APPLE_YEN_H_HIGH):
+            bad.append(f"¥高比 {r['yen_h_ratio']:.4f}")
+        return (2, plat, "; ".join(bad)) if bad else (1, plat, "")
+    if plat == "android":
+        if norm_bad:
+            return 0, plat, "数字笔画出带, 安卓不判"
+        if not (ANDROID_LOW <= r["stem_ratio"] <= ANDROID_HIGH):
+            return 2, plat, f"¥ 竖笔比 {r['stem_ratio']:.4f}"
+        return 1, plat, ""
+    return 0, plat, "不知道机型, 只量不判"
+
+
 def _pct(a, q):
     return float(np.percentile(a, q)) if len(a) else float("nan")
 
@@ -426,12 +476,12 @@ def main() -> None:
     # ★ 这一栏不能漏: YenCheck.cs 是**两条判据**(竖笔比 + 数字笔画粗细), 只看竖笔比
     #   重新标定的话, 会把"数字偏粗"那一类的报出量算漏。
     sn = np.array([r["stroke_norm"] for r in use])
-    print(f"\n数字笔画粗细(笔画/字高) —— 和机型无关, 两个平台一样")
+    print(f"\n数字笔画粗细(笔画/字高) —— 中位两个平台一样, 但有的安卓机型整组偏粗(0.188~0.203)")
     print("  " + "  ".join(f"p{q}={np.percentile(sn, q):.4f}" for q in (0.1, 1, 50, 99, 99.9)))
-    for lo, hi in ((0.145, 0.175), (0.150, 0.170)):
+    for lo, hi in ((NORM_LOW, NORM_HIGH), (0.150, 0.170)):
         n = int(((sn < lo) | (sn > hi)).sum())
-        print(f"  带 [{lo}, {hi}] 报出 {n:,} = {100.0 * n / len(sn):.3f}%")
-    print("  ★ YenCheck.cs 现用 [0.145, 0.175]; 落在带外说明**数字**字体不对, 不是 ¥ 的问题。")
+        print(f"  带 [{lo}, {hi}] 出带 {n:,} = {100.0 * n / len(sn):.3f}%")
+    print(f"  ★ YenCheck.cs 现用 [{NORM_LOW}, {NORM_HIGH}], 只在苹果上判; 出带说明**数字**字体不对, 不是 ¥ 的问题。")
 
     # ---- 按分辨率分组: 苹果和安卓机型不同, 分辨率是平台的代理变量 ----
     by = collections.defaultdict(list)
