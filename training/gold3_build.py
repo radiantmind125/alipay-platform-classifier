@@ -20,8 +20,10 @@ gold + gold2 那 1,400 段上已经做过太多选择 —— i2、jt、k、拼�
               + _gold3_meta.csv(几何、页名, 不带文字) + _teacher_labels.csv(老师标签单放; 答案定下来之前不看)
     (块里)    旧版重切 recrop_v2_frozen.py(指纹 dcc336dd7add) -> <out>_rc2, 现版 recrop.py(b78370c3e883) -> <out>_rc3
     parity    两份重切的答案目录逐像素比: 拿 gold / gold2 用两版代码各重切一遍, 和当初的 _rc2 / _rc3 一样才说明代码和环境都没变
-    check     OLD / _rc2 / _rc3: 段一样, 重切图 = 旧图上下各加几行(旧图原样嵌在里面), 宽度不变, 指纹对
-    snapshot  测试目录和 prep 时的快照一模一样(只读的证据)
+    splitparity 切段对照: 用今天的 split_segments 把一个训练目录重切一遍, 段和 x 区间、裁图都得和当初训练用的一样
+    check     OLD / _rc2 / _rc3: 段一样, 重切图 = 旧图上下各加几行(旧图原样嵌在里面), 宽度不变, 指纹对; 清单 / 几何表 / 老师标签逐行对得上
+    snapshot  测试目录(和对照用的训练目录)每个文件的 名字 / 大小 / 修改时间 和 prep 时一模一样(只读的证据)
+★ 几何缺了、排除页没全找到、同一页在两个目录里、参数重复这些都直接停, 不悄悄跳过(10-25 复核 wf_840badab-49a 试出来的)。
 
 每个子命令最后打印一行纯 ASCII 的 XXX_OK; 不对就打印原因并以非 0 退出(服务器脚本看这两样)。
 """
@@ -80,32 +82,43 @@ def write_csv(p: Path, cols: list, rows: list) -> None:
 
 
 def snapshot(d: Path) -> dict:
-    """测试目录的快照: 顶层文件(名字, 大小)、每个子目录的文件数和最新修改时间、清单的 sha256。"""
-    top, subs = [], {}
+    """目录的快照: 每个文件(含子目录里的)的 名字 / 大小 / 修改时间(纳秒), 两个清单再加 sha256。
+    ★ 只记每个子目录的"最新修改时间"不够: 用保留时间戳的方式覆盖一个文件就看不出来(复核时试出来的)。"""
+    files = []
     for e in os.scandir(d):
         if e.is_file():
-            top.append([e.name, e.stat().st_size])
+            st = e.stat()
+            files.append([e.name, st.st_size, st.st_mtime_ns])
         elif e.is_dir():
-            n, mt = 0, 0.0
+            files.append([e.name + "/", 0, 0])
             for f in os.scandir(e.path):
-                n += 1
-                mt = max(mt, f.stat().st_mtime)
-            subs[e.name] = [n, mt]
-    hs = {fn: sha256_of(d / fn) for fn in ("_pairs_labeled.csv", "_pairs.csv") if (d / fn).exists()}
-    return {"top": sorted(top), "subs": subs, "sha256": hs}
+                st = f.stat()
+                files.append([e.name + "/" + f.name, st.st_size, st.st_mtime_ns])
+    hs = {fn: sha256_of(d / fn) for fn in ("_pairs_labeled.csv", "_pairs.csv", "_segments.csv") if (d / fn).exists()}
+    return {"files": sorted(files), "sha256": hs}
+
+
+def no_dups(names: list, tag: str) -> None:
+    dup = sorted({x for x in names if names.count(x) > 1})
+    if dup:
+        die(tag, f"重复了: {dup}")
 
 
 def cmd_prep(a) -> None:
+    no_dups(a.dirs, "PREP_DUP_DIRS")
     for name in a.dirs:                       # ★ 先把六个目录都核完, 有一个不对就什么都不建
         d, w = a.data / name, a.work / name
         miss = [p.name for p in (d / "_pairs_labeled.csv", d / "label", d / "input") if not p.exists()]
         if miss:
             die("PREP_MISSING", f"{d} 缺 {miss}")
-        if (d / "_segments.csv").exists() or (d / "seg_input").exists():
-            die("PREP_ALREADY_SEGMENTED", f"{d} 里已经有 _segments.csv 或 seg_input —— 和记录的不一样, 先停下看看", 3)
+        cut = [e.name for e in os.scandir(d) if e.name.startswith(("seg_", "_segments"))]
+        if cut:
+            die("PREP_ALREADY_SEGMENTED", f"{d} 里已经有 {cut} —— 和记录的不一样, 先停下看看", 3)
         if w.exists():
             die("PREP_WORK_EXISTS", f"{w} 已经在了, 不覆盖")
     snaps = {}
+    for name in a.also_snap:                  # 只拿来比对、不切的目录(切段对照用的那个训练目录): 也记快照, 证明没写进去
+        snaps["also:" + name] = snapshot(a.data / name)
     for name in a.dirs:
         d, w = a.data / name, a.work / name
         snap = snapshot(d)
@@ -117,8 +130,9 @@ def cmd_prep(a) -> None:
         usable = sum(1 for r in rows if r.get("usable") == "1" and (r.get("text") or "").strip())
         pages = len({r["source"] for r in rows})
         snaps[name] = snap
-        print(f"PREP_STATS {name} pages={pages} rows={len(rows)} usable={usable} "
-              f"label={snap['subs'].get('label', [0])[0]} input={snap['subs'].get('input', [0])[0]}", flush=True)
+        nl = sum(1 for f in snap["files"] if f[0].startswith("label/"))
+        ni = sum(1 for f in snap["files"] if f[0].startswith("input/"))
+        print(f"PREP_STATS {name} pages={pages} rows={len(rows)} usable={usable} label={nl} input={ni}", flush=True)
     (a.work / "_snapshot_prep.json").write_text(json.dumps(snaps, ensure_ascii=False, indent=1), encoding="utf-8")
     print("PREP_OK", flush=True)
 
@@ -164,7 +178,7 @@ def page_width(d: Path, row_file: str, cache: dict, src: str):
 
 
 def test_pages(roots: list) -> dict:
-    """newbatch_* 下 test_white / test_blue 里每张页的名字(小写) -> 颜色。"""
+    """newbatch_* 下 test_white / test_blue 里每张页的名字(小写) -> 颜色。同一个名字出现两次就停(颜色说不清)。"""
     out = {}
     for r in roots:
         for c in COLOURS:
@@ -172,17 +186,39 @@ def test_pages(roots: list) -> dict:
             if d.is_dir():
                 for e in os.scandir(d):
                     if e.is_file() and not e.name.startswith("_"):
+                        if e.name.lower() in out:
+                            die("POOL_DUP_TEST_PAGE", f"测试页 {e.name} 出现了两次")
                         out[e.name.lower()] = c
     return out
 
 
+def gwcz_of(text: str) -> str:
+    m = GW.search(text)
+    return m.group().upper() if m else ""
+
+
 def cmd_pool(a) -> None:
+    no_dups(a.dirs, "POOL_DUP_DIRS")
+    excl = {x.strip().upper() for x in a.exclude_ids}
+    badid = sorted(x for x in excl if not re.fullmatch(r"GWCZ\d+", x))
+    if badid:
+        die("POOL_BAD_EXCLUDE_ID", f"排除页的号不像 GWCZ 号: {badid}")
     a.out.mkdir(parents=True, exist_ok=True)
-    excl = {x.upper() for x in a.exclude_ids}
     (a.out / "exclude_pages.txt").write_text("\n".join(sorted(excl)) + "\n", encoding="utf-8")
     tp = test_pages(a.test_folders)
     print(f"  测试页 {len(tp)} 张  (白 {sum(1 for c in tp.values() if c == 'white')} / 蓝 {sum(1 for c in tp.values() if c == 'blue')})", flush=True)
-    out, found = [], set()
+    # 排除页: 在六个目录的老师标签清单(行, 不是段)里找, 一张页就算一个段都没切出来也找得到; 必须全找到
+    page_dir = {}
+    for name in a.dirs:
+        for r in read_csv(a.work / name / "_pairs_labeled.csv"):
+            page = Path(r.get("source", "").replace("\\", "/")).name
+            if page_dir.setdefault(page, name) != name:
+                die("POOL_DUP_PAGE", f"页 {page} 同时在 {page_dir[page]} 和 {name} 里")
+    found = {gwcz_of(p) for p in page_dir} & excl
+    print(f"EXCLUDE_FOUND {len(found)} of {len(excl)}", flush=True)
+    if found != excl:
+        die("POOL_EXCLUDE_NOT_FOUND", f"排除页没全找到: {sorted(excl - found)}")
+    out = []
     for name in a.dirs:
         d, w = a.data / name, a.work / name
         col = colour_of(name)
@@ -194,29 +230,27 @@ def cmd_pool(a) -> None:
         for r in segs:
             src = r.get("source", "")
             page = Path(src.replace("\\", "/")).name
-            m = GW.search(page) or GW.search(r["file"])
-            g = m.group().upper() if m else ""
+            g = gwcz_of(page) or gwcz_of(r["file"])
             pages.add(page)
             if tp.get(page.lower()) != col:
                 not_test.add(page)
-            row = pl.get(r.get("row_file", ""), {})
+            row = pl.get(r.get("row_file", ""))
+            W = page_width(d, r.get("row_file", ""), wcache, src)
+            # ★ 几何缺了就停, 不悄悄当成"不是状态栏"(复核时试出来: 删掉第 0 行的清单行, 状态栏段就混进来了)
+            if row is None or row.get("label_y1", "") in ("", None) or not W or not (w / "seg_input" / r["file"]).exists():
+                die("POOL_NO_GEOMETRY", f"{name}/{r['file']}: 行清单 / 页宽 / 段图 缺了")
             rown = row.get("row", "")
             if rown == "":
                 mm = ROW_RE.search(r["file"])
                 rown = str(int(mm.group(1))) if mm else ""
-            W = page_width(d, r.get("row_file", ""), wcache, src)
-            ly1 = row.get("label_y1", "")
+            ly1 = row["label_y1"]
             if g in excl:
-                found.add(g)
-            if not (w / "seg_input" / r["file"]).exists():
-                why = "missing"
-            elif g in excl:
                 why = "excluded"
             elif not (r.get("text") or "").strip():
                 why = "empty"
             elif r.get("bad") == "1":
                 why = "bad"
-            elif rown == "0" and W and ly1 not in ("", None) and float(ly1) <= 0.10 * W:
+            elif rown == "0" and float(ly1) <= 0.10 * W:
                 why = "status"
             else:
                 why = ""
@@ -228,10 +262,9 @@ def cmd_pool(a) -> None:
                         "input_y0": row.get("input_y0", ""), "input_y1": row.get("input_y1", ""), "why": why,
                         "rank": hashlib.sha1(f"gold3:{name}:{r['file']}".encode("utf-8")).hexdigest()})
         print(f"POOL_STATS {name} pages={len(pages)} pages_eligible={len(pages_ok)} segments={len(segs)} "
-              + " ".join(f"{k}={why_n[k]}" for k in ("eligible", "excluded", "empty", "bad", "status", "missing")), flush=True)
+              + " ".join(f"{k}={why_n[k]}" for k in ("eligible", "excluded", "empty", "bad", "status")), flush=True)
         if not_test:
             die("POOL_NOT_TEST_PAGE", f"{name}: {len(not_test)} 张页不在 {col} 测试页里, 例如 {sorted(not_test)[:3]}")
-    print(f"EXCLUDE_FOUND {len(found)} of {len(excl)}", flush=True)
     write_csv(a.out / "_pool.csv", POOL_COLS, out)
     print("POOL_OK", flush=True)
 
@@ -249,11 +282,15 @@ def rename_retry(src: Path, dst: Path) -> None:
 def cmd_export(a) -> None:
     if a.out.exists():
         die("EXPORT_EXISTS", f"{a.out} 已经在了, 不再导(要重导先挪走)")
+    no_dups(a.dirs, "EXPORT_DUP_DIRS")
     want = {}
     for spec in a.n:
         c, n = spec.split(":")
         want[c] = int(n)
+        if want[c] <= 0:
+            die("EXPORT_BAD_N", f"{spec}: 段数要大于 0")
     pool = read_csv(a.pool)
+    no_dups([(r["dir"], r["file"]) for r in pool], "EXPORT_DUP_POOL_ROWS")
     teacher = {}
     for name in a.dirs:
         for r in read_csv(a.work / name / "_segments.csv"):
@@ -292,6 +329,8 @@ def cmd_export(a) -> None:
 def imread(p: Path):
     import cv2
     import numpy as np
+    if not p.is_file():
+        return None
     return cv2.imdecode(np.fromfile(str(p), np.uint8), cv2.IMREAD_UNCHANGED)
 
 
@@ -328,7 +367,15 @@ def cmd_check(a) -> None:
     cand = read_csv(a.gold / "_gold_candidates.csv")
     if len(a.rc) != len(a.fp):
         die("CHECK_ARGS", "--rc 和 --fp 个数不一样")
-    bad = 0
+    if not cand:
+        die("CHECK_FAIL", "清单是空的")
+    files = {r["file"] for r in cand}
+    meta = read_csv(a.gold / "_gold3_meta.csv")
+    teach = read_csv(a.gold / "_teacher_labels.csv")
+    m_ok = [(m["id"], m["dir"]) for m in meta] == [(r["id"], r["dir"]) for r in cand] and [t["id"] for t in teach] == [r["id"] for r in cand]
+    i_ok = set(os.listdir(a.gold / "img")) == files
+    print(f"CHECK_STATS gold3 n={len(cand)} meta_and_teacher_aligned={int(m_ok)} img_set_same={int(i_ok)}", flush=True)
+    bad = 0 if (m_ok and i_ok) else 1
     for rc, fp in zip(a.rc, a.fp):
         c2 = read_csv(rc / "_gold_candidates.csv")
         log = {r["id"]: r for r in read_csv(rc / "_recrop_log.csv")}
@@ -347,10 +394,10 @@ def cmd_check(a) -> None:
             if up >= 0 and down >= 0 and c.shape[1] == o.shape[1] and c.shape[0] == o.shape[0] + up + down \
                     and np.array_equal(c[up:up + o.shape[0]], o):
                 emb += 1
-        ok = c2 == cand and ver == fp and emb == len(cand) and st.get("ok", 0) == len(cand)
+        ok = c2 == cand and ver == fp and emb == len(cand) and st.get("ok", 0) == len(cand) and set(os.listdir(rc / "img")) == files
         bad += not ok
         print(f"CHECK_STATS {rc.name} n={len(cand)} embedded={emb} status_ok={st.get('ok', 0)} changed={changed} "
-              f"version={ver} want={fp} same_candidates={int(c2 == cand)}", flush=True)
+              f"version={ver} want={fp} same_candidates={int(c2 == cand)} img_set_same={int(set(os.listdir(rc / 'img')) == files)}", flush=True)
     if bad:
         die("CHECK_FAIL", "重切的答案目录和原图对不上")
     print("CHECK_OK", flush=True)
@@ -359,13 +406,36 @@ def cmd_check(a) -> None:
 def cmd_snapshot(a) -> None:
     old = json.loads((a.work / "_snapshot_prep.json").read_text(encoding="utf-8"))
     bad = []
-    for name in a.dirs:
-        now = json.loads(json.dumps(snapshot(a.data / name)))
-        if now != old.get(name):
-            bad.append(name)
+    keys = list(a.dirs) + ["also:" + x for x in a.also_snap]
+    for key in keys:
+        now = json.loads(json.dumps(snapshot(a.data / key.replace("also:", ""))))
+        if old.get(key) is None or now != old[key]:
+            bad.append(key)
     if bad:
-        die("SNAPSHOT_CHANGED", f"测试目录和 prep 时不一样: {bad}")
-    print(f"SNAPSHOT_SAME {len(a.dirs)} dirs", flush=True)
+        die("SNAPSHOT_CHANGED", f"目录和 prep 时不一样: {bad}")
+    print(f"SNAPSHOT_SAME {len(keys)} dirs", flush=True)
+
+
+def cmd_splitparity(a) -> None:
+    """切段对照: 拿一个训练目录用今天的 split_segments 重切到 --fresh, 段的 (文件, 行, 序号, x0, x1) 和当初的 _segments.csv 必须一样,
+    seg_input 图逐像素一样。证明今天切测试目录的 x 区间和训练、gold 当初是同一个切法(代码一样, 服务器上的 OpenCV / numpy 也没变)。"""
+    import numpy as np
+    key = lambda r: (r["file"], r["row_file"], str(r["seg"]), str(r["x0"]), str(r["x1"]))  # noqa: E731
+    ref = {key(r) for r in read_csv(a.ref / "_segments.csv")}
+    new = read_csv(a.fresh / "_segments.csv")
+    got = {key(r) for r in new}
+    same = differ = 0
+    for r in new:
+        p, q = imread(a.fresh / "seg_input" / r["file"]), imread(a.ref / "seg_input" / r["file"])
+        if p is not None and q is not None and p.shape == q.shape and np.array_equal(p, q):
+            same += 1
+        else:
+            differ += 1
+    print(f"SPLITPARITY_STATS ref={len(ref)} fresh={len(got)} only_ref={len(ref - got)} only_fresh={len(got - ref)} "
+          f"crops_same={same} crops_differ={differ}", flush=True)
+    if not got or got != ref or differ:
+        die("SPLITPARITY_FAIL", "今天切出来的段和当初训练目录的不一样: 切段代码或服务器环境变了, 不能往下切")
+    print("SPLITPARITY_OK", flush=True)
 
 
 def main() -> None:
@@ -376,6 +446,7 @@ def main() -> None:
     p.add_argument("--data", type=Path, required=True, help="测试配对目录所在的根(E:\\alipay-ai-data)")
     p.add_argument("--work", type=Path, required=True, help="工作目录(切出来的段放这里)")
     p.add_argument("--dirs", nargs="+", required=True)
+    p.add_argument("--also-snap", nargs="*", default=[], help="只记快照、不切的目录(切段对照用的训练目录)")
     g = sub.add_parser("gate")
     g.add_argument("--work", type=Path, required=True)
     g.add_argument("--dirs", nargs="+", required=True)
@@ -404,9 +475,13 @@ def main() -> None:
     s.add_argument("--data", type=Path, required=True)
     s.add_argument("--work", type=Path, required=True)
     s.add_argument("--dirs", nargs="+", required=True)
+    s.add_argument("--also-snap", nargs="*", default=[])
+    sp = sub.add_parser("splitparity")
+    sp.add_argument("--ref", type=Path, required=True, help="当初切过的训练配对目录(只读)")
+    sp.add_argument("--fresh", type=Path, required=True, help="今天用 split_segments --out 重切到的目录")
     a = ap.parse_args()
     {"prep": cmd_prep, "gate": cmd_gate, "pool": cmd_pool, "export": cmd_export, "parity": cmd_parity,
-     "check": cmd_check, "snapshot": cmd_snapshot}[a.cmd](a)
+     "check": cmd_check, "snapshot": cmd_snapshot, "splitparity": cmd_splitparity}[a.cmd](a)
 
 
 if __name__ == "__main__":
