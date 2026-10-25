@@ -96,8 +96,7 @@ def snapshot(d: Path) -> dict:
 
 
 def cmd_prep(a) -> None:
-    snaps = {}
-    for name in a.dirs:
+    for name in a.dirs:                       # ★ 先把六个目录都核完, 有一个不对就什么都不建
         d, w = a.data / name, a.work / name
         miss = [p.name for p in (d / "_pairs_labeled.csv", d / "label", d / "input") if not p.exists()]
         if miss:
@@ -106,6 +105,9 @@ def cmd_prep(a) -> None:
             die("PREP_ALREADY_SEGMENTED", f"{d} 里已经有 _segments.csv 或 seg_input —— 和记录的不一样, 先停下看看", 3)
         if w.exists():
             die("PREP_WORK_EXISTS", f"{w} 已经在了, 不覆盖")
+    snaps = {}
+    for name in a.dirs:
+        d, w = a.data / name, a.work / name
         snap = snapshot(d)
         w.mkdir(parents=True)
         shutil.copyfile(d / "_pairs_labeled.csv", w / "_pairs_labeled.csv")
