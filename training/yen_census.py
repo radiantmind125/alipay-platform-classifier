@@ -1,22 +1,23 @@
-r"""YenCheck v2(2026-10-25)在普查清单上过一遍: 量 + 按 C# 的口径判, 看真图会不会被报。
+r"""YenCheck v2(2026-10-25)和 AmountFontCheck(2026-10-26)在普查清单上过一遍: 量 + 按 C# 的口径判, 看真图会不会被报。
 
 为什么要跑
 ----------
-v2 加了两样东西: 不传机型时按 iPhone 原生截图尺寸认苹果, 以及苹果上的"¥高比"判据。
-本机只有 54 张 iPhone 尺寸的苹果蓝图真图, ¥高比这条要在几千张上过一遍才放心。
+YenCheck v2 加了两样东西: 不传机型时按 iPhone 原生截图尺寸认苹果, 以及苹果上的"¥高比"判据。
+本机只有 45 张 iPhone 尺寸的苹果蓝图真图, ¥高比这条要在几千张上过一遍才放心。
+AmountFontCheck(金额数字字体: 0 的宽 / 小数点的高)本机标定的 2,273 页里安卓占了绝大多数, 苹果也要多过一遍。
 普查清单(page_type.csv, 分图程序的输出)里每张图都有页型(B1 转账成功 / B2 到账成功 / B3 支付成功 ...),
 正好按页型分开看。
 
 用法(服务器)
 ------------
   python -u training\yen_census.py E:\_move_logs\pagetype_census_v4\page_type.csv ^
-         E:\_move_logs\pagetype_pinyin_v4\page_type.csv --out E:\_move_logs\yen_census_1025 --procs 8
+         E:\_move_logs\pagetype_pinyin_v4\page_type.csv --out E:\_move_logs\check_census_1026 --procs 8
 
-  输出(都在 --out 下): yen_census.csv 明细 / summary.txt 汇总 / flagged_sheet.png 报出来的金额行拼图 /
-  _DONE(跑完才写)。
+  输出(都在 --out 下): yen_census.csv 明细(两个检查的量和结论都在里面) / summary.txt 汇总 /
+  flagged_sheet.png ¥ 报出的金额行拼图 / flagged_font_sheet.png 字体报出的拼图 / _DONE(跑完才写)。
 
 ★ 只读图片, 只往 --out 写。清单里路径不存在的图记成"找不到", 不中断。
-★ 判定只调 yen_scan.judge(), 那是 demo/YenCheck.cs 的逐条翻版, 不在这里另写一套。
+★ 判定只调 yen_scan.judge() 和 amount_font_scan.judge(), 那是两个 C# 类的逐条翻版, 不在这里另写一套。
 """
 from __future__ import annotations
 
@@ -39,11 +40,14 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+import amount_font_scan  # noqa: E402
 import yen_scan  # noqa: E402
 
 COLS = ["path", "cls", "W", "H", "iphone_size", "verdict", "platform", "reason", "skip",
         "digit_h", "n_digit", "d_stroke", "y_stem", "stem_ratio", "yen_h_ratio", "bar_ratio",
-        "bot_gap", "stroke_norm"]
+        "bot_gap", "stroke_norm",
+        "font_verdict", "font_reason", "font_skip", "font_digit_h", "n_zero", "zero_w", "zero_hole_w",
+        "dot_h", "dot_w"]
 
 
 def _init():
@@ -54,8 +58,19 @@ def work(item):
     path, cls = item
     row = {"path": path, "cls": cls}
     if not os.path.exists(path):
-        row.update(skip="找不到", verdict=0, platform="", reason="找不到")
+        row.update(skip="找不到", verdict=0, platform="", reason="找不到",
+                   font_verdict=0, font_reason="找不到", font_skip="找不到")
         return row
+    # ---- 金额字体(和机型无关) ----
+    try:
+        fm, fwhy = amount_font_scan.measure(path)
+    except Exception as e:  # noqa: BLE001
+        fm, fwhy = None, f"出错 {type(e).__name__}"
+    fv, freason = amount_font_scan.judge(fm)
+    row.update(font_verdict=fv, font_reason=freason, font_skip=fwhy or "")
+    if fm:
+        row.update(font_digit_h=fm["digit_h"], n_zero=fm["n_zero"], zero_w=fm["zero_w"],
+                   zero_hole_w=fm["zero_hole_w"], dot_h=fm["dot_h"], dot_w=fm["dot_w"])
     try:
         m, why = yen_scan.measure(path)
     except Exception as e:  # noqa: BLE001
@@ -148,7 +163,7 @@ def main() -> None:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     except Exception:
         pass
-    ap = argparse.ArgumentParser(description="YenCheck v2 普查: 真图会不会被报")
+    ap = argparse.ArgumentParser(description="YenCheck v2 + AmountFontCheck 普查: 真图会不会被报")
     ap.add_argument("lists", nargs="+", type=Path, help="page_type.csv(分图程序的输出), 可以给多个")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--procs", type=int, default=8)
@@ -227,11 +242,68 @@ def main() -> None:
     n_tiles = _sheet(flagged, a.out / "flagged_sheet.png")
     say(f"\n拼图 flagged_sheet.png: {n_tiles} 张(最多 80)")
 
+    # ================= 金额字体(AmountFontCheck) =================
+    say("\n\n######## 金额字体 AmountFontCheck(和机型无关) ########")
+    say("\n== 按页型 x 是否 iPhone 原生尺寸: 正常 / 可疑 / 判不了")
+    ftab = collections.defaultdict(collections.Counter)
+    for r in rows:
+        key = (r["cls"], "iPhone尺寸" if r.get("iphone_size") == 1 else "别的尺寸")
+        ftab[key]["共"] += 1
+        ftab[key][{0: "判不了", 1: "正常", 2: "可疑"}[r.get("font_verdict", 0)]] += 1
+    for key in sorted(ftab):
+        c = ftab[key]
+        say(f"  {key[0]:<4}{key[1]:<8} 共 {c['共']:>6,}  正常 {c['正常']:>6,}  可疑 {c['可疑']:>4,}  判不了 {c['判不了']:>6,}")
+    fm = [r for r in rows if r.get("font_digit_h") not in (None, "")]
+    for grp, sel in (("iPhone 尺寸", lambda r: r.get("iphone_size") == 1), ("别的尺寸", lambda r: r.get("iphone_size") != 1)):
+        g = [r for r in fm if sel(r)]
+        zw = [r["zero_w"] for r in g if r.get("zero_w") is not None]
+        dt = [r["dot_h"] for r in g if r.get("dot_h") is not None and r["font_digit_h"] >= amount_font_scan.MIN_DIGIT_H_FOR_DOT]
+        say(f"\n  [{grp}] 量到 {len(g):,} 张")
+        say(f"     0 宽/数字高      {_q(zw)}   n={len(zw)}")
+        say(f"     小数点高/数字高  {_q(dt)}   n={len(dt)}")
+        say(f"     0 宽 > {amount_font_scan.ZERO_WIDTH_MAX}: {sum(1 for v in zw if v > amount_font_scan.ZERO_WIDTH_MAX)}"
+            f"   > 0.63: {sum(1 for v in zw if v > 0.63)}"
+            f"   小数点 < {amount_font_scan.DOT_HEIGHT_MIN}: {sum(1 for v in dt if v < amount_font_scan.DOT_HEIGHT_MIN)}"
+            f"   < 0.17: {sum(1 for v in dt if v < 0.17)}")
+    near = sorted([r for r in fm if r.get("zero_w") is not None], key=lambda r: -r["zero_w"])[:10]
+    say("\n  0 最胖的 10 张: " + "  ".join(f"{r['zero_w']:.4f}" for r in near))
+    for r in near[:5]:
+        say(f"     {r['zero_w']:.4f} {r['cls']} {r.get('W')}x{r.get('H')}  {r['path']}")
+    flat = sorted([r for r in fm if r.get("dot_h") is not None and r["font_digit_h"] >= amount_font_scan.MIN_DIGIT_H_FOR_DOT],
+                  key=lambda r: r["dot_h"])[:10]
+    say("  小数点最扁的 10 张: " + "  ".join(f"{r['dot_h']:.4f}" for r in flat))
+    for r in flat[:5]:
+        say(f"     {r['dot_h']:.4f} {r['cls']} {r.get('W')}x{r.get('H')}  {r['path']}")
+
+    fflag = sorted([r for r in rows if r.get("font_verdict") == 2], key=lambda r: (r["cls"], r["path"]))
+    say(f"\n== 字体报出来的(可疑) {len(fflag):,} 张(拼图 flagged_font_sheet.png 里的编号就是这里的序号)")
+    for i, r in enumerate(fflag, 1):
+        say(f"  {i:>3} {r['cls']:<3} {r.get('W')}x{r.get('H')} 数字高 {r.get('font_digit_h')}  {r['font_reason']}  {r['path']}")
+    n_ft = _sheet(fflag, a.out / "flagged_font_sheet.png")
+    say(f"\n拼图 flagged_font_sheet.png: {n_ft} 张(最多 80)")
+
+    # ---- 给服务器 PowerShell 块看的几行纯 ASCII 汇总(块里不放中文, 免得 5.1 按 ANSI 读坏) ----
+    def _cnt(sel):
+        return sum(1 for r in rows if sel(r))
+    iph_m = [r for r in rows if r.get("iphone_size") == 1 and not r.get("skip")]
+    lines.append("")
+    lines.append(f"KEY total={len(rows)} missing={miss} iphone_measured={len(iph_m)}")
+    lines.append(f"KEY yen_flagged={_cnt(lambda r: r['verdict'] == 2)} "
+                 f"yen_h_below_{yen_scan.APPLE_YEN_H_LOW}={sum(1 for r in iph_m if r['digit_h'] >= yen_scan.MIN_DIGIT_H_FOR_YEN_H and r['yen_h_ratio'] < yen_scan.APPLE_YEN_H_LOW)} "
+                 f"stem_above_{yen_scan.APPLE_HIGH}={sum(1 for r in iph_m if r['digit_h'] >= yen_scan.MIN_DIGIT_H and r['stem_ratio'] > yen_scan.APPLE_HIGH)}")
+    for grp, sel in (("iphone", lambda r: r.get("iphone_size") == 1), ("other", lambda r: r.get("iphone_size") != 1)):
+        g = [r for r in fm if sel(r)]
+        zw = [r["zero_w"] for r in g if r.get("zero_w") is not None]
+        dt = [r["dot_h"] for r in g if r.get("dot_h") is not None and r["font_digit_h"] >= amount_font_scan.MIN_DIGIT_H_FOR_DOT]
+        lines.append(f"KEY font_{grp} measured={len(g)} flagged={sum(1 for r in g if r.get('font_verdict') == 2)} "
+                     f"zero_max={max(zw) if zw else 'na'} zero_over_0.63={sum(1 for v in zw if v > 0.63)} "
+                     f"dot_min={min(dt) if dt else 'na'} dot_under_0.17={sum(1 for v in dt if v < 0.17)}")
+
     text = "\n".join(lines)
     (a.out / "summary.txt").write_text(text, encoding="utf-8")
     print(text)
     done_flag.write_text("ok", encoding="utf-8")
-    print(f"\nYEN_CENSUS_DONE  -> {a.out}")
+    print(f"\nYEN_CENSUS_DONE FONT_CENSUS_DONE  -> {a.out}")
 
 
 if __name__ == "__main__":
