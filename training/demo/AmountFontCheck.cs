@@ -22,9 +22,11 @@ namespace Ssp
         public int ZeroCount;               // 认出来的 "0" 个数
         public double ZeroWidthRatio;       // ★ 判据一: 最胖的那个 0 的宽 / 数字高; 没有 0 时为 0
         public double ZeroHoleWidthRatio;   // 那个 0 的孔宽 / 0 的字宽, 只输出(真图 <= 0.50, 1026 假图 0.55)
+        public double ZeroEdgeFill;         // 最胖那个 0 的上下沿平整度(护栏用, 真图 < 0.5, 被压住削平的 > 0.6)
         public bool HasDot;
         public double DotHeightRatio;       // ★ 判据二: 小数点高 / 数字高; 没有小数点时为 0
         public double DotWidthRatio;        // 小数点宽 / 数字高, 只输出
+        public double BandForeignRatio;     // 数字行正上方 / 正下方 3 像素里"不是蓝底也不是白字"的像素占比(护栏用)
         public bool Measured;               // 为 false 时上面几项无意义
         public string Reason = "";
     }
@@ -55,7 +57,9 @@ namespace Ssp
     ///     小数点高 / 数字高    0.174 ~ 0.217(2,205 页)     0.147
     ///     0 孔宽 / 0 字宽      0.366 ~ 0.500               0.550     (只输出)
     ///   苹果 47 张和安卓 2,163 张的 0 宽 / 小数点高都在同一个范围里 —— 确实是同一套字体。
-    ///   结论: 报出 1 张(就是这张假图), Ok 2,258, 不判 8(6 张是 TG 那种缩小图数字高不到 60, 2 张没有 0 也没有小数点)。真图 0 报。
+    ///   结论(这一版): 报出 1 张(就是这张假图), Ok 2,221, 不判 51。真图 2,207 页里 Ok 2,165, 不判 42:
+    ///     22 张没有 0、数字高又在 60~79(小数点那条要 80 以上); 16 张数字上下贴着别的颜色(多是描了黑边的高对比度文字);
+    ///     4 张数字高不到 60。真图 0 报。
     ///   9/16 和 10/25 那几张 ¥ 假图这里都正常 —— 它们的数字字体是对的, 只是 ¥ 不对, 归 YenCheck。
     ///
     /// 压缩缩放实测(三张图各 53 个变体: JPEG 95~40, 缩 0.4~1.33 倍 x 三种插值 x 有无 JPEG75, TG 1280, 加边框, 裁边;
@@ -67,15 +71,20 @@ namespace Ssp
     ///           整行斜了, 行高从 116 变 136, 0 宽比变成 0.596, 小数点也对不上底边。转 2 度以内的都报。
     ///     缩到数字高 60 以下的不判。
     ///     真图(含真图变体 144 个): 一个都不报。
-    /// 本机所有图(连上面这些变体和切图, 7,510 个能量的)过了一遍: 报出的全是这张假图和它的变体, 真图 0 报。
+    /// 本机所有图(连这些变体、切图、加框线 / 下划线 / 横幅的 1,610 张, 一共 9,245 个)过了一遍:
+    /// 报出的全是这张假图和它的变体, 真图(含被东西压住的)0 报。
     ///
-    /// 两道护栏(都是测出来才加的, 不加会误报)
+    /// 四道护栏(都是测出来才加的, 不加会误报)
     /// --------------------------------------
     /// - **¥ 护栏**: 最左块必须像 ¥(高 / 数字高 0.60~0.80, 正好两道横杠), 和 YenCheck 一样。
     ///   不加的话, 图只截了上面一截时定位器会锁到状态栏的时间(19:40), 系统字体的 0 本来就胖(0.65~0.70);
     ///   彩票页的号码球(白圈里一个孔)也会被当成 0, 量出 1.20。
     /// - **上下被切的金额行不判**: 图正好裁在金额行上(或定位框没框全), 切掉一截的 0 更胖, 切剩一条的小数点更扁。
     ///   实测安卓真图只留上面 952~976 行、或者裁掉上面 254~256 行, 不加这道会报 7 张。
+    /// - **数字上下贴着别的颜色不判**(<see cref="BandForeignMax"/>): 框线、下划线、深色卡片、支付宝自己的
+    ///   "交易提醒"通知横幅压在数字上沿 / 下沿时, Otsu 把它们归到底色那边, 数字边被削掉 —— 0 显得胖、小数点显得扁。
+    ///   评审实测: 横幅边缘压进数字 10~14 像素时 20 张真图报了 19 张, 8 像素红框压住数字上下沿也报; 加这道后 0 张。
+    /// - **0 的上下沿是平的不判**(<see cref="ZeroEdgeMax"/>): 0 的上下本来是圆弧, 被压住削平了就不能信它的宽度。
     ///
     /// 覆盖边界
     /// --------
@@ -127,6 +136,27 @@ namespace Ssp
 
         /// <summary>¥ 护栏: 某一行的前景占 ¥ 宽度这个比例以上就算横杠所在行(和 YenCheck 一样)。</summary>
         const double BarFill = 0.70;
+
+        /// <summary>
+        /// 最胖的那个 0 的"上下沿平整度"(最上 2 行 / 最下 2 行里 0 自己的像素占 0 宽的最大比例)超过这个就整张不判。
+        /// 真图 0 的上下是圆弧: 本机 3,295 张(含变体)最大 0.487, p99 0.459; 假图变体最大 0.396。
+        /// 被框线 / 横幅压住削平的真图 0.57 ~ 0.84(8 像素红框 0.67, 盖住上沿 10% 的深色横幅 0.84)。
+        /// </summary>
+        public const double ZeroEdgeMax = 0.60;
+
+        /// <summary>
+        /// 数字行正上方、正下方各看几行像素(横向从第一个数字到最后一个数字)。
+        /// </summary>
+        const int Band = 3;
+
+        /// <summary>
+        /// 这几行里, 颜色离"底色 -> 白"那条线段超过 80(RGB 欧氏距离)的像素占比超过这个, 整张不判。
+        /// 真图这几行只有蓝底和白字的抗锯齿过渡, 都在线段上: 本机 3,366 张(含变体)p99 0.003;
+        /// 只有 21 张(0.6%)超过 —— 开了"高对比度文字"的安卓, 数字描了黑边, 不判也没关系。
+        /// 红框、下划线、深色卡片、支付宝自己的"交易提醒"横幅(半透明深蓝)压在数字上沿 / 下沿时 >= 0.5。
+        /// 假图和它的 157 个变体最大 0.047, 一个都没被这道挡掉。
+        /// </summary>
+        public const double BandForeignMax = 0.05;
 
         public const int MaxComponents = 20_000;   // 上限保护
 
@@ -191,7 +221,7 @@ namespace Ssp
                 using var bgrCrop = new Mat(src, Rect.FromLTRB(cx0, cy0, cx1, cy1));
                 ownedGray = new Mat();
                 Cv2.CvtColor(bgrCrop, ownedGray, ColorConversionCodes.BGR2GRAY);
-                return Measure(ownedGray, res);
+                return Measure(ownedGray, bgrCrop, res);
             }
             finally { ownedGray?.Dispose(); ownedBgr?.Dispose(); owned8?.Dispose(); }
         }
@@ -257,8 +287,9 @@ namespace Ssp
         }
 
         /// <param name="sub">已经裁好、已经转成灰度的金额行小块。</param>
+        /// <param name="bgr">同一块的 BGR 原色(护栏要看颜色)。</param>
         /// <param name="res">量到的数和结论都写进这里。</param>
-        static AmountFontResult Measure(Mat sub, AmountFontResult res)
+        static AmountFontResult Measure(Mat sub, Mat bgr, AmountFontResult res)
         {
             int cw = sub.Width, ch = sub.Height;
 
@@ -325,9 +356,9 @@ namespace Ssp
             if (bars != 2)
             { res.Reason = $"最左块有 {bars} 道横杠, 不像 ¥, 可能没锁到金额行"; return res; }
 
-            // ---- 判据一的量: 认出 0, 取最胖的那个 ----
+            // ---- 判据一的量: 认出 0, 取最胖的那个(连它上下沿的平整度一起记) ----
             int zeros = 0;
-            double zeroW = 0, zeroHoleW = 0;
+            double zeroW = 0, zeroHoleW = 0, zeroEdge = 0;
             foreach (var d in digits)
             {
                 if (d.H < DigitTall * dH) continue;
@@ -335,7 +366,7 @@ namespace Ssp
                 if (!IsZero(d, hs)) continue;
                 zeros++;
                 double wr = d.W / dH;
-                if (wr > zeroW) zeroW = wr;
+                if (wr > zeroW) { zeroW = wr; zeroEdge = EdgeFill(lab, d); }
                 double hw = (double)hs[0].W / d.W;
                 if (hw > zeroHoleW) zeroHoleW = hw;
             }
@@ -356,19 +387,43 @@ namespace Ssp
                 }
             }
 
+            // ---- 数字行正上方 / 正下方几行里, 有多少"不是蓝底也不是白字"的颜色 ----
+            using var bgrC = bgr.Clone();          // ROI 视图不连续, 拷一份再整块取
+            bgrC.GetRectangularArray(out Vec3b[,] px);
+            double bandForeign = BandForeign(px, lab, cw, ch, digits.Min(g => g.X), digits.Max(g => g.X + g.W), dTop, dBot);
+
             res.Measured = true;
             res.DigitHeight = dH;
             res.DigitCount = digits.Count;
             res.ZeroCount = zeros;
             res.ZeroWidthRatio = zeroW;
             res.ZeroHoleWidthRatio = zeroHoleW;
+            res.ZeroEdgeFill = zeroEdge;
             res.HasDot = dot != null;
             res.DotHeightRatio = dot != null ? dot.Value.H / dH : 0;
             res.DotWidthRatio = dot != null ? dot.Value.W / dH : 0;
+            res.BandForeignRatio = bandForeign;
 
             if (dH < MinDigitHeight)
             {
                 res.Reason = $"数字高 {dH:F0} < {MinDigitHeight}, 判不准所以不判";
+                return res;
+            }
+
+            // ★ 数字上沿 / 下沿贴着别的颜色的东西: 框线、下划线、深色卡片、通知横幅压在数字上时,
+            //   Otsu 把它们归到底色那边, 数字的上下沿跟着没了 —— 0 显得胖、小数点显得扁。整张不判。
+            //   评审实测: 支付宝自己的"交易提醒"横幅边缘压进数字 10~14 像素时, 20 张真图报了 19 张; 加这道后 0 张。
+            if (bandForeign > BandForeignMax)
+            {
+                res.Reason = $"数字上下贴着别的颜色的东西({bandForeign:F2}), 像框线、横幅或描边, 不判";
+                return res;
+            }
+
+            // ★ 0 的上沿或下沿被削平了: 框线、下划线、深色通知横幅压在数字上时, Otsu 把比蓝底暗的东西归到底色那边,
+            //   数字的上下沿跟着没了 —— 0 显得胖、小数点显得扁。0 宽这时候不能信, 整张不判。
+            if (zeros > 0 && zeroEdge > ZeroEdgeMax)
+            {
+                res.Reason = $"0 的上沿或下沿是平的({zeroEdge:F2}), 像被框线或横幅压住了, 不判";
                 return res;
             }
 
@@ -450,6 +505,65 @@ namespace Ssp
                                       maxX - minX + 1, maxY - minY + 1, area));
                 }
             return outp;
+        }
+
+        /// <summary>字块最上 2 行和最下 2 行里, 这个字块自己的像素占字宽的最大比例(0 的上下是圆弧, 正常不到 0.5)。</summary>
+        static double EdgeFill(int[,] lab, Comp c)
+        {
+            double best = 0;
+            foreach (int r in new[] { 0, 1, c.H - 2, c.H - 1 })
+            {
+                if (r < 0 || r >= c.H) continue;
+                int on = 0;
+                for (int x = 0; x < c.W; x++)
+                    if (lab[c.Y + r, c.X + x] == c.Label) on++;
+                double f = (double)on / c.W;
+                if (f > best) best = f;
+            }
+            return best;
+        }
+
+        /// <summary>
+        /// 数字行正上方 Band 行和正下方 Band 行(横向 [c0, c1))里, 颜色离"底色 -> 白"线段超过 80 的像素占比。
+        /// 底色 = Otsu 分到底色那边(标记为 0)的像素每个通道的下中位数(直方图里第一个累计数 >= ceil(n/2) 的值)。
+        /// ★ 口径和 Python 侧一样: 按 R、G、B 的顺序累加, 拿距离的平方和 6400 比, 不开方。
+        /// </summary>
+        static double BandForeign(Vec3b[,] px, int[,] lab, int w, int h, int c0, int c1, int dTop, int dBot)
+        {
+            var hb = new long[256]; var hg = new long[256]; var hr = new long[256];
+            long n = 0;
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                    if (lab[y, x] == 0) { var v = px[y, x]; hb[v.Item0]++; hg[v.Item1]++; hr[v.Item2]++; n++; }
+            if (n == 0) return 0;
+            double aR = LowerMedian(hr, n), aG = LowerMedian(hg, n), aB = LowerMedian(hb, n);
+            double dR = 255 - aR, dG = 255 - aG, dB = 255 - aB;
+            double L = dR * dR + dG * dG + dB * dB;
+            long tot = 0, far = 0;
+            foreach (var (r0, r1) in new[] { (dTop - Band, dTop), (dBot, dBot + Band) })
+                for (int y = Math.Max(0, r0); y < Math.Min(h, r1); y++)
+                    for (int x = c0; x < c1; x++)
+                    {
+                        var v = px[y, x];
+                        double pR = v.Item2 - aR, pG = v.Item1 - aG, pB = v.Item0 - aB;
+                        double t = L == 0 ? 0 : (pR * dR + pG * dG + pB * dB) / L;
+                        if (t < 0) t = 0; else if (t > 1) t = 1;
+                        double eR = pR - t * dR, eG = pG - t * dG, eB = pB - t * dB;
+                        tot++;
+                        if (eR * eR + eG * eG + eB * eB > 6400) far++;
+                    }
+            return tot == 0 ? 0 : (double)far / tot;
+        }
+
+        static double LowerMedian(long[] hist, long n)
+        {
+            long want = (n + 1) / 2, acc = 0;
+            for (int v = 0; v < 256; v++)
+            {
+                acc += hist[v];
+                if (acc >= want) return v;
+            }
+            return 255;
         }
 
         /// <summary>¥ 的横杠数: 逐行数这个字块的像素, 够 BarFill 的行算横杠行, 连续的算一道。</summary>

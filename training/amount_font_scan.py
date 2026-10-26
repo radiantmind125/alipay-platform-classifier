@@ -16,6 +16,10 @@ r"""蓝图金额字体检查(demo/AmountFontCheck.cs 的 Python 对数版): 金�
 2. 小数点的高 / 数字高(数字高 >= 60 才判, 小图一个像素差太多)
    本机真图 2,218 页: 0.173 ~ 0.224。假图 0.147(扁)。
 
+护栏(都是测出误报才加的): 最左块要像 ¥; 数字碰到裁块上下边不判; 数字高 < 60 不判;
+数字正上方 / 正下方 3 行里"不是蓝底也不是白字"的颜色 > 5% 不判(框线、下划线、通知横幅、描边);
+最胖那个 0 的上下沿是平的(> 0.6)不判。
+
 只读图片。只管蓝底页; 白底账单详情页的金额归 MinusCheck / DotCheck / FontCheck。
 """
 from __future__ import annotations
@@ -25,7 +29,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image, ImageFile
+from PIL import Image, ImageFile, ImageOps
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -43,6 +47,9 @@ MIN_DIGIT_H = 60               # 数字高低于这个整张不判(小图二值�
 MIN_DIGIT_H_FOR_DOT = 80       # 小数点那条要的最小数字高(数字高 60~70 时真图和假图只隔一个像素)
 DIGIT_TALL = 0.85              # 块高 >= 数字高的这个比例才算数字
 HOLE_MIN_AREA = 3              # 孔至少这么多像素(挡 JPEG 噪点)
+ZERO_EDGE_MAX = 0.60           # 最胖那个 0 的上下沿平整度超过这个就不判(被框线/横幅压住削平了)
+BAND = 3                       # 数字行正上方 / 正下方各看几行
+BAND_FOREIGN_MAX = 0.05        # 这几行里"不是蓝底也不是白字"(离 底色->白 线段 > 80)的像素占比超过这个就不判
 
 
 def holes(mask: np.ndarray):
@@ -68,11 +75,44 @@ def is_zero(k, hs) -> bool:
     return (0.40 <= cx / k["w"] <= 0.60 and 0.40 <= cy / k["h"] <= 0.60 and h >= 0.60 * k["h"])
 
 
+def edge_fill(mask: np.ndarray) -> float:
+    """字块最上 2 行和最下 2 行里, 字块自己的像素占字宽的最大比例(0 的上下是圆弧, 正常不到 0.5)。"""
+    h, w = mask.shape
+    rows = [r for r in (0, 1, h - 2, h - 1) if 0 <= r < h]
+    return max(float(mask[r].sum()) / w for r in rows)
+
+
+def _band_foreign(rgb, loc, fgm, ch, cw, c0, c1, d_top, d_bot):
+    """数字行正上方 BAND 行和正下方 BAND 行(横向 [c0, c1))里, 颜色离"底色 -> 白"线段超过 80 的像素占比。
+    底色 = Otsu 分到底色那边的像素每个通道的下中位数。和 C# 一样按 R、G、B 顺序算, 拿距离平方和 6400 比。"""
+    x0, y0, x1, y1 = loc[:4]
+    pad = max(2, int((y1 - y0) * 0.15))
+    padx = max(pad, int((x1 - x0) * 0.30))
+    H, W = rgb.shape[:2]
+    sub = rgb[max(0, y0 - pad):min(H, y1 + pad), max(0, x0 - padx):min(W, x1 + pad)].astype(np.float64)
+    bgp = sub[~fgm]
+    if not len(bgp):
+        return 0.0
+    a = np.array([np.sort(bgp[:, c])[(len(bgp) + 1) // 2 - 1] for c in range(3)], np.float64)
+    d = 255.0 - a
+    L = d[0] * d[0] + d[1] * d[1] + d[2] * d[2]
+    rows = list(range(max(0, d_top - BAND), d_top)) + list(range(d_bot, min(ch, d_bot + BAND)))
+    if not rows or c1 <= c0:
+        return 0.0
+    pxs = sub[rows, c0:c1].reshape(-1, 3) - a
+    t = (pxs[:, 0] * d[0] + pxs[:, 1] * d[1] + pxs[:, 2] * d[2]) / L if L else np.zeros(len(pxs))
+    t = np.clip(t, 0.0, 1.0)
+    e0, e1, e2 = pxs[:, 0] - t * d[0], pxs[:, 1] - t * d[1], pxs[:, 2] - t * d[2]
+    far = (e0 * e0 + e1 * e1 + e2 * e2) > 6400
+    return float(far.sum()) / len(far)
+
+
 def measure(path):
-    """量一张图。返回 (数据字典, None) 或 (None, 跳过原因)。"""
+    """量一张图。返回 (数据字典, None) 或 (None, 跳过原因)。比值不舍入(和 C# 一样拿原值去比阈值)。"""
     try:
         with Image.open(path) as im:
-            rgb = np.asarray(im.convert("RGB"), dtype=np.uint8)
+            # ★ 按 EXIF 方向转正, 和 OpenCvSharp ImDecode(Color) 的行为一致
+            rgb = np.asarray(ImageOps.exif_transpose(im).convert("RGB"), dtype=np.uint8)
     except Exception:  # noqa: BLE001
         return None, "读不了"
     H, W = rgb.shape[:2]
@@ -81,10 +121,12 @@ def measure(path):
     loc = locate_amount_blue(rgb)
     if not loc:
         return None, "定位不到金额行"
-    glyphs, gcrop, _fgm = _reextract_mask(rgb, (loc[0], loc[1], loc[2], loc[3]))
+    glyphs, gcrop, fgm = _reextract_mask(rgb, (loc[0], loc[1], loc[2], loc[3]))
+    # ★ 和 C# 一样按 (x, y) 排, x、y 都一样时保持 OpenCV 标号的先后(稳定排序)
+    glyphs = sorted(glyphs, key=lambda k: (k["x"], k["y"]))
     if len(glyphs) < 3:
         return None, "块数不够"
-    cw = gcrop.shape[1]
+    cw, ch = gcrop.shape[1], gcrop.shape[0]
     rest = glyphs[1:]                          # 最左边那块当 ¥, 不进统计
     tall = max(k["h"] for k in rest)
     digits = [k for k in rest
@@ -92,8 +134,7 @@ def measure(path):
     if len(digits) < 3:                       # 金额至少 x.xx 三位
         return None, "数字不够三个"
     # 金额行上下被切到了(图裁得正好卡在金额行上 / 定位框没框全)就不判: 切掉一截的 0 更胖, 切剩一条的小数点更扁
-    ch_ = gcrop.shape[0]
-    if any(k["y"] == 0 or k["y"] + k["h"] >= ch_ for k in digits + [glyphs[0]]):
+    if any(k["y"] == 0 or k["y"] + k["h"] >= ch for k in digits + [glyphs[0]]):
         return None, "金额行上下被切到了"
     d_top = min(k["y"] for k in digits)
     d_bot = max(k["y"] + k["h"] for k in digits)
@@ -113,17 +154,26 @@ def measure(path):
     if _runs(bar_rows).size != 2:
         return None, "最左块横杠不是两道, 不像 ¥"
 
-    zeros = []
+    # ---- 判据一的量: 认出 0, 取最胖的那个(连它上下沿的平整度一起记) ----
+    n_zero, zero_w, zero_hole_w, zero_edge = 0, 0.0, 0.0, 0.0
     for k in digits:
         if k["h"] < DIGIT_TALL * dh:
             continue
         hs = holes(k["mask"])
-        if is_zero(k, hs):
-            zeros.append((k["w"] / dh, hs[0][2] / k["w"]))
+        if not is_zero(k, hs):
+            continue
+        n_zero += 1
+        wr = k["w"] / dh
+        if wr > zero_w:
+            zero_w = wr
+            zero_edge = edge_fill(k["mask"])
+        hw = hs[0][2] / k["w"]
+        if hw > zero_hole_w:
+            zero_hole_w = hw
 
-    # 小数点: 数字行里最后两个数字前面紧挨着的那个小块, 底边和数字底齐
+    # ---- 判据二的量: 最后两位数字前面紧挨着的那个小块, 底边和数字底齐 ----
     dot = None
-    seq = sorted([k for k in rest if k["x"] > 0 and k["x"] + k["w"] < cw], key=lambda k: k["x"])
+    seq = [k for k in rest if k["x"] > 0 and k["x"] + k["w"] < cw]
     big = [k for k in seq if k["h"] >= DIGIT_TALL * dh]
     if len(big) >= 2:
         x_last2 = big[-2]["x"]
@@ -135,12 +185,18 @@ def measure(path):
             if not [b for b in big if k["x"] < b["x"] < x_last2]:
                 dot = k
 
+    # ---- 数字行正上方 / 正下方几行里, 有多少"不是蓝底也不是白字"的颜色 ----
+    band_foreign = _band_foreign(rgb, loc, fgm, ch, cw,
+                                 min(k["x"] for k in digits), max(k["x"] + k["w"] for k in digits), d_top, d_bot)
+
     return dict(
-        W=W, H=H, digit_h=int(dh), n_digit=len(digits), n_zero=len(zeros),
-        zero_w=round(max(z[0] for z in zeros), 4) if zeros else None,
-        zero_hole_w=round(max(z[1] for z in zeros), 4) if zeros else None,
-        dot_h=round(dot["h"] / dh, 4) if dot else None,
-        dot_w=round(dot["w"] / dh, 4) if dot else None,
+        W=W, H=H, digit_h=int(dh), n_digit=len(digits), n_zero=n_zero,
+        zero_w=zero_w if n_zero else None,
+        zero_hole_w=zero_hole_w if n_zero else None,
+        zero_edge=zero_edge if n_zero else None,
+        dot_h=dot["h"] / dh if dot else None,
+        dot_w=dot["w"] / dh if dot else None,
+        band_foreign=band_foreign,
     ), None
 
 
@@ -150,14 +206,19 @@ def judge(m):
         return 0, "没量到"
     if m["digit_h"] < MIN_DIGIT_H:
         return 0, f"数字高 {m['digit_h']} < {MIN_DIGIT_H}"
+    if m["band_foreign"] > BAND_FOREIGN_MAX:
+        return 0, f"数字上下贴着别的颜色的东西({m['band_foreign']:.2f}), 像框线、横幅或描边"
+    if m["n_zero"] and m["zero_edge"] > ZERO_EDGE_MAX:
+        return 0, f"0 的上沿或下沿是平的({m['zero_edge']:.2f}), 像被框线或横幅压住了"
     bad = []
-    if m["zero_w"] is not None and m["zero_w"] > ZERO_WIDTH_MAX:
+    if m["n_zero"] and m["zero_w"] > ZERO_WIDTH_MAX:
         bad.append(f"0 宽/数字高 {m['zero_w']:.4f}")
-    if m["dot_h"] is not None and m["digit_h"] >= MIN_DIGIT_H_FOR_DOT and m["dot_h"] < DOT_HEIGHT_MIN:
+    dot_usable = m["dot_h"] is not None and m["digit_h"] >= MIN_DIGIT_H_FOR_DOT
+    if dot_usable and m["dot_h"] < DOT_HEIGHT_MIN:
         bad.append(f"小数点高/数字高 {m['dot_h']:.4f}")
     if bad:
         return 2, "; ".join(bad)
-    if m["zero_w"] is None and (m["dot_h"] is None or m["digit_h"] < MIN_DIGIT_H_FOR_DOT):
+    if not m["n_zero"] and not dot_usable:
         return 0, "金额里没有 0 也没有能量的小数点"
     return 1, ""
 

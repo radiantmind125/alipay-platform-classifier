@@ -106,7 +106,7 @@ namespace Ssp.FontTest
             if (outCsv != null)
             {
                 var sb = new StringBuilder();
-                sb.AppendLine("path,W,H,verdict,measured,digit_h,n_digit,n_zero,zero_w,zero_hole_w,has_dot,dot_h,dot_w,reason");
+                sb.AppendLine("path,W,H,verdict,measured,digit_h,n_digit,n_zero,zero_w,zero_hole_w,zero_edge,has_dot,dot_h,dot_w,band_foreign,reason");
                 foreach (var (path, w, h, r) in all)
                 {
                     sb.Append('"').Append(path.Replace("\"", "\"\"")).Append('"').Append(',')
@@ -116,9 +116,11 @@ namespace Ssp.FontTest
                       .Append(r.DigitCount).Append(',').Append(r.ZeroCount).Append(',')
                       .Append(r.ZeroWidthRatio.ToString("R", inv)).Append(',')
                       .Append(r.ZeroHoleWidthRatio.ToString("R", inv)).Append(',')
+                      .Append(r.ZeroEdgeFill.ToString("R", inv)).Append(',')
                       .Append(r.HasDot ? 1 : 0).Append(',')
                       .Append(r.DotHeightRatio.ToString("R", inv)).Append(',')
                       .Append(r.DotWidthRatio.ToString("R", inv)).Append(',')
+                      .Append(r.BandForeignRatio.ToString("R", inv)).Append(',')
                       .Append('"').Append(r.Reason.Replace("\"", "\"\"")).Append('"')
                       .AppendLine();
                 }
