@@ -19,7 +19,14 @@ scan(只读; 只写 --out)
       mask    名字少了星号: (字) / 字(个人) / (##字) -> 候选是整条不要(三套答案 3,445 段里一次都没有对的)
     写 <out>/candidates.tsv(rule, old, new, n_k_train, n_k_val, n_i_train, n_i_val, sample files)和每个候选最多 --samples 张样图
     (从第一份清单的图拷, 名字 c<序号>_<n>.png), 打印 RELABEL_SCAN_STATS / RELABEL_SCAN_OK。
-apply 在人看过候选以后加(只按一张逐条列出来的清单改)。
+apply(只按人审过的决定改; 原清单只读, 写两个新目录)
+    python training/relabel_known.py apply --lists <train-n1009k> <train-n1009i> --out <train-n1009m> <train-n1009ic>
+           --scan <step50_scan> --decisions training/relabel_decisions_50.tsv
+    决定文件(公开仓库里, 只有候选编号 / 银行名 / 界面固定文字)第一行 pin 的是 candidates.tsv 的 sha256, 不一样就停。
+    规则: rule slash|mask|bankjunk = 这条规则的候选全照办(keep 的除外); bankprefix 旧 新 = 银行候选里括号前正好是旧的换成新的;
+    accept <cid> = 照候选的 new 改; rewrite <cid> <新标签> = 改成给的; 没写到的候选一律不动。
+    新目录: train.txt / val.txt(行的顺序不变, 只有决定里的标签改了或整行去掉)+ charset.txt(原样拷)+ _relabel_applied.tsv + _relabel_version.txt。
+    打印 RELABEL_APPLY_STATS(每份清单 进 / 出 / 改 / 去掉, 按规则)和 RELABEL_APPLY_OK。
 每个子命令最后打印一行纯 ASCII 的 XXX_OK; 不对就打印原因并以非 0 退出。
 """
 from __future__ import annotations
@@ -261,6 +268,151 @@ def cmd_scan(a) -> None:
     print("RELABEL_SCAN_OK", flush=True)
 
 
+def sha256_of(p: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with p.open("rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def load_decisions(p: Path) -> dict:
+    d = {"pin": None, "rules": set(), "keep": set(), "bank": {}, "accept": set(), "rewrite": {}}
+    for ln in p.read_text(encoding="utf-8").splitlines():
+        if not ln.strip():
+            continue
+        f = ln.split("\t")
+        if f[0] == "pin" and len(f) == 2:
+            d["pin"] = f[1]
+        elif f[0] == "rule" and len(f) == 2 and f[1] in ("slash", "mask", "bankjunk"):
+            d["rules"].add(f[1])
+        elif f[0] == "keep" and len(f) == 2:
+            d["keep"].add(f[1])
+        elif f[0] == "bankprefix" and len(f) == 3 and f[1] and f[2] in BANKS:
+            d["bank"][f[1]] = f[2]
+        elif f[0] == "accept" and len(f) == 2:
+            d["accept"].add(f[1])
+        elif f[0] == "rewrite" and len(f) == 3 and f[2]:
+            d["rewrite"][f[1]] = f[2]
+        else:
+            die("RELABEL_APPLY_BAD_DECISION", f"看不懂的决定: {ln!r}")
+    if not d["pin"]:
+        die("RELABEL_APPLY_BAD_DECISION", "决定文件里没有 pin")
+    return d
+
+
+def build_plan(rows: list, dec: dict) -> dict:
+    """候选表 + 人审过的决定 -> {旧标签: (规则, 新标签 或 None = 整条不要)}。没写到的候选一律不动; 同一个旧标签两个不同的决定就停。"""
+    plan = {}
+    for x in rows:
+        cid, rule, old, new = x["cid"], x["rule"], x["old"], x["new"]
+        if cid in dec["keep"]:
+            continue
+        if cid in dec["rewrite"]:
+            act = (rule, dec["rewrite"][cid])
+        elif rule == "slash" and "slash" in dec["rules"]:
+            act = (rule, new)
+        elif rule in ("mask", "bankjunk") and rule in dec["rules"]:
+            act = (rule, None)
+        elif rule == "bank":
+            m = CARD.match(old)
+            p = m.group(1).strip() if m else ""
+            if p not in dec["bank"]:
+                continue
+            act = (rule, dec["bank"][p] + m.group(2) + m.group(3))
+        elif rule in ("text", "pre", "affix", "plus") and cid in dec["accept"]:
+            act = (rule, new)
+        else:
+            continue
+        if old in plan and plan[old] != act:
+            die("RELABEL_APPLY_CONFLICT", f"同一个标签两个不同的决定: {old!r} {plan[old]} {act}")
+        plan[old] = act
+    return plan
+
+
+def cmd_apply(a) -> None:
+    if len(a.lists) != 2 or len(a.out) != 2:
+        die("RELABEL_APPLY_ARGS", "--lists 和 --out 都要正好两个(v3 那份在前)")
+    for o in a.out:
+        if o.exists() or o.with_name(o.name + ".tmp").exists():
+            die("RELABEL_APPLY_EXISTS", f"{o} 已经在了, 不覆盖")
+    dec = load_decisions(a.decisions)
+    cand_file = a.scan / "candidates.tsv"
+    have = sha256_of(cand_file)
+    if have != dec["pin"]:
+        die("RELABEL_APPLY_PIN", f"{cand_file} 的 sha256 {have} 和决定文件里的 {dec['pin']} 不一样: 不是审过的那份候选表")
+    with cand_file.open(encoding="utf-8") as f:
+        rows = list(csv.DictReader(f, delimiter="\t"))
+    plan = build_plan(rows, dec)
+    charset = set(c for c in (a.lists[0] / "charset.txt").read_text(encoding="utf-8").split("\n") if c)
+    bad = [new for _r, new in plan.values() if new is not None and not all(ch in charset for ch in new)]
+    if bad:
+        die("RELABEL_APPLY_OFF_CHARSET", f"{len(bad)} 个新标签有字表外的字, 例如 {bad[:3]}")
+    if any(new == "" for _r, new in plan.values()):
+        die("RELABEL_APPLY_EMPTY_LABEL", "有新标签是空的")
+    for src, out in zip(a.lists, a.out):
+        if (src / "charset.txt").read_bytes() != (a.lists[0] / "charset.txt").read_bytes():
+            die("RELABEL_APPLY_CHARSET_DIFFERS", f"{src} 的字表和 {a.lists[0]} 的不一样")
+        tmp = out.with_name(out.name + ".tmp")
+        tmp.mkdir(parents=True)
+        stats = Counter()
+        applied = Counter()
+        for which in ("train", "val"):
+            p = src / f"{which}.txt"
+            if not p.exists():
+                continue
+            lines_in = p.read_text(encoding="utf-8").splitlines()
+            lines_out, paths_in, paths_out = [], [], []
+            for ln in lines_in:
+                if "\t" not in ln:
+                    lines_out.append(ln)
+                    continue
+                path, txt = ln.split("\t", 1)
+                paths_in.append(path)
+                act = plan.get(txt)
+                if act is None:
+                    lines_out.append(ln)
+                    paths_out.append(path)
+                    continue
+                rule, new = act
+                applied[(rule, txt, new, which)] += 1
+                if new is None:
+                    stats[f"{which}_drop_{rule}"] += 1
+                    continue
+                stats[f"{which}_rewrite_{rule}"] += 1
+                lines_out.append(f"{path}\t{new}")
+                paths_out.append(path)
+            dropped = sum(v for k, v in stats.items() if k.startswith(f"{which}_drop_"))
+            if len(lines_out) != len(lines_in) - dropped or not set(paths_out) <= set(paths_in):
+                die("RELABEL_APPLY_COUNT", f"{p}: 进 {len(lines_in)} 行, 去掉 {dropped}, 出 {len(lines_out)} 行 对不上")
+            (tmp / f"{which}.txt").write_text("\n".join(lines_out) + "\n", encoding="utf-8")
+            stats[f"{which}_in"] = len(lines_in)
+            stats[f"{which}_out"] = len(lines_out)
+        shutil.copyfile(src / "charset.txt", tmp / "charset.txt")
+        if sha256_of(tmp / "charset.txt") != sha256_of(src / "charset.txt"):
+            die("RELABEL_APPLY_CHARSET_COPY", "拷过去的字表和原来的不一样")
+        with (tmp / "_relabel_applied.tsv").open("w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f, delimiter="\t")
+            w.writerow(["rule", "old", "new", "list", "n"])
+            for (rule, old, new, which), n in sorted(applied.items()):
+                w.writerow([rule, old, "DROP" if new is None else new, which, n])
+        (tmp / "_relabel_version.txt").write_text(f"decisions {sha256_of(a.decisions)}\ncandidates {have}\nsource {src}\n", encoding="utf-8")
+        # --expect: 本机用同一张候选表算好的总数(每份清单都一样), 对不上就不留这个目录
+        if a.expect:
+            got = {f"{w}_{act}": sum(v for k, v in stats.items() if k.startswith(f"{w}_{act}_")) for w in ("train", "val") for act in ("rewrite", "drop")}
+            want = dict(kv.split("=") for kv in a.expect)
+            diff = {k: (got.get(k), int(v)) for k, v in want.items() if got.get(k) != int(v)}
+            if diff:
+                shutil.rmtree(tmp)
+                die("RELABEL_APPLY_UNEXPECTED", f"{out.name}: 改动的行数和本机算的不一样 {diff}")
+        os.replace(tmp, out)
+        print(f"RELABEL_APPLY_STATS {out.name} " + " ".join(f"{k}={v}" for k, v in sorted(stats.items())), flush=True)
+    print(f"RELABEL_APPLY_PLAN labels {len(plan)} rewrite {sum(1 for r, n in plan.values() if n is not None)} "
+          f"drop {sum(1 for r, n in plan.values() if n is None)}", flush=True)
+    print("RELABEL_APPLY_OK", flush=True)
+
+
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser()
@@ -271,8 +423,14 @@ def main() -> None:
     s.add_argument("--out", type=Path, required=True)
     s.add_argument("--samples", type=int, default=3, help="每个候选拷几张样图")
     s.add_argument("--per-rule", type=int, default=150, help="每条规则只给最常见的这么多个候选拷样图")
+    s = sub.add_parser("apply")
+    s.add_argument("--lists", type=Path, nargs="+", required=True, help="和 scan 一样: v3 清单在前, 老切图清单在后(只读)")
+    s.add_argument("--out", type=Path, nargs="+", required=True, help="两个新清单目录(不能已经存在), 顺序和 --lists 一样")
+    s.add_argument("--scan", type=Path, required=True, help="scan 写的目录(candidates.tsv)")
+    s.add_argument("--decisions", type=Path, required=True, help="人审过的决定(training/relabel_decisions_50.tsv)")
+    s.add_argument("--expect", nargs="*", default=[], help="每份清单该改 / 去掉多少行, 例如 train_rewrite=3381 train_drop=1609 val_rewrite=208 val_drop=71")
     a = ap.parse_args()
-    {"scan": cmd_scan}[a.cmd](a)
+    {"scan": cmd_scan, "apply": cmd_apply}[a.cmd](a)
 
 
 if __name__ == "__main__":

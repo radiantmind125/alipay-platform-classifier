@@ -1,0 +1,377 @@
+pin	36ee4eda99440be1e46c4e19c7433c8ae27bb6ec4510a002746e3b481b25df41
+rule	slash
+rule	mask
+rule	bankjunk
+keep	601
+keep	641
+keep	642
+keep	643
+keep	647
+keep	671
+keep	745
+keep	756
+keep	1772
+rewrite	699	我的消费图鉴
+rewrite	700	我的消费图鉴
+rewrite	701	我的消费图鉴
+rewrite	704	我的消费图鉴
+rewrite	708	我的消费图鉴
+rewrite	709	我的消费图鉴
+rewrite	713	我的消费图鉴
+rewrite	731	我的消费图鉴
+rewrite	749	我的消费图鉴
+rewrite	750	我的消费图鉴
+rewrite	751	我的消费图鉴
+rewrite	811	我的消费图鉴
+rewrite	812	我的消费图鉴
+rewrite	813	我的消费图鉴
+rewrite	1361	我的消费图鉴
+rewrite	1362	我的消费图鉴
+rewrite	1363	我的消费图鉴
+rewrite	1364	我的消费图鉴
+rewrite	1365	我的消费图鉴
+rewrite	1366	我的消费图鉴
+rewrite	1367	我的消费图鉴
+rewrite	1368	我的消费图鉴
+rewrite	1369	我的消费图鉴
+rewrite	1373	我的消费图鉴
+bankprefix	农亚银行储蓄卡	农业银行储蓄卡
+bankprefix	工商银行诸蓄卡	工商银行储蓄卡
+bankprefix	农业银行储蓄华	农业银行储蓄卡
+bankprefix	四1川农信储蓄卡	四川农信储蓄卡
+bankprefix	农业银行诸蓄卡	农业银行储蓄卡
+bankprefix	北景银行储蓄果	北京银行储蓄卡
+bankprefix	新疆衣信储蓄卡	新疆农信储蓄卡
+bankprefix	邮诸银行诸蓄卡	邮储银行储蓄卡
+bankprefix	甘萧农信储蓄卡	甘肃农信储蓄卡
+bankprefix	中国T商银行	中国工商银行
+bankprefix	邮储银行褚蓄卡	邮储银行储蓄卡
+bankprefix	建设银行蓄卡	建设银行储蓄卡
+bankprefix	中国邮政诸蓄银行	中国邮政储蓄银行
+bankprefix	农业行储蓄牛	农业银行储蓄卡
+bankprefix	中国银行储蓄华	中国银行储蓄卡
+bankprefix	中信银行谐蓄华	中信银行储蓄卡
+bankprefix	云南农信诸蓄卡	云南农信储蓄卡
+bankprefix	农亚银行储蓄华	农业银行储蓄卡
+bankprefix	建设银行储蓄英	建设银行储蓄卡
+bankprefix	招商銀行储蓄卡	招商银行储蓄卡
+bankprefix	工商银行街蓄卡	工商银行储蓄卡
+bankprefix	中国农亚银行	中国农业银行
+bankprefix	中国出业银行	中国农业银行
+bankprefix	农业银行储簧华	农业银行储蓄卡
+bankprefix	建设银行储警卡	建设银行储蓄卡
+bankprefix	甘萧银行储蓄卡	甘肃银行储蓄卡
+bankprefix	建设银行储蓄华	建设银行储蓄卡
+bankprefix	中国邮政健蓄	中国邮政储蓄
+bankprefix	招高银行	招商银行
+bankprefix	中国银行储蓄等	中国银行储蓄卡
+bankprefix	建没银行储蓄卡	建设银行储蓄卡
+bankprefix	建设银行诸蓄卡	建设银行储蓄卡
+bankprefix	中国农北银行	中国农业银行
+bankprefix	中国宁商银行	中国工商银行
+bankprefix	中国安业银行	中国农业银行
+bankprefix	中国电业银行	中国农业银行
+bankprefix	中国邮政储著	中国邮政储蓄
+bankprefix	交涌银行	交通银行
+bankprefix	中信银行储蓄吴	中信银行储蓄卡
+bankprefix	中国银行潘蓄华	中国银行储蓄卡
+bankprefix	兴业银行础艺卡	兴业银行储蓄卡
+bankprefix	农业银行储蓄吴	农业银行储蓄卡
+bankprefix	农亚银行	农业银行
+bankprefix	农亚银行储蓄关	农业银行储蓄卡
+bankprefix	农亚银行储蓄笑	农业银行储蓄卡
+bankprefix	农亚银行蓄卡	农业银行储蓄卡
+bankprefix	广东农信储蓄军	广东农信储蓄卡
+bankprefix	建设银行蓄华	建设银行储蓄卡
+bankprefix	招商银行储蓄果	招商银行储蓄卡
+bankprefix	中国邮做储蓄	中国邮政储蓄
+bankprefix	中国邮政储艺	中国邮政储蓄
+bankprefix	云南省农村倍	云南省农村信
+bankprefix	农业银行储营卡	农业银行储蓄卡
+bankprefix	北京农高银行储黄卡	北京农商银行储蓄卡
+bankprefix	工商银行储蓄华	工商银行储蓄卡
+bankprefix	苹安银行	平安银行
+accept	1
+accept	2
+accept	3
+accept	4
+accept	5
+accept	6
+accept	7
+accept	8
+accept	10
+accept	11
+accept	12
+accept	13
+accept	14
+accept	16
+accept	17
+accept	18
+accept	19
+accept	20
+accept	21
+accept	22
+accept	23
+accept	24
+accept	25
+accept	26
+accept	27
+accept	28
+accept	29
+accept	30
+accept	31
+accept	32
+accept	33
+accept	34
+accept	35
+accept	36
+accept	37
+accept	38
+accept	39
+accept	40
+accept	41
+accept	42
+accept	43
+accept	44
+accept	45
+accept	46
+accept	47
+accept	48
+accept	49
+accept	50
+accept	51
+accept	52
+accept	54
+accept	55
+accept	56
+accept	57
+accept	58
+accept	59
+accept	60
+accept	61
+accept	62
+accept	63
+accept	64
+accept	65
+accept	66
+accept	67
+accept	68
+accept	69
+accept	2001
+rewrite	2002	给朋友代付+
+accept	2004
+accept	2007
+accept	2009
+accept	2011
+accept	2013
+accept	2017
+accept	2018
+accept	2021
+accept	2023
+accept	2024
+accept	2620
+accept	2622
+accept	2623
+accept	2624
+accept	2625
+accept	2626
+accept	2627
+accept	2628
+accept	2629
+accept	2630
+accept	2631
+accept	2632
+accept	2633
+accept	2634
+accept	2635
+accept	2636
+accept	2637
+accept	2638
+accept	2639
+accept	2640
+accept	2641
+accept	2642
+accept	2643
+accept	2644
+accept	2645
+accept	2646
+accept	2647
+accept	2648
+accept	2649
+accept	2650
+accept	2651
+accept	2652
+accept	2653
+accept	2655
+accept	2656
+accept	2657
+accept	2658
+accept	2659
+accept	2660
+accept	2662
+accept	2663
+accept	2664
+accept	2665
+accept	2666
+accept	2667
+accept	2668
+accept	2669
+accept	2670
+accept	2671
+accept	2673
+accept	2674
+accept	2675
+accept	2676
+accept	2677
+accept	2678
+accept	2679
+accept	2680
+accept	2681
+accept	2684
+accept	2685
+accept	2686
+accept	2687
+accept	2688
+accept	2689
+accept	2690
+accept	2691
+accept	2693
+accept	2694
+accept	2695
+accept	2696
+accept	2697
+accept	2698
+accept	2699
+accept	2700
+accept	2701
+accept	2702
+accept	2703
+accept	2704
+accept	2705
+accept	2706
+accept	2707
+accept	2708
+accept	2709
+accept	2711
+accept	2712
+accept	2716
+accept	2717
+accept	2718
+accept	2719
+accept	2723
+accept	2724
+accept	2725
+accept	2726
+accept	2727
+accept	2728
+accept	2729
+accept	2732
+accept	2733
+accept	2734
+accept	2735
+accept	2736
+accept	2737
+accept	2738
+accept	2739
+accept	2740
+accept	2741
+accept	2742
+accept	2743
+accept	2744
+accept	2745
+accept	2747
+accept	2748
+accept	2749
+accept	2750
+accept	2751
+accept	2752
+accept	2753
+accept	2754
+accept	2755
+accept	2756
+accept	2757
+accept	2758
+accept	2759
+accept	2760
+accept	2761
+accept	2762
+accept	2763
+accept	2764
+accept	2765
+accept	2766
+accept	2767
+accept	2768
+accept	2769
+rewrite	2770	实际到账为准
+accept	2771
+accept	2772
+accept	2773
+accept	2774
+accept	2775
+accept	2776
+accept	2777
+accept	2778
+accept	2779
+accept	2780
+accept	2781
+accept	2782
+accept	2783
+accept	2784
+accept	2785
+accept	2786
+accept	2787
+accept	2788
+accept	2789
+accept	2790
+accept	2791
+accept	2792
+accept	2793
+accept	2794
+accept	2795
+accept	2796
+accept	2797
+accept	2798
+accept	2799
+accept	2800
+accept	2801
+accept	2802
+accept	2803
+accept	2804
+accept	2806
+accept	2807
+accept	2808
+accept	2809
+accept	2810
+accept	2811
+accept	2812
+accept	2813
+accept	2814
+accept	2815
+accept	2816
+accept	2817
+accept	2820
+accept	2822
+accept	2824
+accept	2825
+accept	2826
+accept	2827
+accept	2828
+accept	2829
+accept	2830
+accept	2831
+accept	2832
+accept	2833
+accept	2834
+accept	2835
+accept	2836
+accept	2837
+accept	2838
+accept	2839
+accept	2840
+accept	2841
+accept	2842
+accept	2843
+accept	2844
+accept	2845
+accept	2846
+accept	2847
