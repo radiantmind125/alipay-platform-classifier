@@ -17,6 +17,7 @@ gold + gold2 那 1,400 段上已经做过太多选择 —— i2、jt、k、拼�
               每页都必须是 newbatch_* 的 test_white / test_blue 里同颜色的那一张;
               每段一个固定排序键 sha1("gold3:<目录>:<段文件名>"); 写 _pool.csv(**不带老师标签**)
     export    每个目录按排序键取前 N 段 -> <out>/img/0001.png ... + _gold_candidates.csv(和 export_gold 同样的列, label 留空)
+              (10-28 加 --skip / --not-in / --n all: 先跳过 gold3 取过的那些段, 剩下的再导一份确认用的 gold4)
               + _gold3_meta.csv(几何、页名, 不带文字) + _teacher_labels.csv(老师标签单放; 答案定下来之前不看)
     (块里)    旧版重切 recrop_v2_frozen.py(指纹 dcc336dd7add) -> <out>_rc2, 现版 recrop.py(b78370c3e883) -> <out>_rc3
     parity    两份重切的答案目录逐像素比: 拿 gold / gold2 用两版代码各重切一遍, 和当初的 _rc2 / _rc3 一样才说明代码和环境都没变
@@ -283,12 +284,24 @@ def cmd_export(a) -> None:
     if a.out.exists():
         die("EXPORT_EXISTS", f"{a.out} 已经在了, 不再导(要重导先挪走)")
     no_dups(a.dirs, "EXPORT_DUP_DIRS")
-    want = {}
+    want, skip = {}, {}
     for spec in a.n:
         c, n = spec.split(":")
-        want[c] = int(n)
-        if want[c] <= 0:
+        want[c] = None if n == "all" else int(n)        # all = 跳过的后面剩下的全要
+        if want[c] is not None and want[c] <= 0:
             die("EXPORT_BAD_N", f"{spec}: 段数要大于 0")
+    for spec in a.skip:
+        c, n = spec.split(":")
+        skip[c] = int(n)
+        if skip[c] < 0:
+            die("EXPORT_BAD_SKIP", f"{spec}: 跳过的段数不能是负的")
+    # --not-in: 以前导过的答案目录。跳过的那几段必须正好是它们导过的(证明清单和排序和当初一样), 取到的段一段都不能和它们重
+    done = set()
+    for g in a.not_in:
+        rows = read_csv(g / "_gold3_meta.csv")
+        if not rows:
+            die("EXPORT_NOT_IN_EMPTY", f"{g} 的 _gold3_meta.csv 是空的")
+        done |= {(r["dir"], r["file"]) for r in rows}
     pool = read_csv(a.pool)
     no_dups([(r["dir"], r["file"]) for r in pool], "EXPORT_DUP_POOL_ROWS")
     teacher = {}
@@ -298,11 +311,19 @@ def cmd_export(a) -> None:
     picked = []
     for name in a.dirs:
         el = sorted((r for r in pool if r["dir"] == name and r["why"] == ""), key=lambda r: r["rank"])
+        s = skip.get(colour_of(name), 0)
+        rest = el[s:]
         n = want[colour_of(name)]
-        if len(el) < n:
-            die("EXPORT_SHORT", f"{name}: 能用的只有 {len(el)} 段, 要 {n}")
-        picked += el[:n]
-        print(f"EXPORT_STATS {name} eligible={len(el)} picked={n} pages={len({r['page'] for r in el[:n]})}", flush=True)
+        n = len(rest) if n is None else n
+        if n <= 0 or len(rest) < n:
+            die("EXPORT_SHORT", f"{name}: 跳过 {s} 段以后能用的只有 {len(rest)} 段, 要 {n}")
+        if a.not_in and {(r["dir"], r["file"]) for r in el[:s]} != {k for k in done if k[0] == name}:
+            die("EXPORT_SKIP_MISMATCH", f"{name}: 跳过的 {s} 段和 --not-in 里导过的不是同一批(清单或排序变了)")
+        hit = [r["file"] for r in rest[:n] if (r["dir"], r["file"]) in done]
+        if hit:
+            die("EXPORT_OVERLAP", f"{name}: {len(hit)} 段以前导过了, 例如 {hit[:3]}")
+        picked += rest[:n]
+        print(f"EXPORT_STATS {name} eligible={len(el)} skipped={s} picked={n} pages={len({r['page'] for r in rest[:n]})}", flush=True)
     tmp = a.out.with_name(a.out.name + ".tmp")
     if tmp.exists():
         shutil.rmtree(tmp)
@@ -462,7 +483,9 @@ def main() -> None:
     e.add_argument("--work", type=Path, required=True)
     e.add_argument("--pool", type=Path, required=True)
     e.add_argument("--dirs", nargs="+", required=True, help="按这个顺序编号")
-    e.add_argument("--n", nargs="+", required=True, help="每个目录取几段, 按颜色: blue:400 white:300")
+    e.add_argument("--n", nargs="+", required=True, help="每个目录取几段, 按颜色: blue:400 white:300; all = 剩下的全要")
+    e.add_argument("--skip", nargs="*", default=[], help="按颜色先跳过排在最前面的几段(以前导过的那份), 例如 blue:400 white:300")
+    e.add_argument("--not-in", type=Path, nargs="*", default=[], help="以前导过的答案目录: 跳过的段必须正好是它们, 取到的段不能和它们重")
     e.add_argument("--out", type=Path, required=True)
     r = sub.add_parser("parity")
     r.add_argument("--a", type=Path, nargs="+", required=True)
