@@ -26,6 +26,19 @@ gold + gold2 那 1,400 段上已经做过太多选择 —— i2、jt、k、拼�
     snapshot  测试目录(和对照用的训练目录)每个文件的 名字 / 大小 / 修改时间 和 prep 时一模一样(只读的证据)
 ★ 几何缺了、排除页没全找到、同一页在两个目录里、参数重复这些都直接停, 不悄悄跳过(10-25 复核 wf_840badab-49a 试出来的)。
 
+gold6(2026-10-31): 训练目录里留作验证的页 —— 测试页的段用完了, 验证页(每个训练目录按页留出的 5%)从来没进过训练
+------------------------------------------------------------------------------------------------
+    valpool   读每个训练过的清单(认字模型的 train / val, 拼音带的 train / val), 每行对回它的原页:
+              任何一张验证页出现在任何一份训练清单里就停 —— "没训练过"是核出来的, 不是记得的;
+              候选 = 认字模型 val.txt 里的段; 不要: 用过的答案段(gold / gold2)、状态栏(和 pool 同一条)、
+              和训练页是"同一笔交易"的验证页(规则和 gold3 查测试页那次一样: 同一个订单号 / 同一个到秒的时间加少见文字 /
+              蓝页同卡号尾号加同金额), 两张验证页是同一笔交易的留排在前面那张;
+              候选页是测试页、同一页在两个目录里、清单里有认不出的目录或对不回的段, 都直接停;
+              写 _pool.csv(和 pool 同样的列, 排序键 sha1("gold6:<目录>:<段文件名>"))、_twins.csv(只有页名)、_inputs.json(读过的每个文件的 sha256)
+    export    同上, --work 指到训练目录的根(只读); 每个目录的颜色从池子里来(目录名里看不出颜色的 pinyin-pairs 也行)
+    rcsame    重切的答案图和训练目录里 10-24 切好的 seg_input_rc3 逐像素比: k / m 在验证集上看到的就是这些图
+    inputs    valpool 读过的文件(清单、段清单、答案清单)到最后一个字节都没变
+
 每个子命令最后打印一行纯 ASCII 的 XXX_OK; 不对就打印原因并以非 0 退出(服务器脚本看这两样)。
 """
 from __future__ import annotations
@@ -39,6 +52,7 @@ import re
 import shutil
 import sys
 import time
+import unicodedata
 from collections import Counter
 from pathlib import Path
 
@@ -304,16 +318,24 @@ def cmd_export(a) -> None:
         done |= {(r["dir"], r["file"]) for r in rows}
     pool = read_csv(a.pool)
     no_dups([(r["dir"], r["file"]) for r in pool], "EXPORT_DUP_POOL_ROWS")
+    # 每个目录的颜色从池子里来(pool 写的就是 colour_of(目录名), 结果和以前一样; valpool 里 pinyin-pairs 这种目录名看不出颜色的也行)
+    col_of = {}
+    for r in pool:
+        col_of.setdefault(r["dir"], set()).add(r["colour"])
+    for name in a.dirs:
+        if len(col_of.get(name, ())) != 1 or not col_of[name] <= set(COLOURS):
+            die("EXPORT_COLOUR", f"{name}: 池子里这个目录的颜色是 {sorted(col_of.get(name, ()))}, 应该正好是 blue / white 里的一种")
     teacher = {}
     for name in a.dirs:
         for r in read_csv(a.work / name / "_segments.csv"):
             teacher[(name, r["file"])] = (r.get("text") or "").strip()
     picked = []
     for name in a.dirs:
+        col = next(iter(col_of[name]))
         el = sorted((r for r in pool if r["dir"] == name and r["why"] == ""), key=lambda r: r["rank"])
-        s = skip.get(colour_of(name), 0)
+        s = skip.get(col, 0)
         rest = el[s:]
-        n = want[colour_of(name)]
+        n = want[col]
         n = len(rest) if n is None else n
         if n <= 0 or len(rest) < n:
             die("EXPORT_SHORT", f"{name}: 跳过 {s} 段以后能用的只有 {len(rest)} 段, 要 {n}")
@@ -459,6 +481,344 @@ def cmd_splitparity(a) -> None:
     print("SPLITPARITY_OK", flush=True)
 
 
+# ---------------- gold6: 训练目录的验证页 ----------------
+# "同一笔交易"的规则, 和 2026-10-25 查测试页那次(t3_final_twins)一字不差
+TW_ORD = re.compile(r"2026\d{16,}")
+TW_TS = re.compile(r"20\d\d-\d\d-\d\d\d\d:\d\d:\d\d")
+TW_HM = re.compile(r"^(\d{1,2}):(\d\d)")
+TW_CARD = re.compile(r"[（(](\d{4})[）)]")
+TW_AMT = re.compile(r"(\d+\.\d\d)")
+TW_HAN = re.compile(r"[\u4e00-\u9fff*]{4,}")
+TW_KEEP = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff¥*.:\-]")
+
+
+def tw_nf(s: str) -> str:
+    return unicodedata.normalize("NFKC", s or "").replace("￥", "¥")
+
+
+def tw_n(s: str) -> str:
+    return TW_KEEP.sub("", tw_nf(s))
+
+
+def tw_feats(rows: list) -> dict:
+    """一张页的特征。rows = [(行号, 段号, 老师文字)]: 订单号 / 到秒的时间(段和整行拼起来都找)、4 个字以上的整段文字、
+    卡号尾号、金额、4 个字以上的汉字串、状态栏的 时:分(第 0 行第一段)。"""
+    byrow = {}
+    for r, _s, t in sorted(rows):
+        byrow.setdefault(r, []).append(t)
+    texts = [t for _r, _s, t in sorted(rows)]
+    f = {"O": set(), "S": set(), "tok": set(), "card": set(), "amt": set(), "han": set()}
+    for t in texts + ["".join(v) for v in byrow.values()]:
+        n = tw_n(t)
+        f["O"].update(TW_ORD.findall(n))
+        f["S"].update(TW_TS.findall(n))
+    for t in texts:
+        n = tw_n(t)
+        if len(n) >= 4:
+            f["tok"].add(n)
+        nf = tw_nf(t)
+        f["card"].update(TW_CARD.findall(nf))
+        f["amt"].update(TW_AMT.findall(nf))
+        f["han"].update(TW_HAN.findall(nf))
+    r0 = byrow.get(0, [None])[0]
+    m = TW_HM.match(tw_n(r0)) if r0 else None
+    f["hm"] = f"{int(m.group(1)):02d}:{m.group(2)}" if m else None
+    return f
+
+
+def find_twins(feats: dict, colour: dict, pages) -> dict:
+    """pages 里每张页 -> {另一张页: 规则}。O 同一个订单 / 交易号(2026 开头 20 位以上);
+    S 同一个到秒的时间, 另外还有一段少见的文字(<= 5 张页有, 时间本身不算); B 这张是蓝页: 同一个卡号尾号 + 同一个金额,
+    另外 状态栏同一个 时:分 或 一串少见的汉字(<= 3 张页有)。少见是在 feats 里所有页上数的。"""
+    df, hdf, inv = Counter(), Counter(), {}
+    for g, f in feats.items():
+        df.update(f["tok"])
+        hdf.update(f["han"])
+        for k in f["O"]:
+            inv.setdefault("O" + k, set()).add(g)
+        for k in f["S"]:
+            inv.setdefault("S" + k, set()).add(g)
+        for c in f["card"]:
+            for x in f["amt"]:
+                inv.setdefault(f"B{c}|{x}", set()).add(g)
+    out = {}
+    for g in sorted(pages):
+        f = feats.get(g)
+        if f is None:
+            continue
+        cand = {}
+        for k in f["O"]:
+            for h in inv.get("O" + k, ()):
+                cand.setdefault(h, set()).add("O")
+        for k in f["S"]:
+            for h in inv.get("S" + k, ()):
+                cand.setdefault(h, set()).add("S?")
+        if colour.get(g) == "blue":
+            for c in f["card"]:
+                for x in f["amt"]:
+                    for h in inv.get(f"B{c}|{x}", ()):
+                        cand.setdefault(h, set()).add("B?")
+        got = {}
+        for h, why in cand.items():
+            if h == g:
+                continue
+            hf, rules = feats[h], set()
+            if "O" in why:
+                rules.add("O")
+            if "S?" in why and {x for x in f["tok"] & hf["tok"] if df[x] <= 5} - {x for x in f["tok"] if TW_TS.fullmatch(x)}:
+                rules.add("S")
+            if "B?" in why and ((f["hm"] and f["hm"] == hf["hm"]) or {x for x in f["han"] & hf["han"] if hdf[x] <= 3}):
+                rules.add("B")
+            if rules:
+                got[h] = "+".join(sorted(rules))
+        out[g] = got
+    return out
+
+
+def list_key(p: str) -> tuple:
+    """清单里一行的图路径 -> (配对目录名, 段文件名), 都小写。认字模型的清单: <根>\\<目录>\\seg_input[_rc / _rc3]\\<段>;
+    拼音带的清单: <带目录>\\img\\<目录>\\<段>。盘符、根目录、斜杠方向都不管。"""
+    q = Path(p.strip().replace("\\", "/"))
+    d = q.parent.parent.name if q.parent.name.lower().startswith("seg_input") else q.parent.name
+    return d.lower(), q.name.lower()
+
+
+def iter_rows(p: Path, cols: tuple):
+    """大清单一行一行读, 只取要的几列(没有的列给空串), 不建字典。"""
+    with p.open(encoding="utf-8-sig", newline="") as f:
+        rd = csv.reader(f)
+        head = next(rd, [])
+        ix = [head.index(c) if c in head else None for c in cols]
+        for r in rd:
+            yield tuple((r[i] if i is not None and i < len(r) else "") for i in ix)
+
+
+def page_name(src: str) -> str:
+    return Path((src or "").replace("\\", "/")).name.lower()
+
+
+def cmd_valpool(a) -> None:
+    no_dups([n.lower() for n in a.dirs], "VALPOOL_DUP_DIRS")
+    no_dups([x.name.lower() for x in a.lists + a.also_lists], "VALPOOL_DUP_LISTS")
+    names = {n.lower(): n for n in a.dirs}
+    over = {}
+    for spec in a.colour:
+        d, _sep, c = spec.rpartition(":")
+        if d.lower() not in names or c not in COLOURS:
+            die("VALPOOL_BAD_COLOUR", f"--colour {spec}: 目录不在 --dirs 里, 或者颜色不是 blue / white")
+        over[d.lower()] = c
+    col = {n: over.get(n.lower()) or colour_of(n) for n in a.dirs}
+    if a.out.exists():
+        die("VALPOOL_EXISTS", f"{a.out} 已经在了, 不覆盖(要重做先挪走)")
+    inputs = {}
+
+    def note(p: Path) -> None:
+        inputs[str(p)] = sha256_of(p)
+
+    # 1. 九个训练目录: 每页属于哪个目录(同一页在两个目录就停)、每段在哪页、老师文字(只拿来找同一笔交易, 不打印)
+    page_dir, seg_page, rows_pl, tw_rows = {}, {}, {}, {}
+    for n in a.dirs:
+        d = a.data / n
+        for fn in ("_segments.csv", "_pairs_labeled.csv"):
+            if not (d / fn).is_file():
+                die("VALPOOL_MISSING", f"{d / fn} 不在")
+            note(d / fn)
+        pl = {}
+        for rf, src, rown, ly0, ly1, iy0, iy1 in iter_rows(d / "_pairs_labeled.csv",
+                                                             ("file", "source", "row", "label_y0", "label_y1", "input_y0", "input_y1")):
+            pg = page_name(src)
+            if page_dir.setdefault(pg, n) != n:
+                die("VALPOOL_DUP_PAGE", f"页 {pg} 同时在 {page_dir[pg]} 和 {n} 里")
+            pl[rf] = (rown, ly0, ly1, iy0, iy1)
+        rows_pl[n] = pl
+        for fn, rf, src, sg, text in iter_rows(d / "_segments.csv", ("file", "row_file", "source", "seg", "text")):
+            k = (n.lower(), fn.lower())
+            if k in seg_page:
+                die("VALPOOL_DUP_SEGMENT", f"{n}/{fn} 在 _segments.csv 里出现了两次")
+            pg = page_name(src)
+            seg_page[k] = pg
+            rown = pl.get(rf, ("",))[0]
+            if not rown.isdigit():
+                mm = ROW_RE.search(fn)
+                rown = mm.group(1) if mm else "-1"
+            # 空文字也留着: 状态栏的 时:分 取第 0 行第一段, 它是空的就没有(和 t3 一样)
+            tw_rows.setdefault(pg, []).append((int(rown), int(sg) if sg.isdigit() else 0, text or ""))
+        print(f"VALPOOL_DIR {n} colour={col[n]} pages={len({p for p, x in page_dir.items() if x == n})} segments={sum(1 for k in seg_page if k[0] == n.lower())}", flush=True)
+    # 2. 训练过的每一份清单: 每行对回原页。训练页 T = 所有 train.txt 的页; 候选 = 认字模型 val.txt 里的段
+    T, V, cand = set(), {}, {}
+    for L, rec in [(x, True) for x in a.lists] + [(x, False) for x in a.also_lists]:
+        for which in ("train", "val"):
+            p = L / f"{which}.txt"
+            if not p.is_file():
+                die("VALPOOL_NO_LIST", f"{p} 不在")
+            note(p)
+            nl = notab = unmapped = 0
+            unknown = Counter()
+            pages = set()
+            with p.open(encoding="utf-8") as f:
+                for ln in f:
+                    ln = ln.rstrip("\r\n")
+                    if not ln.strip():
+                        continue
+                    nl += 1
+                    notab += "\t" not in ln
+                    k = list_key(ln.split("\t", 1)[0])
+                    if k[0] not in names:
+                        unknown[k[0]] += 1
+                        continue
+                    pg = seg_page.get(k)
+                    if pg is None:
+                        unmapped += 1
+                        continue
+                    pages.add(pg)
+                    if rec and which == "val":
+                        cand.setdefault(k, set()).add(L.name)
+            print(f"VALPOOL_LIST {L.name} {which} lines={nl} pages={len(pages)} notab={notab} unknown_dir={sum(unknown.values())} "
+                  f"unmapped={unmapped}", flush=True)
+            if unknown:
+                die("VALPOOL_UNKNOWN_DIR", f"{p}: 有不在 --dirs 里的目录 {dict(unknown.most_common(5))}")
+            if unmapped:
+                die("VALPOOL_UNMAPPED", f"{p}: {unmapped} 行对不回 _segments.csv 里的段")
+            if nl == 0:
+                die("VALPOOL_EMPTY_LIST", f"{p} 是空的")
+            if which == "train":
+                T |= pages
+            else:
+                V[L.name] = pages
+    leak = {k: len(v & T) for k, v in V.items()}
+    vall = set().union(*V.values())
+    vrec = [V[x.name] for x in a.lists]
+    differ = len(set().union(*vrec) - set.intersection(*vrec))
+    print(f"VALPOOL_SPLIT train_pages={len(T)} val_pages={len(vall)} val_pages_in_train={sum(leak.values())} "
+          f"val_pages_not_in_every_list={differ} pages_in_no_list={len(set(page_dir) - T - vall)}", flush=True)
+    if any(leak.values()):
+        die("VALPOOL_VAL_PAGE_IN_TRAIN", f"验证页出现在训练清单里: {leak}")
+    # 3. 用过的答案段(gold / gold2): 必须是训练目录里认得的段, 它们的页不能是训练页(当初就是从验证集抽的)
+    dev = set()
+    for g in a.dev:
+        p = g / "_gold_candidates.csv"
+        note(p)
+        for r in read_csv(p):
+            k = list_key(r["src_path"])
+            if k not in seg_page:
+                die("VALPOOL_DEV_UNKNOWN", f"{g.name}/{r['id']}: {r['src_path']} 不是训练目录里的段")
+            if seg_page[k] in T:
+                die("VALPOOL_DEV_IN_TRAIN", f"{g.name}/{r['id']}: 这段的页在训练清单里")
+            dev.add(k)
+    print(f"VALPOOL_DEVPAGES dev_pages={len({seg_page[k] for k in dev})} not_val_pages={len({seg_page[k] for k in dev} - vall)}", flush=True)
+    # 4. 同一笔交易: 验证页对所有页找(老师文字), 有一张是训练页 -> 整页不要; 两张都是验证页 -> 留名字排在前面那张
+    feats = {pg: tw_feats(rs) for pg, rs in tw_rows.items()}
+    del tw_rows
+    pcol = {pg: col[n] for pg, n in page_dir.items()}
+    tw = find_twins(feats, pcol, vall)
+    why_page, rule_n, tw_out = {}, Counter(), []
+    for v in sorted(vall):
+        got = tw.get(v, {})
+        tt = sorted(h for h in got if h in T)
+        tv = sorted(h for h in got if h in vall and h < v)
+        why_page[v] = "twin_train" if tt else ("twin_val" if tv else "")
+        for h in tt:
+            rule_n[got[h]] += 1
+        if got:
+            tw_out.append({"page": v, "dir": page_dir.get(v, ""), "why": why_page[v],
+                           "partners": ";".join(f"{h}@{page_dir.get(h, '')}[{got[h]}]{'T' if h in T else ('V' if h in vall else '-')}"
+                                                for h in sorted(got))})
+    print(f"VALPOOL_TWINS val_pages={len(vall)} with_any_twin={len(tw_out)} twin_train={sum(1 for x in why_page.values() if x == 'twin_train')} "
+          f"twin_val={sum(1 for x in why_page.values() if x == 'twin_val')} train_pairs_by_rule="
+          + ",".join(f"{k}:{v}" for k, v in sorted(rule_n.items())), flush=True)
+    # 5. 候选段 -> 池子(和 pool 同样的列)。候选页是测试页就停; 几何缺了就停
+    tp = test_pages(a.test_folders)
+    out, found = [], 0
+    for n in a.dirs:
+        d = a.data / n
+        wcache, why_n, pages, pages_ok, lists_n = {}, Counter(), set(), set(), Counter()
+        for fn, rf, src, sg, x0, x1, hp in iter_rows(d / "_segments.csv", ("file", "row_file", "source", "seg", "x0", "x1", "has_pinyin")):
+            k = (n.lower(), fn.lower())
+            if k not in cand:
+                continue
+            found += 1
+            pg = seg_page[k]
+            if pg in tp:
+                die("VALPOOL_TEST_PAGE", f"{n}/{fn}: 这段的页 {pg} 是测试页")
+            row = rows_pl[n].get(rf)
+            W = page_width(d, rf, wcache, src)
+            if row is None or row[2] == "" or not W or not (d / "seg_input" / fn).exists():
+                die("VALPOOL_NO_GEOMETRY", f"{n}/{fn}: 行清单 / 页宽 / 段图 缺了")
+            rown = row[0]
+            if rown == "":
+                mm = ROW_RE.search(fn)
+                rown = str(int(mm.group(1))) if mm else ""
+            if why_page.get(pg):
+                why = why_page[pg]
+            elif k in dev:
+                why = "dev"
+            elif rown == "0" and float(row[2]) <= 0.10 * W:
+                why = "status"
+            else:
+                why = ""
+                pages_ok.add(pg)
+            pages.add(pg)
+            why_n[why or "eligible"] += 1
+            lists_n[len(cand[k])] += 1
+            g = gwcz_of(pg) or gwcz_of(fn)
+            out.append({"dir": n, "colour": col[n], "file": fn, "row_file": rf, "page": Path(src.replace("\\", "/")).name, "gwcz": g,
+                        "row": rown, "seg": sg, "x0": x0, "x1": x1, "has_pinyin": hp, "W": W, "label_y0": row[1], "label_y1": row[2],
+                        "input_y0": row[3], "input_y1": row[4], "why": why,
+                        "rank": hashlib.sha1(f"gold6:{n}:{fn}".encode("utf-8")).hexdigest()})
+        print(f"VALPOOL_STATS {n} colour={col[n]} pages={len(pages)} pages_eligible={len(pages_ok)} candidates={sum(why_n.values())} "
+              + " ".join(f"{x}={why_n[x]}" for x in ("eligible", "dev", "status", "twin_train", "twin_val"))
+              + f" in_all_lists={lists_n[len(a.lists)]}", flush=True)
+    if found != len(cand):
+        die("VALPOOL_CAND_LOST", f"候选 {len(cand)} 段, 在段清单里只找回 {found} 段")
+    nd = sum(1 for r in out if r["why"] == "dev")
+    print(f"VALPOOL_DEV dev_segments={len(dev)} dev_in_candidates={nd}", flush=True)
+    tmp = a.out.with_name(a.out.name + ".tmp")
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    tmp.mkdir(parents=True)
+    write_csv(tmp / "_pool.csv", POOL_COLS, out)
+    write_csv(tmp / "_twins.csv", ["page", "dir", "why", "partners"], tw_out)
+    (tmp / "_inputs.json").write_text(json.dumps(inputs, ensure_ascii=False, indent=1), encoding="utf-8")
+    rename_retry(tmp, a.out)
+    el = [r for r in out if r["why"] == ""]
+    print(f"VALPOOL_OK eligible={len(el)} blue={sum(1 for r in el if r['colour'] == 'blue')} white={sum(1 for r in el if r['colour'] == 'white')} "
+          f"pages={len({r['page'] for r in el})}", flush=True)
+
+
+def cmd_rcsame(a) -> None:
+    """重切的答案图 == 训练目录里同一段的 seg_input_rc3(10-24 recut / revive 切的, k / m 训练和验证时看的就是它)。
+    训练目录里没有这段重切图的算 missing(那段 k 的清单里用的是旧图), 只报数, 不超过 --max-missing 的比例。"""
+    import numpy as np
+    cand = read_csv(a.gold / "_gold_candidates.csv")
+    same = differ = missing = 0
+    bad = []
+    for r in cand:
+        sp = Path(r["src_path"])
+        want = imread(sp.parent.parent / a.rc_name / sp.name)
+        if want is None:
+            missing += 1
+            continue
+        got = imread(a.rc / "img" / r["file"])
+        if got is not None and got.shape == want.shape and np.array_equal(got, want):
+            same += 1
+        else:
+            differ += 1
+            bad.append(r["id"])
+    print(f"RCSAME_STATS n={len(cand)} same={same} differ={differ} missing={missing}", flush=True)
+    if not cand or not same or differ or missing > a.max_missing * len(cand):
+        die("RCSAME_FAIL", f"重切图和训练目录的 {a.rc_name} 对不上: 不一样 {differ} 段(例如 {bad[:5]}), 找不到 {missing} 段")
+    print("RCSAME_OK", flush=True)
+
+
+def cmd_inputs(a) -> None:
+    rec = json.loads((a.pool / "_inputs.json").read_text(encoding="utf-8"))
+    changed = [p for p, h in rec.items() if not Path(p).is_file() or sha256_of(Path(p)) != h]
+    print(f"INPUTS_STATS files={len(rec)} changed={len(changed)}", flush=True)
+    if not rec or changed:
+        die("INPUTS_CHANGED", f"valpool 读过的文件变了: {changed[:5]}")
+    print("INPUTS_SAME", flush=True)
+
+
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser()
@@ -502,9 +862,26 @@ def main() -> None:
     sp = sub.add_parser("splitparity")
     sp.add_argument("--ref", type=Path, required=True, help="当初切过的训练配对目录(只读)")
     sp.add_argument("--fresh", type=Path, required=True, help="今天用 split_segments --out 重切到的目录")
+    v = sub.add_parser("valpool")
+    v.add_argument("--data", type=Path, required=True, help="训练配对目录所在的根(E:\\alipay-ai-data), 只读")
+    v.add_argument("--dirs", nargs="+", required=True, help="训练配对目录(九个)")
+    v.add_argument("--colour", nargs="*", default=[], help="目录名里看不出颜色的: 目录名:white 或 目录名:blue")
+    v.add_argument("--lists", type=Path, nargs="+", required=True, help="认字模型的训练集目录(train.txt / val.txt): 候选段从它们的 val.txt 来")
+    v.add_argument("--also-lists", type=Path, nargs="*", default=[], help="别的训练过的清单目录(拼音带): 只拿来核训练页")
+    v.add_argument("--dev", type=Path, nargs="*", default=[], help="用过的答案目录(gold gold2): 它们的段不要")
+    v.add_argument("--test-folders", nargs="+", required=True, help="newbatch_* 目录(下面有 test_white / test_blue)")
+    v.add_argument("--out", type=Path, required=True)
+    rs = sub.add_parser("rcsame")
+    rs.add_argument("--gold", type=Path, required=True)
+    rs.add_argument("--rc", type=Path, required=True)
+    rs.add_argument("--rc-name", default="seg_input_rc3")
+    rs.add_argument("--max-missing", type=float, default=0.01, help="训练目录里没有重切图的段最多占这么多")
+    ins = sub.add_parser("inputs")
+    ins.add_argument("--pool", type=Path, required=True, help="valpool 的输出目录(里面有 _inputs.json)")
     a = ap.parse_args()
     {"prep": cmd_prep, "gate": cmd_gate, "pool": cmd_pool, "export": cmd_export, "parity": cmd_parity,
-     "check": cmd_check, "snapshot": cmd_snapshot, "splitparity": cmd_splitparity}[a.cmd](a)
+     "check": cmd_check, "snapshot": cmd_snapshot, "splitparity": cmd_splitparity, "valpool": cmd_valpool,
+     "rcsame": cmd_rcsame, "inputs": cmd_inputs}[a.cmd](a)
 
 
 if __name__ == "__main__":
