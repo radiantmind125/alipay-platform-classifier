@@ -236,11 +236,46 @@ def collate(batch):
 # --------------------------------------------------------------------------
 # 模型
 # --------------------------------------------------------------------------
+# 结构(--arch): crnn = 原来的(默认, 一字不差); 下面两种是轻的, 只给认字模型(img_h 48)用, 宽度方向照样压成 1/4(推理代码不用改):
+#   half = 每层通道减半(32 .. 256)+ LSTM 128 两层     -> 同一张图 CPU 1 个线程快 3.8 倍(step 94 随机权重实测)
+#   dw   = depthwise 3x3 + 1x1 的可分离卷积(32 .. 256)+ LSTM 128 两层 -> 快约 11 倍
+# ★ 轻的认不认得准要训完在验证页上和原来的比, 这里只管结构。
+ARCHS = ("crnn", "half", "dw")
+
+
+def _dws(i: int, o: int, pool):
+    layers = [nn.Conv2d(i, i, 3, 1, 1, groups=i), nn.BatchNorm2d(i), nn.ReLU(True),
+              nn.Conv2d(i, o, 1), nn.BatchNorm2d(o), nn.ReLU(True)]
+    if pool:
+        layers.append(nn.MaxPool2d(pool, pool))
+    return layers
+
+
+def _light_parts(n_class: int, arch: str, blk):
+    """轻的两种: (cnn, rnn, fc)。高 48 -> 1, 宽 -> 1/4, 和 crnn 一样。"""
+    if arch == "half":
+        cnn = nn.Sequential(
+            *blk(3, 32, (2, 2)), *blk(32, 64, (2, 2)), *blk(64, 128, None), *blk(128, 128, (2, 1)),
+            *blk(128, 256, None), *blk(256, 256, (2, 1)),
+            nn.Conv2d(256, 256, (3, 1)), nn.BatchNorm2d(256), nn.ReLU(True))
+    elif arch == "dw":
+        cnn = nn.Sequential(
+            nn.Conv2d(3, 32, 3, 1, 1), nn.BatchNorm2d(32), nn.ReLU(True), nn.MaxPool2d(2, 2),
+            *_dws(32, 64, (2, 2)), *_dws(64, 128, None), *_dws(128, 128, (2, 1)),
+            *_dws(128, 256, None), *_dws(256, 256, (2, 1)),
+            nn.Conv2d(256, 256, (3, 1)), nn.BatchNorm2d(256), nn.ReLU(True))
+    else:
+        raise ValueError(f"arch 只支持 {ARCHS}, 给的是 {arch}")
+    rnn = nn.LSTM(256, 128, num_layers=2, bidirectional=True, batch_first=True, dropout=0.1)
+    return cnn, rnn, nn.Linear(256, n_class)
+
+
 class CRNN(nn.Module):
     """CNN 把高压成 1, 宽压成 1/4, 再上双向 LSTM, 最后 CTC。
-    img_h 48 = 认字模型(和以前一模一样); 24 = 拼音行读取器(少一个 512 的块, 高 24 -> 1)。"""
+    img_h 48 = 认字模型(和以前一模一样); 24 = 拼音行读取器(少一个 512 的块, 高 24 -> 1)。
+    arch 不是 crnn 时用轻的结构(只支持 img_h 48, 见上面 ARCHS)。"""
 
-    def __init__(self, n_class: int, img_h: int = IMG_H):
+    def __init__(self, n_class: int, img_h: int = IMG_H, arch: str = "crnn"):
         super().__init__()
 
         def blk(i, o, pool):
@@ -249,6 +284,11 @@ class CRNN(nn.Module):
                 layers.append(nn.MaxPool2d(pool, pool))
             return layers
 
+        if arch != "crnn":
+            if img_h != 48:
+                raise ValueError(f"轻的结构 {arch} 只给认字模型(img_h 48)用, 给的是 img_h {img_h}")
+            self.cnn, self.rnn, self.fc = _light_parts(n_class, arch, blk)
+            return
         if img_h == 48:
             self.cnn = nn.Sequential(
                 *blk(3, 64, (2, 2)),        # 48x W   -> 24 x W/2
@@ -355,7 +395,11 @@ def main() -> None:
                     help="抖动时上边裁掉的量再乘这个(默认 1 = 和以前一样; 拼音行读取器用 0, 上边不裁)")
     ap.add_argument("--init", type=Path, default=None,
                     help="从这个 rec_best.pt 接着训(微调), 不从头训。★ 字表要和 --data 里的 charset.txt 一字不差, 不一样就停")
+    ap.add_argument("--arch", default="crnn", choices=ARCHS,
+                    help="模型结构: crnn = 原来的(默认, 和以前一模一样); half / dw = 轻的(只给认字模型, 见 ARCHS 上面的说明)")
     a = ap.parse_args()
+    if a.arch != "crnn" and a.img_h != IMG_H:
+        ap.error(f"--arch {a.arch} 只给认字模型(--img-h {IMG_H})用")
     if not 0 <= a.jitter <= JITTER_MAX:
         ap.error(f"--jitter 要在 0 ~ {JITTER_MAX} 之间(再大裁掉的会超过 30% 高, 1.0 以上能裁成空图)")
     if not 0 <= a.jitter_top <= 1:
@@ -403,12 +447,20 @@ def main() -> None:
                        num_workers=a.workers,
                        batch_sampler=BucketSampler(w_va, a.batch, False))
 
-    model = CRNN(len(cs), a.img_h).to(dev)
+    model = CRNN(len(cs), a.img_h, a.arch).to(dev)
+    if a.arch != "crnn":
+        n_par = sum(p.numel() for p in model.parameters())
+        print(f"  结构 {a.arch}({n_par / 1e6:.2f} M 参数)")
+        with (out_dir / "train_log.txt").open("a", encoding="utf-8") as f:
+            f.write(f"arch {a.arch}\tparams {n_par}\n")
     if a.init:
         # ★ 微调: 输出层的第 k 个类就是字表第 k 个字, 字表差一个字整层就错位了, 所以必须一字不差
         ck = torch.load(a.init, map_location="cpu")
         if ck.get("img_h", IMG_H) != a.img_h:
             print(f"  ★ {a.init} 是输入高 {ck.get('img_h', IMG_H)} 的模型, 这次 --img-h {a.img_h}, 不能接着训")
+            raise SystemExit(2)
+        if ck.get("arch", "crnn") != a.arch:
+            print(f"  ★ {a.init} 是 {ck.get('arch', 'crnn')} 结构的模型, 这次 --arch {a.arch}, 不能接着训")
             raise SystemExit(2)
         if ck.get("chars") != chars:
             print(f"  ★ {a.init} 的字表({len(ck.get('chars') or [])} 字)和 {a.data / 'charset.txt'}({len(chars)} 字)不一样, 不能接着训")
@@ -462,6 +514,8 @@ def main() -> None:
             ck_out = {"model": model.state_dict(), "chars": chars}
             if a.img_h != IMG_H:
                 ck_out["img_h"] = a.img_h          # 认字模型(48)的存档和以前一字不差
+            if a.arch != "crnn":
+                ck_out["arch"] = a.arch            # 原来的结构(crnn)的存档和以前一字不差
             torch.save(ck_out, out_dir / "rec_best.pt")
             print(f"      ★ 存了 {out_dir / 'rec_best.pt'}  (字准确率 {acc:.2%})")
 
