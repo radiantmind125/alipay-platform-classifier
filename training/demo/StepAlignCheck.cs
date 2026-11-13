@@ -65,6 +65,10 @@ namespace Ssp
     /// 本地实测: 真图时间轴页 822 张, Score 最高 0.033; 每张再过 6 种缩放 x 4 种 JPEG 压缩(19,363 份),
     /// 圆点直径 &gt;= 20 的最高 0.045。假图: 11-13 原图 0.233, 以前 112 抓到的假图里 53 张 0.14~0.90
     /// (所有缩放压缩下最低 0.14), 另外 26 张圆点没挪(0.03 以下), 那批靠 TimelineCheck 抓。
+    /// 服务器实测(2026-11-13): 白图 217,166 张, 有时间轴 70,196 张, 判可疑 44 张, 逐张看过圆点都明显对不齐;
+    /// 其中 39 张 TimelineCheck 也判可疑, 5 张 TimelineCheck 放过。没判可疑的最高 0.071。
+    /// 阈值从 0.08 提到 0.10: 有一批安卓真图中间那个圆点固定差 1dp, 分数 0.067, 0.08 太贴;
+    /// 已知假图(本地原图 + 缩放压缩 + 服务器 44 张)没有一张落在 0.06 ~ 0.12, 提到 0.10 一张不丢。
     ///
     /// 判不了(CannotDetermine)的几种, 都是宁可不判也不误判:
     ///   圆点直径 &lt; MinDiameter(图被缩得太小); 有圆点量不到圆心、步骤文字或日期;
@@ -76,8 +80,8 @@ namespace Ssp
     /// </summary>
     public static class StepAlignCheck
     {
-        /// <summary>Score 大于这个值判可疑。真图(直径 &gt;= 20)最高 0.045, 假图最低 0.12。</summary>
-        public const double Threshold = 0.08;
+        /// <summary>Score 大于这个值判可疑。真图本地(直径 &gt;= 20)最高 0.045, 服务器没判可疑的 7 万张最高 0.071; 假图最低 0.14。</summary>
+        public const double Threshold = 0.10;
 
         /// <summary>圆点直径(宽)小于这个像素数不判。手写字体真图缩到 40% 再压缩, 有一份到了 0.15。</summary>
         public const double MinDiameter = 20;

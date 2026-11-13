@@ -23,7 +23,7 @@ r"""账单详情页"处理进度"三个蓝色对勾和它右边文字的上下�
    分数 = 两个散度里小的那个: 两种参照都说"圆点没对齐"才算数。
    ★ 为什么取小的: 手写字体真图(C_027)个别字的尾巴特别长, 文字下边会差出 0.17D, 但日期参照正常;
      有一张真图(C_052)日期行认偏了, 日期散度 0.21D, 但文字参照正常。假图是圆点自己挪了位置, 两种参照一起偏。
-6. 分数 > 0.08 判可疑(Suspicious), 否则 Ok。
+6. 分数 > 0.10 判可疑(Suspicious), 否则 Ok。(11-13 服务器扫完后从 0.08 提到 0.10, 原因见下面"服务器实测")
 
 判不了(CannotDetermine)的几种, 都是宁可不判也不误判:
     圆点直径 < 20 像素(图被缩得太小, 手写字体真图缩到 40% 再压缩, 有一份到了 0.15);
@@ -39,6 +39,18 @@ r"""账单详情页"处理进度"三个蓝色对勾和它右边文字的上下�
     直径 < 20 的里有 1 份手写字体到 0.15(所以直径 < 20 不判)。
 假图: 11-13 三张 0.12 ~ 0.24(经理原图 fake.png 0.233); 112 以前的假图编号 79 个里 53 个 0.14 ~ 0.90,
     其余 26 个 <= 0.03(那批假图圆点没挪, 靠 112 抓); 所有缩放压缩下带这个毛病的假图最低 0.14。
+
+服务器实测(2026-11-13, D:/download2/OtherImages 全部 217,166 张, 有时间轴 70,196 张, 量到 70,058 张)
+------------------------------------------------------------------------------------------------
+可疑 44 张, 逐张看过圆点都明显对不齐(圆点等间距排, 间距比文字间距大 3% ~ 11% 或小 7%); 其中 39 张 112 也判可疑,
+    5 张 112 放过(都是安卓)。1179x2556 的 6 张和经理 11-11 的 fake.png 圆点偏移一模一样(同一个模板),
+    那 6 张(11-01 ~ 11-04)112 还能抓, fake.png 已经把 112 那个缩进改对了, 这里照样抓。
+0.08 ~ 0.10 之间 0 张, 所以阈值 0.08 和 0.10 在服务器上结果完全一样。
+提到 0.10 的原因: 服务器上有一批安卓真图(1080 宽 D 45 / 720 宽 D 30, 9 月和 11 月都有)中间那个圆点固定差 1dp
+    (3 像素 / 2 像素), 分数 0.066 ~ 0.067, 单看文字参照有到 0.081 的; 别的分辨率换算取整可能更高, 0.08 太贴。
+    本地假图(原图和 1,738 份缩放压缩)和服务器 44 张没有一张落在 0.06 ~ 0.12, 提到 0.10 一张不丢。
+另: 1220x2712 有 29 张(11-01 ~ 11-04)圆点间距比文字大 0.9%, 分数 0.063, 这里不判; 同尺寸真图 576 张都在
+    0.997 ~ 1.003, 这 29 张 112 全判可疑, 是另一个假图模板, 靠 112 抓。
 
 用法
 ----
@@ -72,7 +84,7 @@ import timeline_scan as ts  # noqa: E402
 cv2.setNumThreads(1)
 EXTS = ts.EXTS
 
-THRESHOLD = 0.08         # 分数 > 这个值判可疑。真图(直径 >= 20)最高 0.045, 假图最低 0.12
+THRESHOLD = 0.10         # 分数 > 这个值判可疑。真图本地(直径 >= 20)最高 0.045; 服务器没判可疑的 7 万张最高 0.071; 假图最低 0.14
 MIN_DIAMETER = 20        # 圆点直径小于这个像素数不判
 CHORD_SPREAD = 0.10      # 圆点高矮差 / 中位数 > 这个值不判(真图最多 0.044)
 LEFT_SPREAD = 0.25       # 步骤文字 / 日期左缘前后差 > 这么多个 D 不判(真图最多 0.083)
@@ -277,12 +289,18 @@ def decide(D, m):
     return out
 
 
+def read_image(p):
+    """读图; JPEG 被截断(没有结尾标记)解不出来时补上结尾标记再解一次。读不了返回 None。"""
+    buf = np.fromfile(p, np.uint8)
+    bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR) if buf.size else None
+    if bgr is None and buf.size > 2 and buf[0] == 0xFF and buf[1] == 0xD8:
+        bgr = cv2.imdecode(np.concatenate([buf, np.array([0xFF, 0xD9], np.uint8)]), cv2.IMREAD_COLOR)
+    return bgr
+
+
 def measure(p, with112=True):
     try:
-        buf = np.fromfile(p, np.uint8)
-        bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR) if buf.size else None
-        if bgr is None and buf.size > 2 and buf[0] == 0xFF and buf[1] == 0xD8:
-            bgr = cv2.imdecode(np.concatenate([buf, np.array([0xFF, 0xD9], np.uint8)]), cv2.IMREAD_COLOR)
+        bgr = read_image(p)
         if bgr is None:
             return {"path": p, "verdict": "unreadable"}
         r = measure_img(bgr, p)
@@ -301,7 +319,7 @@ KEYS = ["path", "W", "H", "verdict", "score", "sp_text", "sp_date", "D", "n", "d
 
 def tile(r, width=300):
     """时间轴那一块(圆点 + 前两三个字 + 日期), 红线 = 每个圆点量到的中心。真图红线切每行字的同一个高度, 假图越往下越偏。"""
-    bgr = cv2.imdecode(np.fromfile(r["path"], np.uint8), cv2.IMREAD_COLOR)
+    bgr = read_image(r["path"])      # 截断的 JPEG 也要补结尾再解, 不然对照图里是灰格子(11-13 服务器 9 月那批)
     D, cl = float(r["D"]), int(r["circle_left"])
     H, W = bgr.shape[:2]
     y0, y1 = max(0, int(int(r["circle_top"]) - 0.8 * D)), min(H, int(int(r["circle_bottom"]) + 1.6 * D))
