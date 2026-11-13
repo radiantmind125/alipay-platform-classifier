@@ -369,6 +369,7 @@ def main():
         return
     if not a.roots:
         raise SystemExit("give image folders, or --from-csv")
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)     # 先建好, 别扫了半小时才发现写不进去
     files = []
     for root in a.roots:
         if not os.path.isdir(root):
