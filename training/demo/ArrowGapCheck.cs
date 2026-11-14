@@ -11,14 +11,15 @@ namespace Ssp
     {
         CannotDetermine = 0,   // 判不了(没有账单管理那几行、图太小、贴线、拼音页), 走正常流程
         Ok = 1,                // 真图
-        Suspicious = 2,        // 假图: 箭头离文字太近(而且箭头大一号)
+        Suspicious = 2,        // 假图: 箭头离文字太近(按箭头高算, 或者按页面宽算)
     }
 
     public sealed class ArrowGapResult
     {
         public ArrowGapVerdict Verdict;
         public bool Measured;        // 找到了账单管理那一列(>= 2 行), 下面几项才有意义
-        public double Ratio;         // 间距 / 箭头高, 判定就看它
+        public double Ratio;         // 间距 / 箭头高, 第一条看它
+        public double GapToWidth;    // 间距 / 页面宽, 第二条看它(2026-11-14 加)
         public double Gap;           // 文字右缘到箭头左缘的间距(各行中位数), 像素
         public double ArrowHeight;   // 箭头高(各行中位数), 像素
         public double ArrowWidth;
@@ -46,6 +47,16 @@ namespace Ssp
     ///     假图                         R 0.60~0.76
     ///   没升级的用户截出来是老版的样子, 所以阈值放在假图和老版真图之间(0.78), 不放在假图和新版之间。
     ///
+    /// ★ 2026-11-14 加第二条: 间距 / 页面宽 &lt; GapWidthThreshold(0.0175)也判可疑。
+    ///   那天放过去的一张假图(安卓 1156 宽)把箭头改小了(箭头高 / 页面宽 0.023 变 0.021), R 从 0.68 涨到 0.77,
+    ///   贴着 0.78 的线, 按"差一个像素不判"返回了 0。但间距没改, 还是造假工具原来的间距:
+    ///     经理发来的假图(10-03 到 11-14)  间距 / 页面宽 0.0157~0.0161
+    ///     11 月真图(本地 375 张)           0.023 起
+    ///     7~8 月老版真图、拼音页           0.018 起
+    ///   支付宝这一块按页面宽等比例画(9 月真图 1080~1440 宽, 间距都是页面宽的 0.026~0.027), 所以拿页面宽做单位,
+    ///   箭头大小怎么改都不影响。只用在手机竖屏截图上(高 &gt;= MinAspect 倍宽): 平板、横屏、拼起来的图, 页面宽不是手机宽。
+    ///   两条任何一条过线就判可疑; "差一个像素不判"、拼音页不判, 两条一样。
+    ///
     /// 服务器 2026-09-01~16 抽的 101,380 张(54,291 张量到): 判可疑约 150 张(0.3%), 抽看都带假图特征
     /// (订单号日期和支付时间对不上、苹果状态栏出现在苹果截不出来的尺寸上等); 其中有时间轴的 14 张里
     /// 13 张 112 也判了假。有 142 张没有处理进度时间轴(收钱码、商家付款), 112 管不到, 这一项正好补上。
@@ -63,6 +74,12 @@ namespace Ssp
     {
         /// <summary>R = 间距 / 箭头高 小于它判可疑。</summary>
         public const double Threshold = 0.78;
+
+        /// <summary>第二条: 间距 / 页面宽 小于它也判可疑(2026-11-14 加)。</summary>
+        public const double GapWidthThreshold = 0.0175;
+
+        /// <summary>第二条只用在 高 &gt;= MinAspect 倍宽 的图上(手机竖屏截图)。</summary>
+        public const double MinAspect = 1.7;
 
         /// <summary>箭头高小于这个像素数不判: 图被缩小过。</summary>
         public const int MinArrowHeight = 14;
@@ -137,26 +154,34 @@ namespace Ssp
             res.Margin = mc;
             res.RowTops = col.Select(r => r.Y).ToArray();
             res.Ratio = ah > 0 ? gap / ah : 0;
+            res.GapToWidth = gap / W;
 
             if (ah < MinArrowHeight) { res.Reason = $"箭头高 {ah:0.#} 像素, 小于 {MinArrowHeight}, 图被缩小过, 不判"; return res; }
-            if (gap / ah >= Threshold)
+            bool phone = H >= MinAspect * W;
+            bool lowW = phone && gap / W < GapWidthThreshold;
+            // 间距再量长一个像素也还在线下, 才算过线(两条都这样)
+            bool firmAh = (gap + 1) / ah < Threshold;
+            bool firmW = phone && (gap + 1) / W < GapWidthThreshold;
+            if (gap / ah >= Threshold && !lowW)
             {
                 res.Verdict = ArrowGapVerdict.Ok;
-                res.Reason = $"箭头离文字 {gap:0.#} 像素, 箭头高 {ah:0.#}, R {res.Ratio:0.00}";
+                res.Reason = $"箭头离文字 {gap:0.#} 像素, 箭头高 {ah:0.#}, R {res.Ratio:0.00}, 间距 / 页面宽 {res.GapToWidth:0.0000}";
                 return res;
             }
-            if ((gap + 1) / ah >= Threshold)
+            if (!firmAh && !firmW)
             {
-                res.Reason = $"R {res.Ratio:0.00}, 间距再量长一个像素就过线了, 差在测量误差以内, 不判";
+                res.Reason = $"R {res.Ratio:0.00}, 间距 / 页面宽 {res.GapToWidth:0.0000}, 间距再量长一个像素就过线了, 差在测量误差以内, 不判";
                 return res;
             }
             // 拼音模式下支付宝把箭头画大一号、间距也小一点, 真图 R 在 1.0 上下, 离假图太近, 不判
             res.PinyinChecked = true;
             res.Pinyin = PinyinCheck.Check(bgr).Verdict == PinyinVerdict.HasPinyin;
-            if (res.Pinyin) { res.Reason = $"R {res.Ratio:0.00}, 但是拼音页(箭头本来就大), 不判"; return res; }
+            if (res.Pinyin) { res.Reason = $"R {res.Ratio:0.00}, 间距 / 页面宽 {res.GapToWidth:0.0000}, 但是拼音页(箭头本来就大), 不判"; return res; }
 
             res.Verdict = ArrowGapVerdict.Suspicious;
-            res.Reason = $"箭头离文字只有 {gap:0.#} 像素, 箭头高 {ah:0.#}, R {res.Ratio:0.00} 小于 {Threshold}";
+            res.Reason = firmAh
+                ? $"箭头离文字只有 {gap:0.#} 像素, 箭头高 {ah:0.#}, R {res.Ratio:0.00} 小于 {Threshold}"
+                : $"箭头离文字只有 {gap:0.#} 像素, 是页面宽的 {res.GapToWidth:0.0000}, 小于 {GapWidthThreshold}(R {res.Ratio:0.00})";
             return res;
         }
 

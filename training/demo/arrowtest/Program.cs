@@ -94,11 +94,12 @@ namespace Ssp.ArrowTest
             {
                 var ci = CultureInfo.InvariantCulture;
                 using var sw2 = new StreamWriter(outCsv, false, new UTF8Encoding(true));
-                sw2.WriteLine("path,W,H,verdict,ratio,gap,arrow_h,arrow_w,arrow_gray,margin,n,ys,pinyin,reason");
+                sw2.WriteLine("path,W,H,verdict,ratio,gap_w,gap,arrow_h,arrow_w,arrow_gray,margin,n,ys,pinyin,reason");
                 foreach (var (path, w, h, r) in meas)
                 {
                     sw2.WriteLine(string.Join(",", Csv(path), w, h, r.Verdict,
-                        r.Ratio.ToString("0.0000", ci), r.Gap.ToString("0.###", ci), r.ArrowHeight.ToString("0.###", ci),
+                        r.Ratio.ToString("0.0000", ci), r.GapToWidth.ToString("0.00000", ci),
+                        r.Gap.ToString("0.###", ci), r.ArrowHeight.ToString("0.###", ci),
                         r.ArrowWidth.ToString("0.###", ci), r.ArrowGray, r.Margin, r.RowCount, string.Join(" ", r.RowTops),
                         r.PinyinChecked ? (r.Pinyin ? "1" : "0") : "", Csv(r.Reason)));
                 }

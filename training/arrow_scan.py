@@ -18,6 +18,17 @@ r"""账单详情页右边"灰字 + > 箭头"的间距检查(经理说的 111) �
   经理说的"真图有距离"是对新版说的; 没升级的用户截出来是老版的样子, 不能当假图。
   所以阈值放在假图和老版真图之间, 不放在假图和新版真图之间。
 
+★ 2026-11-14 加第二条: 间距 / 页面宽 < 0.0175 也判可疑。
+  那天放过去的一张假图(安卓 1156 宽)把箭头改小了(箭头高 / 页面宽 0.023 -> 0.021), R 从 0.68 涨到 0.77,
+  贴着 0.78 的线, 按"差一个像素不判"判不了。但间距没改, 还是造假工具原来的间距:
+                                  间距 / 页面宽
+    经理发来的假图(10-03 ~ 11-14)  0.0157 ~ 0.0161
+    11 月真图(本地 375 张)         0.023 起
+    7~8 月老版真图 / 拼音页         0.018 起
+  支付宝这一块按页面宽等比例画(9 月真图 1080~1440 宽, 间距都是 0.026 ~ 0.027 宽), 所以直接拿页面宽做单位,
+  箭头大小怎么改都不影响。只用在手机竖屏截图上(高 >= 1.7 倍宽): 平板、横屏、拼起来的图, 页面宽不是手机宽。
+  "差一个像素不判"、拼音页不判, 和第一条一样。
+
 量法
 ----
 1. 页面右半边(宽度 45% 往右)按行切开, 每行最右边一段如果是 > 形的窄条, 而且离页面右边 3%~14% 宽,
@@ -54,6 +65,9 @@ EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 #   7~8 月的真图(老版本)R 0.86~0.94, 9 月以后的真图 1.4~1.8, 假图 0.62~0.70。
 #   还没升级的用户截出来就是老版本的样子, 所以线要放在假图和老版本真图之间。
 THRESHOLD = 0.78
+# 第二条(2026-11-14): 间距 / 页面宽 < 这个值也判可疑。假图 0.0157~0.0161, 11 月真图 0.023 起, 7~8 月老版真图 / 拼音页 0.018 起
+GAP_W_THRESHOLD = 0.0175
+MIN_ASPECT = 1.7         # 第二条只用在 高 >= 1.7 倍宽 的图上(手机竖屏); 平板、横屏、拼起来的图, 页面宽不是手机宽
 MIN_ARROW_H = 14         # 箭头高小于这个像素数不判: 图被缩小过(贴线的另外有"差一个像素"那条管)
 
 IOS_RES = {(1179, 2556), (1290, 2796), (1170, 2532), (1320, 2868), (1206, 2622), (1284, 2778),
@@ -208,22 +222,30 @@ def measure_img(bgr, path=""):
          "hs": " ".join(str(x["h"]) for x in col), "ios": int((W, H) in IOS_RES),
          "rescued": sum(1 for x in rows if x["arrow_min"] < 100)}   # 老办法会扔掉的行数; 0 = 结论和改之前一模一样
     # 拼音检查比较贵, 只在要判可疑的时候才跑
-    pinyin = int(_is_pinyin_page(bgr)) if ah >= MIN_ARROW_H and (gap + 1) / ah < THRESHOLD else ""
+    pinyin = int(_is_pinyin_page(bgr)) if ah >= MIN_ARROW_H and _firm(gap, ah, W, H) else ""
     r["pinyin"] = pinyin
-    r.update(decide(gap, ah, pinyin))
+    r.update(decide(gap, ah, pinyin, W, H))
     return r
 
 
-def decide(gap, ah, pinyin):
-    """pinyin 只在 R < THRESHOLD 时才有意义(其余情况没测, 传什么都不影响结果)。"""
-    out = {"ratio": round(gap / ah, 4) if ah else ""}
+def _firm(gap, ah, W, H):
+    """(按箭头高算过线, 按页面宽算过线): 间距再量长一个像素也还在线下才算。"""
+    by_ah = (gap + 1) / ah < THRESHOLD
+    by_w = H >= MIN_ASPECT * W and (gap + 1) / W < GAP_W_THRESHOLD
+    return by_ah or by_w
+
+
+def decide(gap, ah, pinyin, W, H):
+    """pinyin 只在要判可疑时才有意义(其余情况没测, 传什么都不影响结果)。"""
+    out = {"ratio": round(gap / ah, 4) if ah else "", "gap_w": round(gap / W, 5)}
     if ah < MIN_ARROW_H:
         out.update(verdict="CannotDetermine", why=f"箭头高小于 {MIN_ARROW_H} 像素, 图被缩小过")
         return out
-    if gap / ah >= THRESHOLD:
+    low_w = H >= MIN_ASPECT * W and gap / W < GAP_W_THRESHOLD
+    if gap / ah >= THRESHOLD and not low_w:
         out.update(verdict="Ok", why="")
         return out
-    if (gap + 1) / ah >= THRESHOLD:
+    if not _firm(gap, ah, W, H):
         # 间距再量长一个像素就过线了: 差在测量误差以内, 不判。
         # 小图(箭头 16 像素)一个像素就是 0.06, 大图(箭头 34 像素)是 0.03, 这样小图自动更保守。
         out.update(verdict="CannotDetermine", why="离线不到一个像素, 不判")
@@ -232,16 +254,25 @@ def decide(gap, ah, pinyin):
         # 拼音模式下支付宝把箭头画大一号、间距也小一点, 真图 R 在 1.0 上下, 离假图太近, 不判
         out.update(verdict="CannotDetermine", why="拼音页, 箭头本来就大, 不判")
         return out
-    out.update(verdict="Suspicious", why="箭头离文字太近")
+    if (gap + 1) / ah < THRESHOLD:
+        out.update(verdict="Suspicious", why="箭头离文字太近")
+    else:
+        out.update(verdict="Suspicious", why="箭头离文字太近(按页面宽算)")
     return out
+
+
+def read_image(p):
+    """读图; JPEG 被截断(没有结尾标记)解不出来时补上结尾标记再解一次。读不了返回 None。"""
+    buf = np.fromfile(p, np.uint8)
+    bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR) if buf.size else None
+    if bgr is None and buf.size > 2 and buf[0] == 0xFF and buf[1] == 0xD8:
+        bgr = cv2.imdecode(np.concatenate([buf, np.array([0xFF, 0xD9], np.uint8)]), cv2.IMREAD_COLOR)
+    return bgr
 
 
 def measure(p):
     try:
-        buf = np.fromfile(p, np.uint8)
-        bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR) if buf.size else None
-        if bgr is None and buf.size > 2 and buf[0] == 0xFF and buf[1] == 0xD8:
-            bgr = cv2.imdecode(np.concatenate([buf, np.array([0xFF, 0xD9], np.uint8)]), cv2.IMREAD_COLOR)
+        bgr = read_image(p)
         if bgr is None:
             return {"path": p, "verdict": "unreadable"}
         return measure_img(bgr, p)
@@ -249,13 +280,13 @@ def measure(p):
         return {"path": p, "verdict": "error", "why": repr(e)[:200]}
 
 
-KEYS = ["path", "W", "H", "verdict", "ratio", "gap", "arrow_h", "arrow_w", "arrow_gray", "margin", "n", "ys", "hs", "pinyin", "rescued",
-        "ios", "why"]
+KEYS = ["path", "W", "H", "verdict", "ratio", "gap_w", "gap", "arrow_h", "arrow_w", "arrow_gray", "margin", "n", "ys", "hs", "pinyin",
+        "rescued", "ios", "why"]
 
 
 def tile(r, width=420):
     """账单管理那几行的右半边, 放大。"""
-    bgr = cv2.imdecode(np.fromfile(r["path"], np.uint8), cv2.IMREAD_COLOR)
+    bgr = read_image(r["path"])
     H, W = bgr.shape[:2]
     ys = [int(v) for v in str(r["ys"]).split()][:2]
     hs = [int(v) for v in str(r["hs"]).split()][:2]
@@ -300,7 +331,7 @@ def report(rows, a):
     for r in ok:
         r["ratio"] = float(r["ratio"])
     sus = sorted([r for r in ok if r["verdict"] == "Suspicious"], key=lambda r: r["ratio"])
-    print(f"\npages with a measured arrow row: {len(ok):,}   Suspicious (R < {THRESHOLD}) {len(sus):,}")
+    print(f"\npages with a measured arrow row: {len(ok):,}   Suspicious (R < {THRESHOLD} or gap / W < {GAP_W_THRESHOLD}) {len(sus):,}")
     other = [r for r in rows if r.get("verdict") not in ("Ok", "Suspicious")]
     for why in sorted({r.get("why", "") for r in other}):
         print(f"  not measured: {why}  {sum(1 for r in other if r.get('why', '') == why):,}")
@@ -313,6 +344,12 @@ def report(rows, a):
     v = np.array([r["ratio"] for r in ok])
     print("  R percentiles  p0.1 {:.2f}  p1 {:.2f}  p5 {:.2f}  p50 {:.2f}  p99 {:.2f}".format(
         *np.percentile(v, [0.1, 1, 5, 50, 99])))
+    # 第二条(间距 / 页面宽, 2026-11-14): 只按这一条判可疑的单独数出来, 这些要人眼看
+    gw = np.array([float(r["gap"]) / float(r["W"]) for r in ok if float(r["H"]) >= MIN_ASPECT * float(r["W"])])
+    if len(gw):
+        print("  gap / W percentiles (phone-shaped pages)  p0.1 {:.4f}  p1 {:.4f}  p5 {:.4f}  p50 {:.4f}".format(
+            *np.percentile(gw, [0.1, 1, 5, 50])), f"  < {GAP_W_THRESHOLD}: {int((gw < GAP_W_THRESHOLD).sum()):,}")
+    print("  Suspicious by rule: " + "  ".join(f"{k or '?'} {v:,}" for k, v in collections.Counter(r.get("why") for r in sus).most_common()))
     print("  R histogram:", "  ".join(f"<{b:.1f}:{int(((v >= b - 0.1) & (v < b)).sum())}"
                                       for b in np.arange(0.4, 2.31, 0.1)))
     # 按上传日期(文件名里的时间)看新老版本各占多少: 老版本 R 0.78~1.2, 新版本 >= 1.2
@@ -338,6 +375,10 @@ def report(rows, a):
         write_sheets(near[:96], a.sheets, "close")
         rest = [r for r in ok if r["ratio"] >= 1.2]
         write_sheets(rest[:: max(1, len(rest) // 24)][:24], a.sheets, "normal")
+        # 第二条(间距 / 页面宽)离线最近的没判可疑的页, 看真图最低能到多少
+        nearw = sorted([r for r in ok if r["verdict"] == "Ok" and float(r["H"]) >= MIN_ASPECT * float(r["W"])],
+                       key=lambda r: float(r["gap"]) / float(r["W"]))
+        write_sheets(nearw[:48], a.sheets, "closew")
         print("sheets ->", a.sheets)
     if getattr(a, "copy_to", ""):
         # 整页原图拷出来人眼看: S_ 全部可疑, C_ 老版本那一段(阈值 ~ 1.0)抽 60 张, O_ 新版本抽 12 张
@@ -410,6 +451,7 @@ def main():
         w.writerows(rows)
     report(rows, a)
     print(f"done in {time.time() - t0:.0f}s  -> {a.out}")
+    print("ARROW_SCAN_DONE")
 
 
 if __name__ == "__main__":
