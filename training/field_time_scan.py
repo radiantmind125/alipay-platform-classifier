@@ -362,6 +362,58 @@ def _copy_tag(row):
     return ""
 
 
+def bench(paths):
+    """单进程测速: 找框 / 认字 各几秒, 三种 DET_W; 先跑最快的, 机器再慢也能先看到数"""
+    global DET_W
+    import platform
+    import cv2
+    import numpy as np
+    try:
+        import onnxruntime as ort
+        ortv = ort.__version__
+    except Exception as e:  # noqa: BLE001
+        ortv = "? " + repr(e)[:80]
+    print("python", sys.version.split()[0], "onnxruntime", ortv, "numpy", np.__version__, "cv2", cv2.__version__, flush=True)
+    print("cpu", platform.processor(), "logical", os.cpu_count(), flush=True)
+    cv2.setNumThreads(1)
+    eng = _engine()
+    det0, rec0 = eng.text_det, eng.text_rec
+    acc = {"det": 0.0, "rec": 0.0, "n": 0}
+
+    def det(img):
+        t = time.time()
+        r = det0(img)
+        acc["det"] += time.time() - t
+        return r
+
+    def rec(lst):
+        t = time.time()
+        r = rec0(lst)
+        acc["rec"] += time.time() - t
+        acc["n"] += len(lst)
+        return r
+
+    eng.text_det, eng.text_rec = det, rec
+    ims = [(p, _imread(p)) for p in paths]
+    ims = [(p, im) for p, im in ims if im is not None]
+    keep = DET_W
+    try:
+        for w in (736, 1080, 1600):
+            DET_W = w
+            acc.update(det=0.0, rec=0.0, n=0)
+            t0 = time.time()
+            for _p, im in ims:
+                read_fields(im)
+            n = len(ims)
+            print(f"DET_W {w}: total {(time.time() - t0) / n:.2f} s/page  det {acc['det'] / n:.2f}  rec {acc['rec'] / n:.2f}  "
+                  f"recognized boxes/page {acc['n'] / n:.1f}  sizes {[im.shape[1] for _p, im in ims]}", flush=True)
+    finally:
+        DET_W = keep
+        eng.text_det, eng.text_rec = det0, rec0
+    print("FIELD_BENCH_DONE")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("inputs", nargs="*")
@@ -375,6 +427,7 @@ def main():
     ap.add_argument("--max-copy", type=int, default=1500)
     ap.add_argument("--rules-jsonl", nargs=2, metavar=("IN", "OUT"))
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--bench", type=int, default=0, help="只测速: 从 --from-ar 里随机取这么多页, 单进程")
     a = ap.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -384,6 +437,10 @@ def main():
     if a.rules_jsonl:
         rules_jsonl(*a.rules_jsonl)
         return 0
+    if a.bench:
+        with open(a.from_ar, encoding="utf-8-sig") as f:
+            ar = [r["path"] for r in csv.DictReader(f) if r["verdict"] != "Suspicious"]
+        return bench(random.Random(a.seed).sample(ar, min(a.bench, len(ar))))
     if not a.out:
         ap.error("要给 --out")
     if selftest() != 0:
