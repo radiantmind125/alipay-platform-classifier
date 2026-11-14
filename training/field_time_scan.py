@@ -17,9 +17,9 @@ r"""账单详情页两个字段时间的检查 —— FieldTimeCheck.cs 的 Pyth
 
 扫描时怎么读字段(只为了在服务器上验证规则, 不交出去)
 ------------------------------------------------------
-RapidOCR 先找字框(宽过 1600 的整页缩到 1600 宽再找, 框再放大回原图), 只认左边 30% 宽里起头的框(标签列),
-找到 支付时间 / 创建时间 / 订单号 / 商家订单号 的标签后, 再认同一行右边的框和正下方折行的数字。
-值的拼法和 v1114 的 ana_orders.value_after 一样。一页只认二三十个框, 比整页全认快几倍。
+服务器 CPU 慢(EPYC 7402 单进程整页 5.8 秒), 20 个进程一起跑整页找框互相拖到每页 50 秒, 所以只做必要的:
+RapidOCR 只在页面左边 1/3 的竖条里找框, 只认标签大小的框; 找到 支付时间 / 创建时间 / 订单号 / 商家订单号 后,
+只在那一行标签右边的细条里找框、认字, 按 x 拼起来(同一行的判法和 v1114 的 ana_orders.value_after 一样)。
 
 用法
 ----
@@ -200,8 +200,9 @@ def selftest():
 
 # ---------------------------------------------------------------- 读字段(扫描用)
 
-DET_W = 1600         # 找字框时整页缩到这个宽(736 在拼音页上把拼音和标签连成一个框, 页面时间丢一半)
-LEFT_X = 0.30        # 标签列: 框的左边在页面宽 30% 以内
+STRIP_W = 0.33      # 只在页面左边这么宽的竖条里找字框(标签列)
+LEFT_X = 0.30       # 标签框: 左边在页面宽 30% 以内
+LABEL_MAX_W = 0.28  # 标签框最宽(页面宽的比例): 更宽的是横幅、提示语, 不认
 LABELS = (("pay", "支付时间", None), ("create", "创建时间", None),
           ("order", "订单号", "商家"), ("merchant", "商家订单号", None))
 _ENG = None
@@ -216,8 +217,11 @@ def _engine():
         except Exception as e:  # noqa: BLE001  老版本不认这两个参数
             print("RapidOCR thread options not accepted, using defaults:", repr(e)[:120], flush=True)
             _ENG = RapidOCR()
-        if not (hasattr(_ENG, "text_det") and hasattr(_ENG, "text_rec")):
-            raise RuntimeError("rapidocr_onnxruntime 版本不对: 没有 text_det / text_rec")
+        if not (hasattr(_ENG, "text_det") and hasattr(_ENG, "text_rec") and hasattr(_ENG.text_det, "limit_type")):
+            raise RuntimeError("rapidocr_onnxruntime 版本不对: 没有 text_det / text_rec / limit_type")
+        # 竖条、细条不能放大: "min" 会把短边放大到 736(一条 80 像素高的行变成 736 高)。
+        # "max": 长边超过 960 / 1500 / 2000 档才缩小(1.4.4 按图的长边选档), 和 RapidOCR 整页默认的 2000 同一个比例
+        _ENG.text_det.limit_type = "max"
     return _ENG
 
 
@@ -235,73 +239,72 @@ def _crop(img, q):
     return out
 
 
-def read_fields(img):
-    """返回 {pay, create, order, merchant: 值的文字(没找到是 ""), boxes: 框数, recs: 认了几个框}"""
-    import cv2
+def _det(img, dx, dy):
+    """在 img 上找字框, 返回 [(四点框(整页坐标), (x0, y0, x1, y1))]"""
     import numpy as np
-    eng = _engine()
+    boxes, _ = _engine().text_det(np.ascontiguousarray(img))
+    out = []
+    for b in ([] if boxes is None else boxes):
+        q = np.asarray(b, np.float32) + np.array([dx, dy], np.float32)
+        out.append((q, (float(q[:, 0].min()), float(q[:, 1].min()), float(q[:, 0].max()), float(q[:, 1].max()))))
+    return out
+
+
+def _rec(img, quads):
+    if not quads:
+        return []
+    res, _ = _engine().text_rec([_crop(img, q) for q in quads])
+    return [str(r[0]) if float(r[1]) >= 0.5 else "" for r in res]      # 和 RapidOCR 的 text_score 0.5 一样
+
+
+def read_fields(img):
+    """返回 {pay, create, order, merchant: 值的文字(没找到是 ""), boxes: 找到的框数, recs: 认了几个框}
+
+    服务器 CPU 慢、多进程一起跑整页找框又互相拖(20 进程每页 50 秒), 所以只做必要的:
+    1. 只在左边 STRIP_W 宽的竖条里找框, 只认标签大小的框(左边在 LEFT_X 以内、宽不超过 LABEL_MAX_W、没碰竖条右边);
+    2. 找到 支付时间 / 创建时间 / 订单号 / 商家订单号 后, 只在这一行标签右边的细条(上下各放 0.6 个标签高)里找框,
+       中心和标签中心上下差 < 0.6 个标签高的算同一行(和整页版一样), 按 x 拼起来。
+    订单号折行的第二行不要了(规则只用前 14 位)。"""
     H, W = img.shape[:2]
     out = {k: "" for k, _l, _e in LABELS}
     out["boxes"] = out["recs"] = 0
-    s = DET_W / W if W > DET_W else 1.0
-    small = cv2.resize(img, (max(1, round(W * s)), max(1, round(H * s))), interpolation=cv2.INTER_AREA) if s < 1.0 else img
-    boxes, _ = eng.text_det(small)
-    if boxes is None or len(boxes) == 0:
-        return out
-    quads = [np.asarray(b, np.float32) / s for b in boxes]
-    rects = [(float(q[:, 0].min()), float(q[:, 1].min()), float(q[:, 0].max()), float(q[:, 1].max())) for q in quads]
-    order = sorted(range(len(quads)), key=lambda i: (rects[i][1], rects[i][0]))
-    out["boxes"] = len(quads)
-    texts = {}
-
-    def rec(idxs):
-        idxs = [i for i in dict.fromkeys(idxs) if i not in texts]
-        if not idxs:
-            return
-        res, _ = eng.text_rec([_crop(img, quads[i]) for i in idxs])
-        for i, r in zip(idxs, res):
-            texts[i] = str(r[0]) if float(r[1]) >= 0.5 else ""      # 和 RapidOCR 的 text_score 0.5 一样
-        out["recs"] += len(idxs)
-
-    rec([i for i in order if rects[i][0] < LEFT_X * W])
+    xs = max(1, int(round(STRIP_W * W)))
+    cand = [(q, r) for q, r in _det(img[:, :xs], 0, 0)
+            if r[0] < LEFT_X * W and r[2] < xs - 2 and r[2] - r[0] < LABEL_MAX_W * W]
+    out["boxes"] = len(cand)
+    cand.sort(key=lambda qr: (qr[1][1], qr[1][0]))
+    texts = _rec(img, [q for q, _r in cand])
+    out["recs"] = len(cand)
 
     found = {}
     for key, lab, excl in LABELS:
-        for i in order:
-            t = texts.get(i, "").replace(" ", "")
+        for (q, r), t in zip(cand, texts):
+            t = t.replace(" ", "")
             if lab in t and not (excl and excl in t):
-                found[key] = i
+                found[key] = (r, t)
                 break
 
-    plan = {}
-    need = []
-    for key, li in found.items():
-        x0, y0, x1, y1 = rects[li]
+    rows = {}
+    for key, ((x0, y0, x1, y1), t) in found.items():
         h = y1 - y0
         cy = (y0 + y1) / 2
-        row = sorted((j for j in order if j != li and abs((rects[j][1] + rects[j][3]) / 2 - cy) < 0.6 * h
-                      and rects[j][0] > x0), key=lambda j: rects[j][0])
-        wrap = []
-        if row:
-            xv = rects[row[0]][0]
-            yb = max(rects[j][3] for j in row)
-            wrap = [j for j in order if j not in row and j != li and 0 < rects[j][1] - yb < 1.2 * h
-                    and abs(rects[j][0] - xv) < 3 * h]
-        plan[key] = (li, row, wrap)
-        need += row + wrap
-    rec(need)
-
-    for key, lab, _e in LABELS:
-        if key not in plan:
-            continue
-        li, row, wrap = plan[key]
-        t = texts.get(li, "").replace(" ", "")
-        txt = t.split(lab, 1)[1] + "".join(texts.get(j, "").replace(" ", "") for j in row)
-        for j in wrap:
-            w = texts.get(j, "").replace(" ", "")
-            if re.fullmatch(r"\d{1,6}", w):
-                txt += w
-        out[key] = txt
+        ya = max(0, int(y0 - 0.6 * h))
+        yb = min(H, int(y1 + 0.6 * h) + 1)
+        xa = min(W - 1, int(x1) + 1)
+        band = _det(img[ya:yb, xa:], xa, ya) if yb - ya >= 4 and W - xa >= 4 else []
+        rows[key] = sorted((qr for qr in band if abs((qr[1][1] + qr[1][3]) / 2 - cy) < 0.6 * h), key=lambda qr: qr[1][0])
+        out["boxes"] += len(band)
+    keys = list(rows)
+    flat = [qr[0] for k in keys for qr in rows[k]]
+    vt = _rec(img, flat)
+    out["recs"] += len(flat)
+    k0 = 0
+    for k in keys:
+        n = len(rows[k])
+        lab = next(lb for kk, lb, _e in LABELS if kk == k)
+        t = found[k][1]
+        out[k] = t.split(lab, 1)[1] + "".join(x.replace(" ", "") for x in vt[k0:k0 + n])
+        k0 += n
     return out
 
 
@@ -363,8 +366,7 @@ def _copy_tag(row):
 
 
 def bench(paths):
-    """单进程测速: 找框 / 认字 各几秒, 三种 DET_W; 先跑最快的, 机器再慢也能先看到数"""
-    global DET_W
+    """单进程测速: 找框 / 认字 各几秒(跑两轮, 第一轮含预热)"""
     import platform
     import cv2
     import numpy as np
@@ -396,19 +398,17 @@ def bench(paths):
     eng.text_det, eng.text_rec = det, rec
     ims = [(p, _imread(p)) for p in paths]
     ims = [(p, im) for p, im in ims if im is not None]
-    keep = DET_W
     try:
-        for w in (736, 1080, 1600):
-            DET_W = w
+        for rnd in (1, 2):      # 第一轮含模型预热
             acc.update(det=0.0, rec=0.0, n=0)
             t0 = time.time()
             for _p, im in ims:
                 read_fields(im)
             n = len(ims)
-            print(f"DET_W {w}: total {(time.time() - t0) / n:.2f} s/page  det {acc['det'] / n:.2f}  rec {acc['rec'] / n:.2f}  "
-                  f"recognized boxes/page {acc['n'] / n:.1f}  sizes {[im.shape[1] for _p, im in ims]}", flush=True)
+            print(f"strip reader round {rnd}: total {(time.time() - t0) / n:.2f} s/page  det {acc['det'] / n:.2f}  "
+                  f"rec {acc['rec'] / n:.2f}  recognized boxes/page {acc['n'] / n:.1f}  sizes {[im.shape[1] for _p, im in ims]}",
+                  flush=True)
     finally:
-        DET_W = keep
         eng.text_det, eng.text_rec = det0, rec0
     print("FIELD_BENCH_DONE")
     return 0
