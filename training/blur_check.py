@@ -11,15 +11,29 @@ r"""凭证模糊检查 —— BlurCheck.cs 的 Python 参考实现 + 服务器�
   - 整页分数 = 所有边 E 的中位数(偶数个取中间两个的平均)。
 干净的强边少于 MIN_EDGES 条判不了。只看这一张图自己, 不用知道是苹果还是安卓, 白图蓝图一样算。
 
-本地实测(_move_logs 里白图 450 + 蓝图 450 张真图, 每张再做 10 种变体)
--------------------------------------------------------------------
-    原图                白 中位 1.52 / 99% 2.14     蓝 中位 1.42 / 99% 2.24
-    JPEG 60 / 40 重存    1.84 / 2.01(白中位)
-    缩小一半、TG 1280    1.57 / 1.66                -> 缩小不会变软
-    放大(先缩 0.7 / 0.5 再放回)  最低 2.27 / 2.36
-    高斯 0.8 / 1.2 / 1.6         最低 2.04 / 2.84 / 3.31
-真图里分数高的是拍屏的照片(3024x4032 等, 2.4~3.05)和被别的程序缩放过的截图(1252x1946 等, 2.1~2.8),
-本来就不清楚, 本地 900 张里约 1%。门槛按服务器上白图 / 蓝图的分布定(--scan 模式), 经理定送人工的比例。
+门槛按尺寸分三类(page_kind, 只看原图宽高)
+------------------------------------------
+    截图        BLUR_MIN 2.4
+    转账凭证图  VOUCHER_BLUR_MIN 3.1(支付宝生成的分享图, 本来就虚, 用 2.4 会把它们全判模糊)
+    照片尺寸    BLUR_MIN 2.4(只做标记, 经理要不要照片单独处理自己定)
+
+服务器实测(2026-11-16, 11 月真图白图 / 蓝图各随机 3 万张, 量到 29,939 / 29,932 张)
+-------------------------------------------------------------------------------
+    截图        白 中位 1.41 / 99% 1.94, >= 2.4 的 30 张(0.10%); 蓝 中位 1.40 / 99% 1.65, 10 张(0.03%)
+                这些是被别的程序放大 / 缩放过的截图(平台收银台 1080x2400 2.96、954x2094 等), 看得清但不是原图
+    照片尺寸    白 212 张 / 蓝 160 张, 中位 2.57 / 2.60, >= 2.4 的 143 / 125 张(拿另一部手机拍屏幕)
+    转账凭证图  白 565 张(1.9%, 1304x2038 / 1304x2122 / 1252x1954 ...)真图最高 2.88, 0 张 >= 3.1; 蓝图只有 14 张
+    合计判模糊  白 0.58%(照片 143 + 截图 30), 蓝 0.45%(照片 125 + 截图 10)
+    (只用一个门槛 2.4 的话白图 2.39%, 多出来的全是转账凭证图)
+本机变体(最终代码, 截图 1,869 张 / 转账凭证图 30 张 / 照片 7 张, 判模糊的比例)
+    截图        JPEG 60 / 40 重存 1 / 4 张(最高 2.40 / 2.48); 缩小一半、TG 1280 0 张;
+                高斯 0.8 92%, 高斯 1.2 100%, 先缩 0.7 再放回 97%, 缩 0.5 再放回 99.9%
+    转账凭证图  原图最高 2.85, JPEG 60 / 40 最高 2.97 / 2.98 -> 0 张;
+                高斯 0.8 80%, 高斯 1.2 97%, 先缩 0.7 再放回 63%, 缩 0.5 再放回 13%(本来就是放大出来的, 再放大变化小)
+已知漏洞
+    宽 1100~1310、高宽比 1.45~1.66 的清楚截图(裁过的, 服务器 6 万张里 19 张)也用 3.1, 轻微的糊抓不到。
+    转账凭证图再缩小到宽 1100 以下(比如 TG 1280 -> 819x1280)就按截图算, 本机 30 张里 20 张判模糊(2.40~2.60);
+    服务器上传的图里这种尺寸 >= 2.4 的 6 万张里只有 1 张, 所以没放宽。
 
 用法
 ----
@@ -48,9 +62,30 @@ MIN_CONTRAST = 100      # 边两头至少差这么多灰度
 MONO_TOL = 0.08         # 中间反向回落最多落差的 8%
 MIN_STEP = 12           # 局部最大的那一步至少这么大(太小的不是边)
 MIN_EDGES = 200         # 干净的强边少于这么多条判不了
-BLUR_MIN = 2.4          # 中位边宽 >= 这个判模糊(暂定, 按服务器分布再定)
+BLUR_MIN = 2.4          # 截图 / 照片: 中位边宽 >= 这个判模糊
+VOUCHER_BLUR_MIN = 3.1  # 支付宝生成的转账凭证图: 本身就虚(服务器真图 2.4~2.9, JPEG 40 重存最高 2.98), 单独用这个门槛
+
+KIND_SCREEN, KIND_VOUCHER, KIND_PHOTO = 0, 1, 2
+KIND_NAMES = {KIND_SCREEN: "截图", KIND_VOUCHER: "转账凭证图", KIND_PHOTO: "照片尺寸"}
 
 UPLOAD_DAY = re.compile(r"_([0-9]{8})[0-9]{6}\.")
+
+
+def page_kind(W, H):
+    """只按原图尺寸分(和 C# PageKind 一样):
+    1 转账凭证图 = 支付宝生成的转账凭证图: 宽 1304、高 1950~2450(page_type.py 的 W2 尺寸),
+                  或存下来又缩小 / 裁过的: 宽 1100~1310、高宽比 1.45~1.66(手机截图都在 1.77 以上;
+                  宽 1320 的是苹果 Pro Max 截图裁过的, 是清楚的, 不算);
+    2 照片尺寸 = 长边 >= 2600 且长短边比 < 1.45(拿相机拍的), 只做标记, 门槛和截图一样;
+    0 截图 = 其它。"""
+    if W <= 0 or H <= 0:
+        return KIND_SCREEN
+    r = H / W
+    if (W == 1304 and 1950 <= H <= 2450) or (1100 <= W <= 1310 and 1.45 <= r <= 1.66):
+        return KIND_VOUCHER
+    if max(W, H) >= 2600 and max(W, H) / min(W, H) < 1.45:
+        return KIND_PHOTO
+    return KIND_SCREEN
 
 
 def _edges_1d(a):
@@ -87,13 +122,18 @@ def _median(v):
 
 
 def check_gray(gray):
-    """返回 dict: v (0 判不了 / 1 清楚 / 2 模糊), edges, width(中位边宽), crisp(E <= 1.5 的比例)"""
+    """gray 是原图(不要先缩放)转的灰度。
+    返回 dict: v (0 判不了 / 1 清楚 / 2 模糊), edges, width(中位边宽), crisp(E <= 1.5 的比例),
+    kind(page_kind), min(这一类用的门槛)"""
+    H, W = gray.shape[:2]
+    kind = page_kind(W, H)
+    t = VOUCHER_BLUR_MIN if kind == KIND_VOUCHER else BLUR_MIN
     e = edge_widths(gray)
     n = int(e.size)
     if n < MIN_EDGES:
-        return {"v": 0, "edges": n, "width": None, "crisp": None}
+        return {"v": 0, "edges": n, "width": None, "crisp": None, "kind": kind, "min": t}
     w = _median(e)
-    return {"v": 2 if w >= BLUR_MIN else 1, "edges": n, "width": w, "crisp": float((e <= 1.5).mean())}
+    return {"v": 2 if w >= t else 1, "edges": n, "width": w, "crisp": float((e <= 1.5).mean()), "kind": kind, "min": t}
 
 
 def read_gray(path):
@@ -107,7 +147,7 @@ def read_gray(path):
 
 # ---------------------------------------------------------------- 批量打分
 
-COLS = ["path", "err", "W", "H", "v", "edges", "width", "crisp", "sec"]
+COLS = ["path", "err", "W", "H", "kind", "v", "edges", "width", "crisp", "sec"]
 
 
 def _init_worker():
@@ -122,7 +162,7 @@ def score_one(path):
         if g is None:
             return {"path": path, "err": "unreadable"}
         r = check_gray(g)
-        return {"path": path, "err": "", "W": g.shape[1], "H": g.shape[0], "v": r["v"], "edges": r["edges"],
+        return {"path": path, "err": "", "W": g.shape[1], "H": g.shape[0], "kind": r["kind"], "v": r["v"], "edges": r["edges"],
                 "width": "" if r["width"] is None else round(r["width"], 4),
                 "crisp": "" if r["crisp"] is None else round(r["crisp"], 4), "sec": round(time.time() - t0, 2)}
     except Exception as e:  # noqa: BLE001
@@ -172,6 +212,7 @@ def scan(a):
     n = err = 0
     copied = {}
     vs = {0: 0, 1: 0, 2: 0}
+    kinds = {}
     widths = []
     stopped = False
     block = max(256, a.workers * 64)
@@ -189,6 +230,7 @@ def scan(a):
                     err += 1
                     continue
                 vs[r["v"]] += 1
+                kinds[(r["kind"], r["v"])] = kinds.get((r["kind"], r["v"]), 0) + 1
                 if r["width"] != "":
                     widths.append(float(r["width"]))
                 b = _bin(r["width"])
@@ -199,8 +241,11 @@ def scan(a):
             el = time.time() - t0
             print(f"{n} / {len(paths)}  {n / max(el, 1e-9):.2f} pages/s  blurry {vs[2]}  cannot {vs[0]}  err {err}", flush=True)
     print()
-    print(f"pages {n}  errors {err}  ok {vs[1]}  blurry(>= {BLUR_MIN}) {vs[2]}  cannot {vs[0]}"
+    print(f"pages {n}  errors {err}  ok {vs[1]}  blurry {vs[2]}  cannot {vs[0]}"
           + ("  STOPPED BY --max-minutes" if stopped else ""))
+    for k in (KIND_SCREEN, KIND_VOUCHER, KIND_PHOTO):
+        t = VOUCHER_BLUR_MIN if k == KIND_VOUCHER else BLUR_MIN
+        print(f"  kind {k} (min {t}): ok {kinds.get((k, 1), 0)}  blurry {kinds.get((k, 2), 0)}  cannot {kinds.get((k, 0), 0)}")
     if widths:
         q = np.percentile(np.array(widths), [1, 5, 25, 50, 75, 95, 99, 99.5, 99.9])
         print("width percentiles 1/5/25/50/75/95/99/99.5/99.9:", " ".join(f"{x:.2f}" for x in q))

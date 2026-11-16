@@ -87,7 +87,7 @@ namespace Ssp.BlurTest
             var ci = CultureInfo.InvariantCulture;
             foreach (var (path, w, h, r) in all)
                 if (!many || r.Verdict == BlurVerdict.Suspicious)
-                    Console.WriteLine($"{r.Verdict,-15} {(r.Measured ? r.EdgeWidth.ToString("0.000", ci) : "     ")}  {w}x{h}  {path}\n                {r.Reason}");
+                    Console.WriteLine($"{r.Verdict,-15} {r.Kind,-12} {(r.Measured ? r.EdgeWidth.ToString("0.000", ci) : "     ")}  {w}x{h}  {path}\n                {r.Reason}");
 
             Console.WriteLine();
             Console.WriteLine($"图 {all.Count:N0} 张, 用时 {sw.Elapsed.TotalSeconds:F1} 秒");
@@ -98,9 +98,9 @@ namespace Ssp.BlurTest
             if (outCsv != null)
             {
                 using var o = new StreamWriter(outCsv, false, new UTF8Encoding(true));
-                o.WriteLine("path,W,H,verdict,edges,width,crisp,reason");
+                o.WriteLine("path,W,H,kind,verdict,edges,width,crisp,reason");
                 foreach (var (path, w, h, r) in all)
-                    o.WriteLine(string.Join(",", Csv(path), w, h, (int)r.Verdict, r.Edges,
+                    o.WriteLine(string.Join(",", Csv(path), w, h, (int)r.Kind, (int)r.Verdict, r.Edges,
                         r.Measured ? r.EdgeWidth.ToString("R", ci) : "", r.Measured ? r.CrispFraction.ToString("R", ci) : "",
                         Csv(r.Reason)));
                 Console.WriteLine($"csv -> {outCsv}");

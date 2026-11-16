@@ -13,9 +13,19 @@ namespace Ssp
         Suspicious = 2,        // 模糊: 建议送人工
     }
 
+    /// <summary>只按原图宽高分的页面类别, 决定用哪个门槛(见 <see cref="BlurCheck.PageKind"/>)。</summary>
+    public enum BlurPageKind
+    {
+        Screen = 0,        // 截图(其它所有尺寸), 门槛 BlurMin
+        VoucherImage = 1,  // 支付宝生成的转账凭证图, 本身就虚, 门槛 VoucherBlurMin
+        Photo = 2,         // 照片尺寸(拿相机拍的), 门槛和截图一样, 只做标记
+    }
+
     public sealed class BlurResult
     {
         public BlurVerdict Verdict;
+        public BlurPageKind Kind;       // 按尺寸分的类别
+        public double Threshold;        // 这一类用的门槛
         public int Edges;               // 量到的干净强边条数
         public double EdgeWidth;        // ★ 判据: 强边宽的中位数(像素); 截图 1.3~1.7, 放大 / 拍屏 / 糊过 2.3 以上
         public double CrispFraction;    // 宽 <= 1.5 像素的边占比, 只输出
@@ -40,20 +50,29 @@ namespace Ssp
     /// 3. 两头落差 C = |p5 - p0| >= MinContrast, 且中间单调(反方向的一步不超过 C 的 MonoTol), 才算一条干净的强边;
     ///    这条边的宽 E = C / g(像素)。一步到位的硬边 E = 1, 越软越大。
     /// 4. 所有边 E 的中位数(偶数条取中间两个的平均)= EdgeWidth。边少于 MinEdges 条判不了。
-    /// 5. EdgeWidth >= BlurMin 判模糊。
+    /// 5. 按原图宽高分类(PageKind), EdgeWidth >= 这一类的门槛判模糊:
+    ///        截图 BlurMin 2.4; 转账凭证图 VoucherBlurMin 3.1; 照片尺寸 BlurMin 2.4(只做标记)。
     ///
-    /// 实测(本机真图 1,886 张: 白图 920 + 蓝图 966; 另 900 张各做 10 种变体)
-    /// ----------------------------------------------------------------------
-    ///     原图                 白 中位 1.52 / 99% 2.14     蓝 中位 1.45 / 99% 2.04
-    ///     JPEG 60 / 40 重存     白中位 1.84 / 2.01
-    ///     缩小一半 / TG 1280    1.57 / 1.66(缩小不会变软)
-    ///     先缩 0.7 / 0.5 再放回 最低 2.27 / 2.36
-    ///     高斯模糊 0.8 / 1.2 / 1.6   最低 2.04 / 2.84 / 3.31
-    ///   真图里 >= 2.4 的约 0.7%: 拿另一部手机拍屏幕的照片(3024x4032 等, 2.4~3.0),
-    ///   和一种"转账成功 / 转出成功"凭证图(带拼音字体和支付宝水印, 宽 1112~1304, 2.55~2.78, 看得清但发虚)。
-    ///   门槛 BlurMin 暂定 2.4, 按服务器上白图 / 蓝图的分布再定。
+    /// 服务器实测(2026-11-16, 11 月真图白图 / 蓝图各随机 3 万张, 量到 29,939 / 29,932 张)
+    /// ---------------------------------------------------------------------------------
+    ///     截图        白 中位 1.41 / 99% 1.94, >= 2.4 的 30 张(0.10%); 蓝 中位 1.40 / 99% 1.65, 10 张(0.03%)
+    ///                 这些是被别的程序放大 / 缩放过的截图(平台收银台 1080x2400 2.96、954x2094 等), 看得清但不是原图
+    ///     照片尺寸    白 212 张 / 蓝 160 张, 中位 2.57 / 2.60, >= 2.4 的 143 / 125 张(拿另一部手机拍屏幕)
+    ///     转账凭证图  白 565 张(1.9%, 1304x2038 / 1304x2122 / 1252x1954 ...)真图最高 2.88, 0 张 >= 3.1; 蓝图只有 14 张
+    ///     合计判模糊  白 0.58%(照片 143 + 截图 30), 蓝 0.45%(照片 125 + 截图 10)
+    ///     (只用一个门槛 2.4 的话白图 2.39%, 多出来的全是转账凭证图)
+    /// 本机变体(最终代码, 截图 1,869 张 / 转账凭证图 30 张 / 照片 7 张, 判模糊的比例)
+    ///     截图        JPEG 60 / 40 重存 1 / 4 张(最高 2.40 / 2.48); 缩小一半、TG 1280 0 张;
+    ///                 高斯 0.8 92%, 高斯 1.2 100%, 先缩 0.7 再放回 97%, 缩 0.5 再放回 99.9%
+    ///     转账凭证图  原图最高 2.85, JPEG 60 / 40 最高 2.97 / 2.98 -> 0 张;
+    ///                 高斯 0.8 80%, 高斯 1.2 97%, 先缩 0.7 再放回 63%, 缩 0.5 再放回 13%(本来就是放大出来的, 再放大变化小)
+    /// 已知漏洞
+    ///     宽 1100~1310、高宽比 1.45~1.66 的清楚截图(裁过的, 服务器 6 万张里 19 张)也用 3.1, 轻微的糊抓不到。
+    ///     转账凭证图再缩小到宽 1100 以下(比如 TG 1280 -> 819x1280)就按截图算, 本机 30 张里 20 张判模糊(2.40~2.60);
+    ///     服务器上传的图里这种尺寸 >= 2.4 的 6 万张里只有 1 张, 所以没放宽。
     ///
-    /// 和 training/blur_check.py 逐步对应(解码成彩色 -> 转灰 -> 量边 -> 中位数), 改一边要同步改另一边。
+    /// ★ 传上传的原图, 不要先缩放: 类别按原图宽高认, 缩小会让边变硬、分数变低。
+    /// 和 training/blur_check.py 逐步对应(解码成彩色 -> 转灰 -> 量边 -> 中位数 -> 按类别比门槛), 改一边要同步改另一边。
     /// 无静态可变状态, 可多线程调用。
     /// </summary>
     public static class BlurCheck
@@ -62,9 +81,34 @@ namespace Ssp
         public const double MonoTol = 0.08;     // 中间反方向的一步最多是落差的 8%
         public const int MinStep = 12;          // 局部最大那一步至少这么大
         public const int MinEdges = 200;        // 干净的强边少于这么多条判不了
-        public const double BlurMin = 2.4;      // 中位边宽 >= 这个判模糊(暂定)
+        public const double BlurMin = 2.4;      // 截图 / 照片: 中位边宽 >= 这个判模糊
+        public const double VoucherBlurMin = 3.1;   // 转账凭证图: 本身就虚(真图最高 2.88, JPEG 40 重存最高 2.98)
 
-        /// <param name="image">8 位图, 1 / 3 / 4 通道(GRAY / BGR / BGRA)。传进来的 Mat 不会被修改, 也不会被释放。</param>
+        /// <summary>
+        /// 只按原图宽高分类(和 blur_check.py 的 page_kind 一样):
+        ///   转账凭证图 = 宽 1304、高 1950~2450(支付宝生成的转账凭证图),
+        ///                或存下来又缩小 / 裁过的: 宽 1100~1310、高宽比 1.45~1.66(手机截图都在 1.77 以上;
+        ///                宽 1320 的是苹果 Pro Max 截图裁过的, 是清楚的, 不算);
+        ///   照片尺寸   = 长边 >= 2600 且长短边比 &lt; 1.45;
+        ///   截图       = 其它。
+        /// </summary>
+        public static BlurPageKind PageKind(int W, int H)
+        {
+            if (W <= 0 || H <= 0) return BlurPageKind.Screen;
+            double r = (double)H / W;
+            if ((W == 1304 && H >= 1950 && H <= 2450) || (W >= 1100 && W <= 1310 && r >= 1.45 && r <= 1.66))
+                return BlurPageKind.VoucherImage;
+            int lo = Math.Min(W, H), hi = Math.Max(W, H);
+            if (hi >= 2600 && (double)hi / lo < 1.45)
+                return BlurPageKind.Photo;
+            return BlurPageKind.Screen;
+        }
+
+        static string KindName(BlurPageKind k) =>
+            k == BlurPageKind.VoucherImage ? "转账凭证图" : k == BlurPageKind.Photo ? "照片尺寸" : "截图";
+
+        /// <param name="image">上传的原图(不要先缩放), 8 位, 1 / 3 / 4 通道(GRAY / BGR / BGRA)。
+        /// 传进来的 Mat 不会被修改, 也不会被释放。</param>
         public static BlurResult Check(Mat image)
         {
             if (image == null) throw new ArgumentNullException(nameof(image));
@@ -75,6 +119,9 @@ namespace Ssp
             if (cn != 1 && cn != 3 && cn != 4) throw new ArgumentException($"不支持 {cn} 通道");
 
             int W = image.Width, H = image.Height;
+            res.Kind = PageKind(W, H);
+            res.Threshold = res.Kind == BlurPageKind.VoucherImage ? VoucherBlurMin : BlurMin;
+            double t = res.Threshold;
             byte[] g = new byte[W * H];
             using (var gray = new Mat())
             {
@@ -107,15 +154,16 @@ namespace Ssp
             res.CrispFraction = (double)crisp / n;
             res.Measured = true;
             var ci = CultureInfo.InvariantCulture;
-            if (med >= BlurMin)
+            string kn = KindName(res.Kind);
+            if (med >= t)
             {
                 res.Verdict = BlurVerdict.Suspicious;
-                res.Reason = $"模糊: 强边宽中位数 {med.ToString("0.00", ci)} 像素 >= {BlurMin.ToString("0.0", ci)}(截图一般 1.3~1.7), 边 {n} 条";
+                res.Reason = $"模糊: {kn}, 强边宽中位数 {med.ToString("0.00", ci)} 像素 >= {t.ToString("0.0", ci)}(截图一般 1.3~1.7), 边 {n} 条";
             }
             else
             {
                 res.Verdict = BlurVerdict.Ok;
-                res.Reason = $"清楚: 强边宽中位数 {med.ToString("0.00", ci)} 像素 < {BlurMin.ToString("0.0", ci)}, 边 {n} 条";
+                res.Reason = $"清楚: {kn}, 强边宽中位数 {med.ToString("0.00", ci)} 像素 < {t.ToString("0.0", ci)}, 边 {n} 条";
             }
             return res;
         }
