@@ -34,10 +34,13 @@ namespace Ssp
     ///
     ///     经理给的 3 张假图(1320x2868)            0.81~0.83(空 34~35 像素, 行高 42)
     ///     经理截的图(780x1280, 压过)              0.82
-    ///     苹果原生截图真图                        0.32~0.34(名字和括号之间本来就空半个字)
-    ///     安卓真图                                0.02~0.25
-    ///     本机所有真图(3,300 张整页, 7~11 月)     量到 205 张, 最高 0.46(装饰字), 0 张可疑
-    /// 比例 &gt;= GapMinPercent / 100 判可疑。
+    ///     假图 JPEG 90~40 / 缩 0.75 0.5 / TG 1280  0.81~0.90, 都判可疑
+    ///     服务器 11 月蓝图全部 95,810 张(2026-11-17), 量到约 2 万张, 其余不是这个页面或者是下面判不了的几种:
+    ///         苹果原生截图 0.29~0.34 居多(名字和括号之间本来就空半个字), 安卓 0.02~0.25,
+    ///         最后一个字是 月 日 一类(右边留白多)、拉丁字母、＆ 0.45~0.50;
+    ///         &gt;= 0.65 只有 1 张: 昵称自己带了几个空格(晨SIR   (**英), 1.19), 这种分不出来。
+    ///     服务器 11 月白图随机 3 万张: 0 张量到(没有蓝色页头)。本机真图 3,302 张整页(7~11 月): 0 张可疑。
+    /// Gap / 行高 &gt;= GapMinPercent / 100(0.65, 真图最高 0.50 和假图 0.81 中间)判可疑。
     ///
     /// 做法(和 training/payee_space_check.py 一步一步对应, 改一边要同步改另一边):
     ///  1. 页头: 从 0.12H 往下找第一行"蓝底像素不到一半宽"的行, 那以上是蓝色页头(最多到 0.55H, 不到 0.15H 判不了)。
@@ -49,8 +52,13 @@ namespace Ssp
     ///  5. 取值最后一段要像右括号; 找第一个"前面紧跟左括号"的星号; 再前一段是名字最后一个字。
     ///     星号: 高 &lt;= 0.45 行高、上沿 &lt; 0.6 行高、宽 &lt;= 0.75 行高、宽 &gt;= 0.4 倍自己的高。
     ///     括号: 宽 &lt;= 0.4 行高、宽 &lt;= 0.6 倍自己的高、高 &gt;= 0.4 行高。
-    ///  6. 名字最后一个字宽 &lt; 0.3 行高(1 l 川 的一竖、括号)、高 &lt; 0.5 行高(。，、), 或者从它到左括号之间
-    ///     B &lt; 120 的像素(表情图标一类的彩色东西) &gt;= 行高平方 / 40, 判不了。
+    ///  6. 名字最后一个字判不了的几种(宁可不判):
+    ///     宽 &lt; 0.3 行高(1 l 川 的一竖、括号)、高 &lt; 0.5 行高(。，、);
+    ///     ？ ！ 收尾: 竖着两截以上、最下面一截是小点(高 &lt;= 0.25 行高、宽 &lt;= 0.4 行高), 全角 ？ ！ 右边本来就空一大块
+    ///       (服务器上没有这条会误判 26 张, 0.51~0.71);
+    ///     从它到左括号之间 B &lt; 120 的像素 &gt;= 行高平方 / 40(深色、彩色表情);
+    ///     名字和括号之间(两边各让 max(2, 行高/10) 像素)和底色差 &gt; 40 的像素 &gt;= 行高平方 / 40(蓝色、灰色表情 💤 👤,
+    ///       服务器上没有这条会误判 4 张, 1.2~1.7); 底色 = 标签和取值之间那一大段空白每个通道的下中位数。
     ///  7. Gap = 左括号左沿 - 名字右沿; Gap * 100 &gt;= GapMinPercent * 行高 判可疑(整数比较)。
     ///
     /// ★ 传上传的原图(不要先缩放、不要先转灰度): 要靠颜色分蓝底和白字。缩放过比例基本不变, 但字太小(行高 &lt; 12)判不了。
@@ -59,10 +67,11 @@ namespace Ssp
     public static class PayeeSpaceCheck
     {
         /// <summary>Gap / 行高 &gt;= 这个百分比判可疑。</summary>
-        public const int GapMinPercent = 55;
+        public const int GapMinPercent = 65;
 
         const int InkR = 150;          // 页头白字: R >= 150
         const int ForeignB = 120;      // 页头里 B < 120: 不是白字也不是蓝底(JPEG 在白字边上把蓝底的 B 压到 140~160)
+        const int NonBgDist = 40;      // 空白里和底色差(三通道差的绝对值之和) > 40 的像素算"有东西"
 
         /// <param name="image">8 位彩色图, 3 / 4 通道(BGR / BGRA)。传进来的 Mat 不会被修改, 也不会被释放。</param>
         public static PayeeSpaceResult Check(Mat image)
@@ -217,11 +226,57 @@ namespace Ssp
             // 6. 名字最后一个字
             if (pv.Wd * 10 < 3 * h) { res.Reason = "名字最后一个字太窄(1 l 川 或括号一类), 量不准"; return res; }
             if ((pv.Bt - pv.T) * 10 < 5 * h) { res.Reason = "名字最后一个是标点(。，、一类), 量不准"; return res; }
+            // ？ ！ 收尾: 竖着分成两截以上, 最下面一截是个小点(高 <= 0.25 行高、宽 <= 0.4 行高); 全角的 ？ ！ 右边本来就空一大块
+            var pvRow = new bool[h];
+            for (int y = y0; y < y1; y++)
+                for (int x = pv.A; x < pv.B; x++)
+                    if (Rv(y, x) >= InkR) { pvRow[y - y0] = true; break; }
+            var rr = Runs(pvRow);
+            if (rr.Count >= 2)
+            {
+                var (la, lb) = rr[rr.Count - 1];
+                int c0 = -1, c1 = -1;
+                for (int x = pv.A; x < pv.B; x++)
+                {
+                    bool any = false;
+                    for (int y = y0 + la; y < y0 + lb; y++) if (Rv(y, x) >= InkR) { any = true; break; }
+                    if (any) { if (c0 < 0) c0 = x; c1 = x; }
+                }
+                if ((lb - la) * 4 <= h && (c1 - c0 + 1) * 10 <= 4 * h)
+                {
+                    res.Reason = "名字最后一个是 ？ ！ 一类(下面一个点), 量不准"; return res;
+                }
+            }
             int foreign = 0;
             for (int y = y0; y < y1; y++)
                 for (int x = pv.A; x < br.A; x++)
                     if (Bv(y, x) < ForeignB) foreign++;
             if (foreign * 40 >= h * h) { res.Reason = "名字后面有表情图标一类的彩色东西, 量不准"; return res; }
+            // 空白里有没有别的东西(蓝色 / 灰色的表情, R 不够白字、B 又不低): 和底色比; 底色 = 标签和取值之间那一大段空白的下中位数
+            int m = Math.Max(2, h / 10);
+            if (br.A - m > pv.B + m)
+            {
+                int ga = seg[k].B, gb = seg[k + 1].A;
+                var bg = new int[3];
+                for (int ch = 0; ch < 3; ch++)
+                {
+                    var hist = new int[256];
+                    for (int y = y0; y < y1; y++)
+                        for (int x = ga; x < gb; x++) hist[px[((long)y * W + x) * 3 + ch]]++;
+                    int need = ((y1 - y0) * (gb - ga) + 1) / 2, acc = 0, v = 0;
+                    for (; v < 256; v++) { acc += hist[v]; if (acc >= need) break; }
+                    bg[ch] = v;
+                }
+                int nonBg = 0;
+                for (int y = y0; y < y1; y++)
+                    for (int x = pv.B + m; x < br.A - m; x++)
+                    {
+                        long o = ((long)y * W + x) * 3;
+                        int d = Math.Abs(px[o] - bg[0]) + Math.Abs(px[o + 1] - bg[1]) + Math.Abs(px[o + 2] - bg[2]);
+                        if (d > NonBgDist) nonBg++;
+                    }
+                if (nonBg * 40 >= h * h) { res.Reason = "名字和括号之间有表情一类的东西, 量不准"; return res; }
+            }
 
             // 7. 空白
             int gap = br.A - pv.B;
@@ -232,7 +287,7 @@ namespace Ssp
             int q = (gap * 200 + h) / (2 * h);      // 比例的百分位, 四舍五入用整数算(Python 一样), 理由里两边逐字相同
             string txt = $"{q / 100}.{q % 100:00}";
             res.Reason = res.Verdict == PayeeSpaceVerdict.Suspicious
-                ? $"可疑: 名字和左括号之间空 {gap} 像素 = {txt} 个字高 >= 0.{GapMinPercent:00}(真图一般 0.1~0.35)"
+                ? $"可疑: 名字和左括号之间空 {gap} 像素 = {txt} 个字高 >= 0.{GapMinPercent:00}(真图一般 0.1~0.5)"
                 : $"正常: 名字和左括号之间空 {gap} 像素 = {txt} 个字高";
             return res;
         }
