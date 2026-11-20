@@ -27,6 +27,10 @@ namespace Ssp
         public int Up;                   // 金额顶 - 名字底, 像素
         public int D;                    // 交易成功底 - 名字底, 像素
         public double Ratio;             // Up / D
+        public int NameDark, StatusDark; // 名字 / 交易成功 里深灰中性像素数(第 5 步)
+        public int GapOdd = -1;          // 名字和金额之间和底色差 > 40 的像素数(第 5 步; -1 = 没量)
+        public bool IsIPhoneSize;        // 图的尺寸正好是 iPhone 原生截图尺寸
+        public int ThresholdPercent;     // 这张图用的门槛(30 或 32)
         public string Reason = "";
     }
 
@@ -37,12 +41,25 @@ namespace Ssp
     /// 经理给的 3 张假图(1179x2556 苹果截图)把 金额 + 交易成功 整块贴低了:
     /// 名字底到金额顶 73~80 像素, 真图同一种手机(3 倍图)只有 56~61 像素; 交易成功 也跟着往下, 但没金额挪得多。
     ///
-    /// 比例 = (金额顶 - 名字底) / (交易成功底 - 名字底)。只看图, 不用 OCR, 不用知道是什么手机:
+    /// 比例 = (金额顶 - 名字底) / (交易成功底 - 名字底)。只看图, 不用 OCR, 不用传机型:
     ///   名字底、交易成功底是中文字的下沿(拼音字体的拼音在字上面, 不影响), 金额数字的上沿很稳(逗号、小数点只往下);
-    ///   手机大小、显示缩放都按比例变, 比例不变。
-    ///     真图: 苹果 0.254~0.259, 安卓 0.22~0.28, 拼音字体最高 0.291
-    ///     经理的 3 张假图 0.326 / 0.341 / 0.348; JPEG 95~40、缩 0.75 / 0.5、TG 1280、长边 2000 都还是 0.323~0.350
-    /// Up * 100 &gt;= RatioMaxPercent * D 判可疑(整数比较)。
+    ///   手机大小、显示缩放都按比例变, 比例不变。Up * 100 &gt;= 门槛 * D 判可疑(整数比较), 门槛分两种:
+    ///     图的尺寸正好是 iPhone 原生截图尺寸: RatioMaxPercentIPhone = 30。苹果不能换系统字体, 排版是死的,
+    ///       同一尺寸的真图位置差不过 2 像素; 服务器 11 月 1~4 日 iPhone 尺寸的 账单详情 真图最高约 0.28。
+    ///     别的尺寸: RatioMaxPercent = 32。安卓可以换手写体、拼音字体, 中文字下沿会往上抬, 真图最高到 0.307。
+    ///
+    /// 实测(2026-11-20):
+    ///     经理的 3 张假图(1179x2556) 0.326 / 0.341 / 0.348;
+    ///     JPEG 95~40、缩 0.75 / 0.5、TG 1280、长边 2000(变成别的尺寸就用 0.32) 0.323~0.350, 75 个变体全判可疑。
+    ///     服务器 11 月白图全部 195,078 张(11-01~11-04), 量到 164,647 张, p50 0.261, p99 0.276。
+    ///       苹果尺寸的真图一档一档很整齐: 例如 1170x2532 一万二千多张, 名字底到金额顶 56~58 像素、
+    ///       到交易成功底 214~218 像素, 金额数字高都是 71(带逗号 82)。
+    ///       第一版(没有第 5 步)按 0.31 判可疑 65 张, 看了小图:
+    ///         别的页面 41 张(银行 app 交易详情 -¥500.00 / 余额 / 交易卡号 14 张、支付成功 + 银行立减金 25 张、转钱包 2 张)
+    ///           和 账单详情 上盖了弹窗 1 张 —— 第 5 步挡掉;
+    ///         剩下 23 张都是 账单详情, 金额比同尺寸真图低 14~25 像素, 苹果尺寸的数字还都比真图小一号
+    ///           (1170 宽 62~69, 真图 71), 里面有以前 111 箭头检查抓到的假图 —— 都是改过的图。
+    ///     服务器 11 月蓝图随机 2 万张: 0 张量到(不是这种页面)。
     ///
     /// 做法(和 training/amount_y_check.py 一步一步对应, 改一边要同步改另一边):
     ///  1. 整屏竖截图才判: W &gt;= 300, H &gt;= 1.6W。
@@ -54,19 +71,39 @@ namespace Ssp
     ///     金额高 &gt;= 1.3 倍 交易成功 高; 名字高在 交易成功 高的 0.9~1.3 倍
     ///     (名字是标点、字母、~ 一类时下沿不是中文字的下沿, 不判)。第一个全对上的就是。
     ///  4. D = 交易成功底 - 名字底, 不到 60 像素不判; Up = 金额顶 - 名字底。
+    ///  5. 是不是 账单详情 那一摞(宁可不判):
+    ///     名字、交易成功 两行里深灰中性像素(min &lt; 110 且 max - min &lt; 40)都要 &gt;= 行高平方 / 16
+    ///       (银行页面的 余额 是浅灰字、支付成功页的 支付成功 是蓝字、划掉的原价是浅灰字, 都是 0);
+    ///     名字底和金额顶之间(上下各让 max(2, Up/8), 左右 0.12W~0.88W)和底色差 &gt; 40 的像素 &lt; 千分之五
+    ///       (底色 = 这块每个通道的下中位数; 弹窗、水印、阴影会超)。
+    ///  6. 比例 = Up / D, 和门槛比。
     ///
-    /// ★ 传上传的原图(不要先转灰度)。缩放过比例基本不变, 但太小(D &lt; 60)判不了。
+    /// ★ 传上传的原图(不要先缩放、不要先转灰度): 原图尺寸才认得出 iPhone(门槛 0.30), 缩放过就按 0.32 判;
+    ///   太小(D &lt; 60)判不了。
     /// 只读入参, 无静态可变状态, 可多线程调用。从文件读图请用 ImreadModes.Color。
     /// </summary>
     public static class AmountYCheck
     {
-        /// <summary>Up / D &gt;= 这个百分比判可疑。</summary>
-        public const int RatioMaxPercent = 31;
+        /// <summary>图的尺寸正好是 iPhone 原生截图尺寸时: Up / D &gt;= 这个百分比判可疑。</summary>
+        public const int RatioMaxPercentIPhone = 30;
+
+        /// <summary>别的尺寸: Up / D &gt;= 这个百分比判可疑(安卓能换字体, 真图最高 0.307)。</summary>
+        public const int RatioMaxPercent = 32;
 
         const int Ink = 200;       // min(B, G, R) < 200 算墨
         const int Dark = 160;      // 金额要深色: min < 160
         const int Neutral = 40;    // 中性(灰黑): max - min < 40
         const int MinD = 60;       // 名字底到交易成功底不到 60 像素: 图太小
+        const int TextDark = 110;  // 名字 / 交易成功 的深灰字(#333): min < 110 且中性
+        const int GapDist = 40;    // 名字和金额之间, 和底色差(三通道差的绝对值之和) > 40 的像素算"有东西"
+        const int GapMaxPermille = 5;  // 有东西的像素 >= 千分之五: 不判
+
+        /// <summary>iPhone 原生截图尺寸(竖屏), 和 YenCheck 的表一样。</summary>
+        static readonly HashSet<(int W, int H)> IPhoneSizes = new()
+        {
+            (640, 1136), (750, 1334), (1242, 2208), (828, 1792), (1125, 2436), (1242, 2688), (1170, 2532),
+            (1284, 2778), (1179, 2556), (1290, 2796), (1206, 2622), (1320, 2868), (1260, 2736),
+        };
 
         /// <param name="image">8 位图, 1 / 3 / 4 通道(灰度 / BGR / BGRA)。传进来的 Mat 不会被修改, 也不会被释放。</param>
         public static AmountYResult Check(Mat image)
@@ -199,19 +236,75 @@ namespace Ssp
             res.StatusTop = S.A; res.StatusBottom = S.B; res.StatusLeft = S.X0; res.StatusRight = S.X1;
             res.RowTop = R.A; res.RowBottom = R.B;
 
-            // 4. 比例
+            // 4. 间距
             int d = S.B - N.B;
             int up = A.A - N.B;
             res.D = d; res.Up = up;
             if (d < MinD) { res.Reason = "字太小"; return res; }
+
+            // 5. 是不是 账单详情 那一摞
+            int DarkText((int A, int B, int X0, int X1) t)
+            {
+                int c = 0;
+                for (int y = t.A; y < t.B; y++)
+                    for (int x = t.X0; x < t.X1; x++)
+                    {
+                        long k = (long)y * W + x;
+                        if (mn[k] < TextDark && mx[k] - mn[k] < Neutral) c++;
+                    }
+                return c;
+            }
+            int nameH = N.B - N.A, statusH = S.B - S.A;
+            res.NameDark = DarkText(N); res.StatusDark = DarkText(S);
+            if (res.NameDark * 16 < nameH * nameH || res.StatusDark * 16 < statusH * statusH)
+            {
+                res.Reason = "名字或交易成功不是深灰色的字(不像账单详情, 比如银行页面的余额、支付成功页), 不判"; return res;
+            }
+            int mg = Math.Max(2, up / 8);
+            int ga = N.B + mg, gb = A.A - mg;
+            int gx0 = W * 12 / 100, gx1 = W * 88 / 100;
+            if (gb > ga)
+            {
+                var bg = new int[3];
+                long area = (long)(gb - ga) * (gx1 - gx0);
+                for (int ch = 0; ch < 3; ch++)
+                {
+                    var hist = new long[256];
+                    for (int y = ga; y < gb; y++)
+                        for (int x = gx0; x < gx1; x++) hist[px[((long)y * W + x) * 3 + ch]]++;
+                    long need = (area + 1) / 2, acc = 0;
+                    int v = 0;
+                    for (; v < 256; v++) { acc += hist[v]; if (acc >= need) break; }
+                    bg[ch] = v;
+                }
+                int odd = 0;
+                for (int y = ga; y < gb; y++)
+                    for (int x = gx0; x < gx1; x++)
+                    {
+                        long o = ((long)y * W + x) * 3;
+                        int dd = Math.Abs(px[o] - bg[0]) + Math.Abs(px[o + 1] - bg[1]) + Math.Abs(px[o + 2] - bg[2]);
+                        if (dd > GapDist) odd++;
+                    }
+                res.GapOdd = odd;
+                if ((long)odd * 1000 >= GapMaxPermille * area)
+                {
+                    res.Reason = "名字和金额之间有别的东西(弹窗、水印、阴影一类), 量不准"; return res;
+                }
+            }
+
+            // 6. 比例
+            bool iphone = IPhoneSizes.Contains((W, H));
+            int thr = iphone ? RatioMaxPercentIPhone : RatioMaxPercent;
+            res.IsIPhoneSize = iphone; res.ThresholdPercent = thr;
             res.Measured = true;
             res.Ratio = (double)up / d;
-            res.Verdict = up * 100 >= RatioMaxPercent * d ? AmountYVerdict.Suspicious : AmountYVerdict.Ok;
+            res.Verdict = up * 100 >= thr * d ? AmountYVerdict.Suspicious : AmountYVerdict.Ok;
             int q = (up * 2000 + d) / (2 * d);      // 比例的千分位, 四舍五入用整数算(Python 一样), 理由里两边逐字相同
             string txt = $"{q / 1000}.{q % 1000:000}";
+            string kind = iphone ? "iPhone 原图尺寸, 真图最高约 0.28" : "真图最高约 0.31";
             res.Reason = res.Verdict == AmountYVerdict.Suspicious
-                ? $"可疑: 金额偏下, 名字底到金额顶 {up} 像素, 名字底到交易成功底 {d} 像素, 比例 {txt} >= 0.{RatioMaxPercent:00}(真图一般 0.22~0.29)"
-                : $"正常: 名字底到金额顶 {up} 像素, 名字底到交易成功底 {d} 像素, 比例 {txt}";
+                ? $"可疑: 金额偏下, 名字底到金额顶 {up} 像素, 名字底到交易成功底 {d} 像素, 比例 {txt} >= 0.{thr:00}({kind})"
+                : $"正常: 名字底到金额顶 {up} 像素, 名字底到交易成功底 {d} 像素, 比例 {txt}(门槛 0.{thr:00})";
             return res;
         }
     }

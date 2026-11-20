@@ -98,13 +98,17 @@ namespace Ssp.AmountYTest
             if (outCsv != null)
             {
                 using var o = new StreamWriter(outCsv, false, new UTF8Encoding(true));
-                o.WriteLine("path,W,H,v,nm_a,nm_b,am_a,am_b,st_a,st_b,row_a,row_b,up,d,reason");
+                o.WriteLine("path,W,H,v,nm_a,nm_b,am_a,am_b,st_a,st_b,row_a,row_b,up,d,n_dark,s_dark,gap_odd,thr,reason");
                 foreach (var (path, w, h, r) in all)
                 {
                     string F(int v) => r.Found ? v.ToString(ci) : "";
+                    bool g5 = r.Found && r.D >= 60;      // 第 5 步量过
                     o.WriteLine(string.Join(",", Csv(path), w, h, (int)r.Verdict,
                         F(r.NameTop), F(r.NameBottom), F(r.AmountTop), F(r.AmountBottom), F(r.StatusTop), F(r.StatusBottom),
-                        F(r.RowTop), F(r.RowBottom), F(r.Up), F(r.D), Csv(r.Reason)));
+                        F(r.RowTop), F(r.RowBottom), F(r.Up), F(r.D),
+                        g5 ? r.NameDark.ToString(ci) : "", g5 ? r.StatusDark.ToString(ci) : "",
+                        r.GapOdd >= 0 ? r.GapOdd.ToString(ci) : "", r.Measured ? r.ThresholdPercent.ToString(ci) : "",
+                        Csv(r.Reason)));
                 }
                 Console.WriteLine($"csv -> {outCsv}");
             }

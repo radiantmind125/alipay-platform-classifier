@@ -11,8 +11,23 @@ r"""金额上下位置检查 —— AmountYCheck.cs 的 Python 参考实现 + �
 比例 = (金额顶 - 名字底) / (交易成功底 - 名字底)
   名字底、交易成功底 都是系统字体中文字的下沿(拼音字体的拼音在字上面, 不影响下沿); 金额是支付宝自己的数字字体,
   数字的上沿很稳(逗号、小数点只往下)。三个都是页面排版的位置, 手机大小、显示缩放都按比例变, 比例不变。
-  真图: 苹果 0.254~0.259, 安卓 0.22~0.28, 拼音字体最高 0.291; 假图 0.326 / 0.341 / 0.348。
-  比例 * 100 >= RR_MAX_PCT 判可疑(整数比较)。
+  比例 * 100 >= 门槛 判可疑(整数比较)。门槛分两种:
+    图的尺寸正好是 iPhone 原生截图尺寸: 0.30。苹果不能换系统字体, 排版是死的: 同一尺寸的真图位置差不过 2 像素,
+      服务器 11 月 1~4 日 iPhone 尺寸的 账单详情 真图最高约 0.28(1284x2778 那一档 0.2785)。
+    别的尺寸: 0.32。安卓可以换手写体、拼音字体, 中文字的下沿会往上抬, 真图最高到 0.307。
+
+实测(2026-11-20)
+    经理的 3 张假图(1179x2556): 0.326 / 0.341 / 0.348; JPEG 95~40、缩 0.75 / 0.5、TG 1280、长边 2000: 0.323~0.350。
+    服务器 11 月白图全部 195,078 张(11-01 ~ 11-04), 量到 164,647 张, p50 0.261, p99 0.276:
+      苹果尺寸真图一档一档很整齐, 例如 1170x2532 一万二千多张 名字底到金额顶 56~58 像素、到交易成功底 214~218 像素,
+      金额数字高都是 71(带逗号 82)。
+      第一版(没有下面第 5 步)按 0.31 判可疑 65 张, 看了小图:
+        别的页面 41 张: 银行 app 的交易详情(-¥500.00 / 余额¥... / 交易卡号)14 张、支付成功 + 银行立减金 25 张、
+                        转钱包 2 张 —— 加第 5 步的 名字 / 交易成功 要是深灰字 挡掉;
+        账单详情 上面盖了弹窗 1 张 —— 第 5 步的 名字和金额之间要干净 挡掉;
+        剩下 23 张都是 账单详情, 金额都比同尺寸真图低 14~25 像素, 苹果尺寸的数字还都比真图小一号(1170 宽 62~69, 真图 71),
+        里面有以前 111 箭头检查抓到的假图 —— 都是改过的图。
+    服务器 11 月蓝图随机 2 万张: 0 张量到(不是这种页面)。
 
 做法(和 C# 一步一步对应)
 ------------------------
@@ -24,7 +39,13 @@ r"""金额上下位置检查 —— AmountYCheck.cs 的 Python 参考实现 + �
    上一条(名字)居中, 下一条(交易成功)居中、宽 <= 0.5W, 再下一条从 0.12W 以内起(第一行 创建时间 / 服务费 ...);
    金额高 >= 1.3 倍 交易成功 高; 名字高在 交易成功 高的 0.9~1.3 倍(名字是标点、字母、~ 一类时下沿不是中文字的下沿, 不判)。
    第一个全对上的就是。
-4. D = 交易成功底 - 名字底, 太小(< 60 像素)不判; 比例 = (金额顶 - 名字底) / D。
+4. D = 交易成功底 - 名字底, 太小(< 60 像素)不判。
+5. 是不是 账单详情 那一摞(宁可不判):
+   名字、交易成功 两行里 深灰中性像素(min < 110 且 max - min < 40)都要 >= 行高平方 / 16
+     (银行页面的 余额 是浅灰字、支付成功页的 支付成功 是蓝字、划掉的原价是浅灰字, 都是 0);
+   名字底和金额顶之间(上下各让 max(2, 间距/8), 左右 0.12W~0.88W)和底色差 > 40 的像素 < 千分之五
+     (底色 = 这块每个通道的下中位数; 弹窗、水印、阴影会超)。
+6. 比例 = (金额顶 - 名字底) / D, 和门槛比。
 
 返回: v 0 判不了 / 1 正常 / 2 可疑(和别的检查一样 Ok=1 Suspicious=2 CannotDetermine=0)。
 
@@ -50,11 +71,21 @@ import time  # noqa: E402
 
 import numpy as np  # noqa: E402
 
-RR_MAX_PCT = 31         # (金额顶 - 名字底) * 100 >= 31 * (交易成功底 - 名字底) 判可疑(暂定, 等服务器结果)
+RR_MAX_PCT_IPHONE = 30  # iPhone 原生截图尺寸: (金额顶 - 名字底) * 100 >= 30 * (交易成功底 - 名字底) 判可疑
+RR_MAX_PCT = 32         # 别的尺寸(安卓能换字体, 真图最高 0.307)
 INK = 200               # min(B, G, R) < 200 算墨
 DARK = 160              # 金额要深色: min < 160
 NEUTRAL = 40            # 中性(灰黑): max - min < 40
 MIN_D = 60              # 名字底到交易成功底不到 60 像素: 图太小, 不判
+TEXT_DARK = 110         # 名字 / 交易成功 的深灰字(#333): min < 110 且中性; 浅灰字(#999)、蓝字都不算
+GAP_DIST = 40           # 名字和金额之间, 和底色差(三通道差的绝对值之和) > 40 的像素算"有东西"
+GAP_MAX_PERMILLE = 5    # 有东西的像素 >= 千分之五: 不判(弹窗、水印)
+
+# iPhone 原生截图尺寸(竖屏), 和 YenCheck.cs 的表一样
+IPHONE_SIZES = {
+    (640, 1136), (750, 1334), (1242, 2208), (828, 1792), (1125, 2436), (1242, 2688), (1170, 2532),
+    (1284, 2778), (1179, 2556), (1290, 2796), (1206, 2622), (1320, 2868), (1260, 2736),
+}
 
 UPLOAD_DAY = re.compile(r"_([0-9]{8})[0-9]{6}\.")
 
@@ -137,23 +168,60 @@ def check_bgr(img):
     nm, am, st, row = B[amt - 1], B[amt], B[amt + 1], B[amt + 2]
     r.update(nm_a=nm[0], nm_b=nm[1], am_a=am[0], am_b=am[1], am_x0=am[2], am_x1=am[3],
              st_a=st[0], st_b=st[1], st_x0=st[2], st_x1=st[3], row_a=row[0], row_b=row[1])
-    # 4. 比例
+    # 4. 间距
     d = st[1] - nm[1]
     up = am[0] - nm[1]
     r["d"], r["up"] = d, up
     if d < MIN_D:
         r["reason"] = "字太小"
         return r
-    r["ratio"] = round(up / d, 4)
-    r["v"] = 2 if up * 100 >= RR_MAX_PCT * d else 1
+    r["ratio_raw"] = round(up / d, 4)         # 不管第 5 步过没过都记(服务器批量时看被挡掉的是什么)
+
+    # 5. 是不是 账单详情 那一摞
+    def dark_text(t):
+        a, b, x0, x1 = t
+        s_mn = mn[a:b, x0:x1]
+        return int(((s_mn < TEXT_DARK) & ((mx[a:b, x0:x1].astype(np.int16) - s_mn) < NEUTRAL)).sum())
+
+    nh, sh = nm[1] - nm[0], st[1] - st[0]
+    r["n_dark"], r["s_dark"] = dark_text(nm), dark_text(st)
+    if r["n_dark"] * 16 < nh * nh or r["s_dark"] * 16 < sh * sh:
+        r["reason"] = "名字或交易成功不是深灰色的字(不像账单详情, 比如银行页面的余额、支付成功页), 不判"
+        return r
+    mg = max(2, up // 8)
+    ga, gb = nm[1] + mg, am[0] - mg
+    gx0, gx1 = W * 12 // 100, W * 88 // 100
+    if gb > ga:
+        reg = sub[ga:gb, gx0:gx1]
+        bg = [_lowmed(reg[..., c]) for c in range(3)]
+        reg = reg.astype(np.int32)
+        dist = np.abs(reg[..., 0] - bg[0]) + np.abs(reg[..., 1] - bg[1]) + np.abs(reg[..., 2] - bg[2])
+        r["gap_odd"] = int((dist > GAP_DIST).sum())
+        if r["gap_odd"] * 1000 >= GAP_MAX_PERMILLE * dist.size:
+            r["reason"] = "名字和金额之间有别的东西(弹窗、水印、阴影一类), 量不准"
+            return r
+
+    # 6. 比例
+    iphone = (W, H) in IPHONE_SIZES
+    thr = RR_MAX_PCT_IPHONE if iphone else RR_MAX_PCT
+    r["iphone"], r["thr"] = int(iphone), thr
+    r["ratio"] = r["ratio_raw"]
+    r["v"] = 2 if up * 100 >= thr * d else 1
     q = (up * 2000 + d) // (2 * d)            # 比例的千分位, 四舍五入用整数算(C# 一样), 理由里两边逐字相同
     txt = f"{q // 1000}.{q % 1000:03d}"
+    kind = "iPhone 原图尺寸, 真图最高约 0.28" if iphone else "真图最高约 0.31"
     if r["v"] == 2:
         r["reason"] = (f"可疑: 金额偏下, 名字底到金额顶 {up} 像素, 名字底到交易成功底 {d} 像素, "
-                       f"比例 {txt} >= 0.{RR_MAX_PCT:02d}(真图一般 0.22~0.29)")
+                       f"比例 {txt} >= 0.{thr:02d}({kind})")
     else:
-        r["reason"] = f"正常: 名字底到金额顶 {up} 像素, 名字底到交易成功底 {d} 像素, 比例 {txt}"
+        r["reason"] = f"正常: 名字底到金额顶 {up} 像素, 名字底到交易成功底 {d} 像素, 比例 {txt}(门槛 0.{thr:02d})"
     return r
+
+
+def _lowmed(v):
+    """uint8 数组的下中位数(第 (n+1)//2 小的值), 用直方图算, C# 一样"""
+    c = np.cumsum(np.bincount(v.ravel(), minlength=256))
+    return int(np.searchsorted(c, (v.size + 1) // 2))
 
 
 def read_bgr(path):
@@ -164,7 +232,8 @@ def read_bgr(path):
 # ---------------------------------------------------------------- 批量
 
 COLS = ["path", "err", "W", "H", "v", "reason", "nm_a", "nm_b", "am_a", "am_b", "am_x0", "am_x1", "st_a", "st_b",
-        "st_x0", "st_x1", "row_a", "row_b", "d", "up", "ratio", "sec"]
+        "st_x0", "st_x1", "row_a", "row_b", "d", "up", "ratio_raw", "n_dark", "s_dark", "gap_odd", "iphone", "thr",
+        "ratio", "sec"]
 
 
 def _init_worker():
@@ -181,14 +250,18 @@ def _init_crops(crops):
     _CROPS = crops
 
 
-def _bin(ratio):
-    if ratio is None:
+def _bin(r):
+    """小图放哪一档: SUSP 可疑(原尺寸) / GUARD 第 5 步挡掉但比例 >= 0.30 / R028 / LOW / MID"""
+    if r["v"] == 2:
+        return "SUSP"
+    rr = r.get("ratio_raw")
+    if rr is None:
         return None
-    if ratio >= 0.30:
-        return "R030"
-    if ratio >= 0.28:
+    if r["v"] == 0:
+        return "GUARD" if rr >= 0.30 else "CANNOT"
+    if rr >= 0.28:
         return "R028"
-    if ratio < 0.21:
+    if rr < 0.21:
         return "LOW"
     return "MID"
 
@@ -204,22 +277,22 @@ def score_one(path):
         out.update({k: r.get(k, "") for k in COLS if k not in ("path", "err", "sec")})
         out["sec"] = round(time.time() - t0, 3)
         if _CROPS and "nm_a" in r:
-            # 名字上面一点 到 第一行下面一点 的小图(给人看), 缩到 360 宽; 0.28 以上和 0.21 以下全留, 中间的留 1/300
+            # 名字上面一点 到 第一行下面一点 的小图(给人看): 可疑的留原尺寸, 别的缩到 360 宽;
+            # 可疑 / 挡掉的高比例 / 0.28 以上 / 0.21 以下全留, 中间的和判不了的各留 1/300
             import cv2
             import zlib
             W = r["W"]
-            b = _bin(r.get("ratio"))
+            b = _bin(r)
             hsh = zlib.crc32(os.path.basename(path).encode("utf-8"))
-            if b == "MID" and hsh % 300:
+            if b in ("MID", "CANNOT") and hsh % 300:
                 b = None
-            if b is None and r["v"] == 0 and hsh % 300 == 0:
-                b = "CANNOT"
             if b:
                 c = img[max(0, r["nm_a"] - W * 3 // 100):min(img.shape[0], r["row_b"] + W // 100)]
-                c = cv2.resize(c, (360, max(1, c.shape[0] * 360 // W)), interpolation=cv2.INTER_AREA)
+                if b != "SUSP":
+                    c = cv2.resize(c, (360, max(1, c.shape[0] * 360 // W)), interpolation=cv2.INTER_AREA)
                 d = os.path.join(_CROPS, b)
                 os.makedirs(d, exist_ok=True)
-                cv2.imencode(".png", c)[1].tofile(os.path.join(d, f"{r.get('ratio', 0):.3f}_" +
+                cv2.imencode(".png", c)[1].tofile(os.path.join(d, f"{r.get('ratio_raw', 0):.3f}_" +
                                                               os.path.splitext(os.path.basename(path))[0] + ".png"))
         return out
     except Exception as e:  # noqa: BLE001
@@ -259,6 +332,8 @@ def scan(a):
     vs = {0: 0, 1: 0, 2: 0}
     reasons = {}
     ratios = []
+    by_kind = {"iphone": [], "other": []}
+    guard_hi = 0
     stopped = False
     block = max(256, a.workers * 64)
     with Pool(a.workers, initializer=_init_crops, initargs=(a.crops,)) as pool, \
@@ -280,6 +355,9 @@ def scan(a):
                 reasons[key] = reasons.get(key, 0) + 1
                 if r["ratio"] != "":
                     ratios.append(float(r["ratio"]))
+                    by_kind["iphone" if r["iphone"] == 1 else "other"].append(r["v"])
+                elif r["ratio_raw"] != "" and float(r["ratio_raw"]) >= 0.30:
+                    guard_hi += 1
             fo.flush()
             el = time.time() - t0
             print(f"{n} / {len(paths)}  {n / max(el, 1e-9):.2f} pages/s  measured {vs[1] + vs[2]}  suspicious {vs[2]}  err {err}",
@@ -298,6 +376,11 @@ def scan(a):
         for t in (0.15, 0.18, 0.20, 0.21):
             k = sum(x < t for x in ratios)
             print(f"  <  {t:.2f}: {k}  ({100.0 * k / len(ratios):.3f} % of measured)")
+        for kk, v in by_kind.items():
+            if v:
+                thr = RR_MAX_PCT_IPHONE if kk == "iphone" else RR_MAX_PCT
+                print(f"  {kk}: measured {len(v)}, suspicious (>= 0.{thr:02d}): {sum(x == 2 for x in v)}")
+    print(f"  stopped by step 5 with ratio >= 0.30: {guard_hi}")
     print(f"AMTY_SCAN_DONE pages={n} minutes={(time.time() - t0) / 60:.1f}")
 
 
