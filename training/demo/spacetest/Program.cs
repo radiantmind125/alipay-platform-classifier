@@ -19,7 +19,7 @@ namespace Ssp.SpaceTest
     ///   dotnet run -c Release -- 图或目录或@清单 [...] [--out 结果.csv]
     ///
     ///   给的是文件就逐张打印; 给的是目录(递归)或 @清单(一行一个路径)就只打印可疑的和汇总。
-    ///   csv 的列和 training/payee_space_check.py 的 y0 / y1 / h / prev_x1 / br_x0 / gap / v 一一对应, 可以逐张比。
+    ///   csv 的列和 training/payee_space_check.py 的 y0 / y1 / h / prev_x1 / br_x0 / gap / end / iphone / end_rule / v 一一对应, 可以逐张比。
     ///   退出码: 0 = 跑完; 2 = 参数不对。
     /// </summary>
     static class Program
@@ -98,13 +98,15 @@ namespace Ssp.SpaceTest
             if (outCsv != null)
             {
                 using var o = new StreamWriter(outCsv, false, new UTF8Encoding(true));
-                o.WriteLine("path,W,H,v,y0,y1,h,prev_x1,br_x0,gap,reason");
+                o.WriteLine("path,W,H,v,y0,y1,h,prev_x1,br_x0,gap,end,iphone,end_rule,reason");
                 foreach (var (path, w, h, r) in all)
                     o.WriteLine(string.Join(",", Csv(path), w, h, (int)r.Verdict,
                         r.LineHeight > 0 ? r.LineTop.ToString(ci) : "", r.LineHeight > 0 ? r.LineBottom.ToString(ci) : "",
                         r.LineHeight > 0 ? r.LineHeight.ToString(ci) : "",
                         r.BracketLeft > 0 ? r.NameRight.ToString(ci) : "", r.BracketLeft > 0 ? r.BracketLeft.ToString(ci) : "",
-                        r.Measured ? r.Gap.ToString(ci) : "", Csv(r.Reason)));
+                        r.Measured ? r.Gap.ToString(ci) : "",
+                        r.EndGap >= 0 ? r.EndGap.ToString(ci) : "", r.EndGap >= 0 ? (r.IsIPhoneSize ? "1" : "0") : "",
+                        r.EndGap >= 0 ? r.EndRule.ToString(ci) : "", Csv(r.Reason)));
                 Console.WriteLine($"csv -> {outCsv}");
             }
             return 0;

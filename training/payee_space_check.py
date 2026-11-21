@@ -1,4 +1,5 @@
-r"""收款方空白检查 —— PayeeSpaceCheck.cs 的 Python 参考实现 + 服务器批量量(2026-11-17, 经理: 针对这个写个算法 检测这个空白位置)。
+r"""收款方空白检查 —— PayeeSpaceCheck.cs 的 Python 参考实现 + 服务器批量量(2026-11-17, 经理: 针对这个写个算法 检测这个空白位置;
+2026-11-21 加第 8 步 行尾: 假图在名字后面加个点, 第 6 步判不了, 漏过去 2 张)。
 
 页面
 ----
@@ -23,6 +24,14 @@ r"""收款方空白检查 —— PayeeSpaceCheck.cs 的 Python 参考实现 + �
      名字和括号之间(两边各让 max(2, 行高/10) 像素)和底色差 > 40 的像素 >= 行高平方 / 40(蓝色、灰色表情 💤 👤),
      底色 = 标签和取值之间那一大段空白每个通道的下中位数。
 7. 空白 = 左括号最左的墨 - 名字最后一个字最右的墨(像素); 比例 = 空白 / 行高。空白 * 100 >= GAP_MIN_PCT * 行高 判可疑。
+8. 行尾(2026-11-21 加, 走到第 5 步就量, 第 6、7 步出结果以后再用):
+   只在苹果原图截图尺寸(IPHONE_SIZES)+ 常规字号(行高 / 倍数 12.5~17.5: 3 倍屏 38~52 像素, 2 倍屏 25~35)时用。
+   行尾 = 图宽 - 这一行最右的墨(右括号右沿)。行尾 * 100 >= END_MAX_PCT * 行高 判可疑(第 7 步已经可疑的不改)。
+   右括号右边到图右边(最右 2% 不看, 有的图带一两像素黑边)和底色差 > 40 的像素 >= 行高平方 / 40 的, 这条不用
+   (右边盖着浮窗、灰条)。底色和第 6 步一样。
+   为什么: 苹果原图的排版是死的, 真图页头收款方是半角括号 名字(**某), 右括号紧贴右边距;
+   假图模板用全角括号 名字（**某）, 全角右括号自己右边带一大块空, 模板右边距也宽一点, 所以整行离右边远一截。
+   这一条不管名字后面放什么(点、句号、一竖、空格)都一样。
 
 实测(2026-11-17)
     经理的 3 张假图 0.81~0.83; 经理截的图(780x1280 压过)0.82; JPEG 90~40、缩 0.75 / 0.5、TG 1280、BGRA 0.81~0.90
@@ -36,13 +45,29 @@ r"""收款方空白检查 —— PayeeSpaceCheck.cs 的 Python 参考实现 + �
     服务器 11 月白图随机 3 万张: 0 张量到(没有蓝色页头)。
     本机真图 3,302 张整页(7~11 月): 0 张可疑。
 
+实测第 8 步(2026-11-21)
+    漏过的 2 张(11-20, 1320x2868, 后台截图里 1/4 大小): 消失的.（**涛）、L.（*旺）。和 11-17 的 3 张是同一个假图模板
+    (收款方那一行在 y 653, 真图 571; 页头底 830; 全角括号; 字细)。名字后面加了个点, 点 -> 左括号 0.76 / 0.69 个字高,
+    第 6 步 "名字最后一个字太窄" 判不了 -> 0。
+    不能改成从点量起: 真图有人昵称就是一个句号, 。(**燕) 句号到半角左括号 0.80 个字高, 和假图一样。
+    行尾(个字高):
+        服务器 11 月蓝图小图(真图 11-01..04)苹果尺寸用上第 8 步的 9,676 张: 1.674~2.050, 中位 1.878, 99% 1.925, >= 2.1 的 0 张;
+        右边不干净不用的 28 张(浮窗、气泡)行尾也都 <= 1.925; 本机苹果真图(含 。 窄字 表情收尾判不了的)1.82~1.93;
+        11-17 的 3 张假图 2.71(114 像素), 11-21 两张约 2.6~2.7(在 1/4 截图上量, 真图同样缩过量出来和原尺寸一样)。
+    合成: 3 张假图名字后面加 点 / 句号 / 一竖(放在原来的空里或名字左移) 18 张: 旧版全是 0, 新版全判可疑, JPEG 95~40 也是;
+        缩 0.75 / 0.5 以后不是苹果原图尺寸, 第 8 步不用, 这 18 张又是 0(要传上传的原图)。
+        真图 307 张加同样的东西 1,540 张(每张再做 JPEG 95~40 四份、缩 0.75 / 0.5 两份): 0 张可疑。
+    边界样本: 行尾刚好 97 像素(2.31)判可疑、96(2.29)不判; 右边涂灰 6% 第 8 步不用; 最右 3 像素黑边照用。
+    旧版 11-17 对拍用的 108,074 张图: 新旧结果、理由逐字一样(第 8 步在真图上一张没改)。
+
 返回: v 0 判不了 / 1 正常 / 2 可疑(和别的检查一样 Ok=1 Suspicious=2 CannotDetermine=0)。
 
 用法
 ----
     python -I training/payee_space_check.py 图 [图 ...]
     python -u training/payee_space_check.py --scan E:/BlueImages --since 20261101 --workers 16 --max-minutes 60 ^
-        --out E:/_move_logs/space_1117/blue.csv --crops E:/_move_logs/space_1117/crops
+        --out E:/_move_logs/space_1121/blue.csv --crops E:/_move_logs/space_1121/crops
+    小图存哪些: 可疑全部 / 第 8 步右边不干净全部 / 行尾 >= 2.10 全部 / 苹果尺寸第 6 步判不了的全部 / 苹果尺寸其余抽 1/200。
 和 training/demo/PayeeSpaceCheck.cs 逐步对应, 改一边要同步改另一边。
 """
 from __future__ import annotations
@@ -66,6 +91,11 @@ INK_R = 150             # 页头白字: R >= 这个
 FOREIGN_B = 120         # 页头里 B < 这个的像素既不是白字也不是蓝底(深色表情、头像、浮窗);
 #                         JPEG 在白字边上把蓝底的 B 压到 140~160(色度抽样), 所以不能用 200
 NONBG_DIST = 40         # 空白里和底色差(三通道差的绝对值之和) > 40 的像素算"有东西"(蓝色 / 灰色表情 💤 👤 等)
+END_MAX_PCT = 230       # 第 8 步(苹果原图尺寸): 行最右的墨(右括号)离图右边 >= 2.30 个字高判可疑; 整数比较
+#                         真图是半角右括号, 离右边 1.8~2.05 个字高; 假图模板用全角右括号, 2.6~2.7
+# 苹果手机原图截图尺寸(和 YenCheck / AmountYCheck 一样): 这些尺寸的页面排版是死的, 收款方那一行的右端每张都在同一个位置
+IPHONE_SIZES = {(640, 1136), (750, 1334), (1242, 2208), (828, 1792), (1125, 2436), (1242, 2688), (1170, 2532),
+                (1284, 2778), (1179, 2556), (1290, 2796), (1206, 2622), (1320, 2868), (1260, 2736)}
 
 UPLOAD_DAY = re.compile(r"_([0-9]{8})[0-9]{6}\.")
 
@@ -198,13 +228,15 @@ def measure_line(img, y0, y1, r):
     ba, bb, bw, bt0, bt1 = feats[star - 1]
     pa, pb, pw, pt0, pt1 = feats[star - 2]
     r["br_x0"], r["prev_x1"] = ba, pb
+    # 8(先量, 第 6、7 步算完再用). 行尾: 苹果原图尺寸、常规字号时, 看右括号离图右边多远
+    _line_end(img, y0, y1, h, val[-1][1], seg[k][1], seg[k + 1][0], r)
     # 6. 名字最后一个字
     if pw * 10 < 3 * h:
         r["reason"] = "名字最后一个字太窄(1 l 川 或括号一类), 量不准"
-        return r
+        return _end_rule(r)
     if (pt1 - pt0) * 10 < 5 * h:
         r["reason"] = "名字最后一个是标点(。，、一类), 量不准"
-        return r
+        return _end_rule(r)
     # ？ ！ 收尾: 竖着分成两截以上, 最下面一截是个小点(高 <= 0.25 行高、宽 <= 0.4 行高); 全角的 ？ ！ 右边本来就空一大块
     rr = _runs(band[:, pa:pb].any(axis=1))
     if len(rr) >= 2:
@@ -212,10 +244,10 @@ def measure_line(img, y0, y1, r):
         lc = np.nonzero(band[la:lb, pa:pb].any(axis=0))[0]
         if (lb - la) * 4 <= h and (int(lc[-1]) - int(lc[0]) + 1) * 10 <= 4 * h:
             r["reason"] = "名字最后一个是 ？ ！ 一类(下面一个点), 量不准"
-            return r
+            return _end_rule(r)
     if int((B[:, pa:ba] < FOREIGN_B).sum()) * 40 >= h * h:
         r["reason"] = "名字后面有表情图标一类的彩色东西, 量不准"
-        return r
+        return _end_rule(r)
     # 空白里有没有别的东西(蓝色 / 灰色的表情, R 不够白字、B 又不低): 和底色比; 底色 = 标签和取值之间那一大段空白的下中位数
     m = max(2, h // 10)
     if ba - m > pb + m:
@@ -225,7 +257,7 @@ def measure_line(img, y0, y1, r):
         dist = np.abs(reg[..., 0] - bg[0]) + np.abs(reg[..., 1] - bg[1]) + np.abs(reg[..., 2] - bg[2])
         if int((dist > NONBG_DIST).sum()) * 40 >= h * h:
             r["reason"] = "名字和括号之间有表情一类的东西, 量不准"
-            return r
+            return _end_rule(r)
     # 7. 空白
     gap = ba - pb
     r["gap"] = gap
@@ -235,6 +267,50 @@ def measure_line(img, y0, y1, r):
     txt = f"{q // 100}.{q % 100:02d}"
     r["reason"] = (f"可疑: 名字和左括号之间空 {gap} 像素 = {txt} 个字高 >= 0.{GAP_MIN_PCT:02d}(真图一般 0.1~0.5)"
                    if r["v"] == 2 else f"正常: 名字和左括号之间空 {gap} 像素 = {txt} 个字高")
+    return _end_rule(r)
+
+
+def _line_end(img, y0, y1, h, xe, ga, gb, r):
+    """第 8 步的量法: 行最右的墨(右括号的右沿)xe 离图右边 end = W - xe 像素。
+    只在苹果原图截图尺寸 + 常规字号(行高 / 倍数 12.5~17.5: 3 倍屏 38~52 像素, 2 倍屏 25~35)时用;
+    右括号右边到图右边(最右 2% 不看, 有的图带一两像素的黑边)要是干净的底色, 不干净(右边盖着灰条、浮窗)不用这条。
+    底色 = 标签和取值之间那一大段空白每个通道的下中位数(和第 6 步一样)。
+    写进 r: end / end_h / iphone / end_rule(-1 不适用, 0 右边不干净不用, 1 用了) / end_hit(0/1)"""
+    W = img.shape[1]
+    H = r.get("H", img.shape[0])               # 服务器小图复核时整页高从 r 来; 正常调用 r["H"] 就是图高
+    end = W - xe
+    s = 2 if W < 1000 else 3                   # 2 倍屏: 640 / 750 / 828 宽; 别的都是 3 倍屏
+    r["end"] = end
+    r["end_h"] = round(end / h, 4)
+    r["iphone"] = int((W, H) in IPHONE_SIZES)
+    r["end_rule"] = -1
+    r["end_hit"] = 0
+    if not r["iphone"] or not (25 * s <= 2 * h <= 35 * s):
+        return
+    m = max(2, h // 10)
+    xa, xb = xe + m, W - W // 50
+    if xb > xa:
+        bg = [_lowmed(img[y0:y1, ga:gb, c]) for c in range(3)]
+        reg = img[y0:y1, xa:xb].astype(np.int32)
+        dist = np.abs(reg[..., 0] - bg[0]) + np.abs(reg[..., 1] - bg[1]) + np.abs(reg[..., 2] - bg[2])
+        if int((dist > NONBG_DIST).sum()) * 40 >= h * h:
+            r["end_rule"] = 0
+            return
+    r["end_rule"] = 1
+    r["end_hit"] = int(end * 100 >= END_MAX_PCT * h)
+
+
+def _end_rule(r):
+    """第 6、7 步出了结果(判不了 / 正常 / 可疑)以后: 第 8 步中了、而第 7 步还没判可疑 -> 改判可疑, 原来的理由接在后面。
+    gap_v 记第 6、7 步自己的结果(批量统计用)。"""
+    r["gap_v"] = r["v"]
+    if r["end_hit"] and r["v"] != 2:
+        e, h = r["end"], r["h"]
+        q = (e * 200 + h) // (2 * h)
+        txt = f"{q // 100}.{q % 100:02d}"
+        r["v"] = 2
+        r["reason"] = (f"可疑: 右括号离右边 {e} 像素 = {txt} 个字高 >= {END_MAX_PCT // 100}.{END_MAX_PCT % 100:02d}"
+                       f"(苹果原图尺寸真图 1.8~2.05, 假图全角括号 2.6 以上); 空白那条: {r['reason']}")
     return r
 
 
@@ -246,7 +322,7 @@ def read_bgr(path):
 # ---------------------------------------------------------------- 批量
 
 COLS = ["path", "err", "W", "H", "v", "reason", "yb", "y0", "y1", "h", "label_x0", "label_w", "prev_x1", "br_x0", "gap",
-        "ratio", "sec"]
+        "ratio", "iphone", "end", "end_h", "end_rule", "end_hit", "gap_v", "sec"]
 
 
 def _init_worker():
@@ -263,15 +339,6 @@ def _init_crops(crops):
     _CROPS = crops
 
 
-def _bin(ratio):
-    if ratio is None:
-        return None
-    for lo in (0.8, 0.7, 0.6, 0.5, 0.45, 0.4, 0.35, 0.3):
-        if ratio >= lo:
-            return f"R{int(round(lo * 100)):03d}"
-    return "R000"
-
-
 def score_one(path):
     t0 = time.time()
     try:
@@ -283,21 +350,29 @@ def score_one(path):
         out.update({k: r.get(k, "") for k in COLS if k not in ("path", "err", "sec")})
         out["sec"] = round(time.time() - t0, 3)
         if _CROPS and "y0" in r and "label_x0" in r:
-            # 收款方那一行的小图(给人看), 上下各多 1 个行高; 0.3 以下的只留 1/50, 判不了的留 1/100
+            # 收款方那一行的小图(给人看, 也能放回原 x 用 measure_line 复核), 上下各多 1 个行高, 右边到图边。
+            # 存哪些(第 8 步那一轮): 可疑的全存; 第 8 步右边不干净的全存; 行尾 >= 2.10 个字高的全存;
+            # 苹果尺寸里第 6 步判不了的(点、窄字、？！、表情收尾)全存; 苹果尺寸用了第 8 步的再抽 1/200
             import cv2
             import zlib
             h = r["h"]
             c = img[max(0, r["y0"] - h):min(img.shape[0], r["y1"] + h), max(0, r["label_x0"] - 10):]
-            b = _bin(r.get("ratio"))
             hsh = zlib.crc32(os.path.basename(path).encode("utf-8"))
-            if b == "R000" and hsh % 50:
-                b = None
-            if b is None and r["v"] == 0 and hsh % 100 == 0:
-                b = "CANNOT"
+            b = None
+            if r["v"] == 2:
+                b = "SUSP"
+            elif r.get("end_rule") == 0:
+                b = "ENDDIRTY"
+            elif r.get("end_rule") == 1 and r["end"] * 100 >= 210 * h:
+                b = "ENDHI"
+            elif r.get("iphone") and r.get("gap_v") == 0:
+                b = "IPCANNOT"
+            elif r.get("end_rule") == 1 and hsh % 200 == 0:
+                b = "IPSAMPLE"
             if b:
                 d = os.path.join(_CROPS, b)
                 os.makedirs(d, exist_ok=True)
-                cv2.imencode(".png", c)[1].tofile(os.path.join(d, f"{r.get('ratio', 0):.3f}_" +
+                cv2.imencode(".png", c)[1].tofile(os.path.join(d, f"{r.get('end_h', 0):.3f}_" +
                                                               os.path.splitext(os.path.basename(path))[0] + ".png"))
         return out
     except Exception as e:  # noqa: BLE001
@@ -337,6 +412,9 @@ def scan(a):
     vs = {0: 0, 1: 0, 2: 0}
     reasons = {}
     ratios = []
+    trans = {}              # 第 6、7 步的结果 -> 最后结果(第 8 步改了哪些)
+    endrule = {}            # 苹果尺寸、量到行尾的页: 第 8 步 -1 不适用 / 0 右边不干净 / 1 用了
+    ends = {}               # 用了第 8 步的: (W, H) -> [end_h ...]
     stopped = False
     block = max(256, a.workers * 64)
     with Pool(a.workers, initializer=_init_crops, initargs=(a.crops,)) as pool, \
@@ -358,6 +436,13 @@ def scan(a):
                 reasons[key] = reasons.get(key, 0) + 1
                 if r["ratio"] != "":
                     ratios.append(float(r["ratio"]))
+                if r["gap_v"] != "":
+                    t = (r["gap_v"], r["v"])
+                    trans[t] = trans.get(t, 0) + 1
+                if r["iphone"] == 1:
+                    endrule[r["end_rule"]] = endrule.get(r["end_rule"], 0) + 1
+                    if r["end_rule"] == 1:
+                        ends.setdefault((r["W"], r["H"]), []).append(float(r["end_h"]))
             fo.flush()
             el = time.time() - t0
             print(f"{n} / {len(paths)}  {n / max(el, 1e-9):.2f} pages/s  measured {vs[1] + vs[2]}  suspicious {vs[2]}  err {err}",
@@ -373,6 +458,18 @@ def scan(a):
         for t in (0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.70, 0.80):
             k = sum(x >= t for x in ratios)
             print(f"  >= {t:.2f}: {k}  ({100.0 * k / len(ratios):.3f} % of measured)")
+    print("step 6-7 verdict -> final verdict (pages that reached the bracket):",
+          "  ".join(f"{a}->{b}: {c}" for (a, b), c in sorted(trans.items())))
+    print("changed by step 8 (line end):", sum(c for (a, b), c in trans.items() if a != b))
+    print("iPhone-size pages that reached the bracket, step 8 -1 n/a / 0 right side not clean / 1 used:",
+          "  ".join(f"{k}: {c}" for k, c in sorted(endrule.items())))
+    alle = []
+    for wh, e in sorted(ends.items(), key=lambda t: -len(t[1])):
+        alle += e
+        q = np.percentile(np.array(e), [0, 1, 50, 99, 100])
+        print(f"  {wh[0]}x{wh[1]}: {len(e)}  end_h min/p1/p50/p99/max " + " ".join(f"{x:.3f}" for x in q))
+    for t in (2.0, 2.1, 2.2, 2.3, 2.4):
+        print(f"  end_h >= {t:.1f}: {sum(x >= t for x in alle)}")
     print(f"SPACE_SCAN_DONE pages={n} minutes={(time.time() - t0) / 60:.1f}")
 
 
@@ -400,7 +497,7 @@ def main():
             print("UNREADABLE", p)
             continue
         r = check_bgr(img)
-        print(r["W"], r["H"], r["v"], r.get("ratio", ""), r["reason"], p)
+        print(r["W"], r["H"], r["v"], r.get("ratio", ""), r.get("end_h", ""), r.get("end_rule", ""), r["reason"], p)
 
 
 if __name__ == "__main__":

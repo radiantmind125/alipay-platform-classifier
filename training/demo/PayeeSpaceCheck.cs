@@ -10,23 +10,29 @@ namespace Ssp
     {
         CannotDetermine = 0,   // 判不了(不是这个页面、名字是标点 / 表情 / 太窄的字、图太小), 走正常流程
         Ok = 1,                // 名字和左括号之间的空白正常
-        Suspicious = 2,        // 名字和左括号之间空一大块(假图)
+        Suspicious = 2,        // 名字和左括号之间空一大块, 或者(苹果原图尺寸)右括号离右边远一截(假图)
     }
 
     public sealed class PayeeSpaceResult
     {
         public PayeeSpaceVerdict Verdict;
-        public bool Measured;        // 量到了, 下面几项才有意义
+        public bool Measured;        // 第 7 步量到了名字和左括号之间的空白, Gap / Ratio 才有意义(第 8 步看 EndGap / EndRule)
         public int Gap;              // 名字最后一个字最右的墨 到 左括号最左的墨, 像素
         public int LineHeight;       // 收款方那一行的行高(有字的行), 像素
         public double Ratio;         // Gap / LineHeight
         public int LineTop, LineBottom;     // 收款方那一行(原图坐标)
         public int NameRight, BracketLeft;  // 量的两个位置(原图 x)
+        // 第 8 步(行尾, 2026-11-21 加): 只有走到第 5 步(找到 名字(**某) 的左右括号和星号)才量
+        public int EndGap = -1;      // 行最右的墨(右括号右沿)到图右边, 像素; -1 = 没走到第 5 步
+        public bool IsIPhoneSize;    // 苹果手机原图截图尺寸(第 8 步只在这些尺寸上用)
+        public int EndRule = -1;     // 第 8 步: -1 不适用(没走到第 5 步 / 不是苹果原图尺寸 / 字号不常规), 0 右括号右边不干净不用, 1 用了
+        public bool EndHit;          // 第 8 步判中: EndGap * 100 >= EndMaxPercent * 行高
         public string Reason = "";
     }
 
     /// <summary>
-    /// 收款方空白检查(2026-11-17, 经理: 针对这个写个算法 检测这个空白位置)。
+    /// 收款方空白检查(2026-11-17, 经理: 针对这个写个算法 检测这个空白位置;
+    /// 2026-11-21 加第 8 步 行尾: 假图在名字后面加个点, 第 6 步判不了, 漏过去 2 张)。
     ///
     /// 页面: 蓝色页头的 转账成功 页(转账成功 / ¥金额 / 收款方 ... 名字(**某) / 付款方式 ... / 白卡片 立即通知收款人)。
     /// 量页头 收款方 那一行: 名字最后一个字 和 左括号 之间空多少, 按这一行的行高算比例。
@@ -61,6 +67,21 @@ namespace Ssp
     ///       底色 = 标签和取值之间那一大段空白每个通道的下中位数
     ///       (服务器上这条挡掉 11 张; 没有它按 0.65 会误判 5 张, 1.37~1.70)。
     ///  7. Gap = 左括号左沿 - 名字右沿; Gap * 100 &gt;= GapMinPercent * 行高 判可疑(整数比较)。
+    ///  8. 行尾(2026-11-21 加; 走到第 5 步就量, 第 6、7 步出结果以后再用, 第 7 步已经可疑的不改):
+    ///     只在苹果原图截图尺寸 + 常规字号(行高 / 倍数 12.5~17.5: 3 倍屏 38~52 像素, 2 倍屏 25~35)时用。
+    ///     EndGap = 图宽 - 这一行最右的墨(右括号右沿); EndGap * 100 &gt;= EndMaxPercent * 行高 判可疑(第 6 步判不了的也一样)。
+    ///     右括号右边到图右边(最右 2% 不看)和底色差 &gt; 40 的像素 &gt;= 行高平方 / 40 的, 这条不用(右边盖着浮窗、灰条)。
+    ///     为什么: 苹果原图排版是死的, 真图页头是半角括号 名字(**某), 右括号紧贴右边距;
+    ///     假图模板用全角括号 名字（**某）, 全角右括号自己右边带一大块空, 整行离右边远一截。名字后面放什么(点、句号、一竖)都一样。
+    ///
+    /// 实测第 8 步(2026-11-21):
+    ///     漏过的 2 张(11-20, 1320x2868): 消失的.（**涛）、L.（*旺）, 和 11-17 的 3 张同一个假图模板; 名字后面加了个点,
+    ///       点 -&gt; 左括号 0.76 / 0.69 个字高, 第 6 步判不了 -&gt; 0。不能改成从点量起: 真图昵称是一个句号的 。(**燕) 也是 0.80。
+    ///     行尾(个字高): 服务器 11 月蓝图小图(真图 11-01..04)苹果尺寸 9,676 张 1.674~2.050(中位 1.878, 99% 1.925, &gt;= 2.1 的 0 张);
+    ///       本机苹果真图(含 。 窄字 表情收尾)1.82~1.93; 11-17 的 3 张假图 2.71(114 像素); 11-21 两张约 2.6~2.7。
+    ///     合成: 3 张假图名字后面加 点 / 句号 / 一竖 18 张: 旧版全是 0, 新版全判可疑(JPEG 95~40 也是);
+    ///       真图 307 张加同样的东西 1,540 张(含 JPEG / 缩放): 0 张可疑。11-17 对拍的 108,074 张图: 新旧结果和理由逐字一样。
+    ///     缩放过的图不是苹果原图尺寸, 第 8 步不用(加点的假图缩放后又是 0), 所以一定传上传的原图。
     ///
     /// ★ 传上传的原图(不要先缩放、不要先转灰度): 要靠颜色分蓝底和白字。缩放过比例基本不变, 但字太小(行高 &lt; 12)判不了。
     /// 只读入参, 无静态可变状态, 可多线程调用。从文件读图请用 ImreadModes.Color。
@@ -70,9 +91,19 @@ namespace Ssp
         /// <summary>Gap / 行高 &gt;= 这个百分比判可疑。</summary>
         public const int GapMinPercent = 65;
 
+        /// <summary>第 8 步(苹果原图尺寸): 右括号离图右边 / 行高 &gt;= 这个百分比判可疑。</summary>
+        public const int EndMaxPercent = 230;
+
         const int InkR = 150;          // 页头白字: R >= 150
         const int ForeignB = 120;      // 页头里 B < 120: 不是白字也不是蓝底(JPEG 在白字边上把蓝底的 B 压到 140~160)
         const int NonBgDist = 40;      // 空白里和底色差(三通道差的绝对值之和) > 40 的像素算"有东西"
+
+        // 苹果手机原图截图尺寸(和 YenCheck / AmountYCheck 一样): 这些尺寸的排版是死的, 收款方那一行的右端每张都在同一个位置
+        static readonly HashSet<(int W, int H)> IPhoneSizes = new HashSet<(int W, int H)>
+        {
+            (640, 1136), (750, 1334), (1242, 2208), (828, 1792), (1125, 2436), (1242, 2688), (1170, 2532),
+            (1284, 2778), (1179, 2556), (1290, 2796), (1206, 2622), (1320, 2868), (1260, 2736),
+        };
 
         /// <param name="image">8 位彩色图, 3 / 4 通道(BGR / BGRA)。传进来的 Mat 不会被修改, 也不会被释放。</param>
         public static PayeeSpaceResult Check(Mat image)
@@ -224,9 +255,55 @@ namespace Ssp
             var pv = feats[star - 2];
             res.BracketLeft = br.A; res.NameRight = pv.B;
 
+            // 底色 = 标签和取值之间那一大段空白每个通道的下中位数(第 8 步和第 6 步都用)
+            int[] LowMedBg()
+            {
+                int ga = seg[k].B, gb = seg[k + 1].A;
+                var bgc = new int[3];
+                for (int ch = 0; ch < 3; ch++)
+                {
+                    var hist = new int[256];
+                    for (int y = y0; y < y1; y++)
+                        for (int x = ga; x < gb; x++) hist[px[((long)y * W + x) * 3 + ch]]++;
+                    int need = ((y1 - y0) * (gb - ga) + 1) / 2, acc = 0, v = 0;
+                    for (; v < 256; v++) { acc += hist[v]; if (acc >= need) break; }
+                    bgc[ch] = v;
+                }
+                return bgc;
+            }
+            // 和底色差 > NonBgDist 的像素个数, 区域 行 [ra, rz) x 列 [ca, cz)
+            int CountNonBg(int[] bgc, int ra, int rz, int ca, int cz)
+            {
+                int c = 0;
+                for (int y = ra; y < rz; y++)
+                    for (int x = ca; x < cz; x++)
+                    {
+                        long o = ((long)y * W + x) * 3;
+                        int d = Math.Abs(px[o] - bgc[0]) + Math.Abs(px[o + 1] - bgc[1]) + Math.Abs(px[o + 2] - bgc[2]);
+                        if (d > NonBgDist) c++;
+                    }
+                return c;
+            }
+
+            // 8(先量, 第 6、7 步算完再用). 行尾: 苹果原图尺寸、常规字号(3 倍屏行高 38~52, 2 倍屏 25~35)时,
+            //    右括号右沿离图右边 >= 2.30 个行高判可疑。右括号右边到图右边(最右 2% 不看, 有的图带一两像素黑边)要是干净的底色,
+            //    不干净(右边盖着灰条、浮窗)这条不用。
+            res.EndGap = W - valEnd;
+            res.IsIPhoneSize = IPhoneSizes.Contains((W, H));
+            int sc = W < 1000 ? 2 : 3;                 // 2 倍屏: 640 / 750 / 828 宽; 别的都是 3 倍屏
+            if (res.IsIPhoneSize && 25 * sc <= 2 * h && 2 * h <= 35 * sc)
+            {
+                int me = Math.Max(2, h / 10);
+                int xa8 = valEnd + me, xb8 = W - W / 50;
+                bool clean = true;
+                if (xb8 > xa8) clean = CountNonBg(LowMedBg(), y0, y1, xa8, xb8) * 40 < h * h;
+                res.EndRule = clean ? 1 : 0;
+                res.EndHit = clean && res.EndGap * 100 >= EndMaxPercent * h;
+            }
+
             // 6. 名字最后一个字
-            if (pv.Wd * 10 < 3 * h) { res.Reason = "名字最后一个字太窄(1 l 川 或括号一类), 量不准"; return res; }
-            if ((pv.Bt - pv.T) * 10 < 5 * h) { res.Reason = "名字最后一个是标点(。，、一类), 量不准"; return res; }
+            if (pv.Wd * 10 < 3 * h) { res.Reason = "名字最后一个字太窄(1 l 川 或括号一类), 量不准"; return EndRule8(res, h); }
+            if ((pv.Bt - pv.T) * 10 < 5 * h) { res.Reason = "名字最后一个是标点(。，、一类), 量不准"; return EndRule8(res, h); }
             // ？ ！ 收尾: 竖着分成两截以上, 最下面一截是个小点(高 <= 0.25 行高、宽 <= 0.4 行高); 全角的 ？ ！ 右边本来就空一大块
             var pvRow = new bool[h];
             for (int y = y0; y < y1; y++)
@@ -245,38 +322,22 @@ namespace Ssp
                 }
                 if ((lb - la) * 4 <= h && (c1 - c0 + 1) * 10 <= 4 * h)
                 {
-                    res.Reason = "名字最后一个是 ？ ！ 一类(下面一个点), 量不准"; return res;
+                    res.Reason = "名字最后一个是 ？ ！ 一类(下面一个点), 量不准"; return EndRule8(res, h);
                 }
             }
             int foreign = 0;
             for (int y = y0; y < y1; y++)
                 for (int x = pv.A; x < br.A; x++)
                     if (Bv(y, x) < ForeignB) foreign++;
-            if (foreign * 40 >= h * h) { res.Reason = "名字后面有表情图标一类的彩色东西, 量不准"; return res; }
+            if (foreign * 40 >= h * h) { res.Reason = "名字后面有表情图标一类的彩色东西, 量不准"; return EndRule8(res, h); }
             // 空白里有没有别的东西(蓝色 / 灰色的表情, R 不够白字、B 又不低): 和底色比; 底色 = 标签和取值之间那一大段空白的下中位数
             int m = Math.Max(2, h / 10);
             if (br.A - m > pv.B + m)
             {
-                int ga = seg[k].B, gb = seg[k + 1].A;
-                var bg = new int[3];
-                for (int ch = 0; ch < 3; ch++)
+                if (CountNonBg(LowMedBg(), y0, y1, pv.B + m, br.A - m) * 40 >= h * h)
                 {
-                    var hist = new int[256];
-                    for (int y = y0; y < y1; y++)
-                        for (int x = ga; x < gb; x++) hist[px[((long)y * W + x) * 3 + ch]]++;
-                    int need = ((y1 - y0) * (gb - ga) + 1) / 2, acc = 0, v = 0;
-                    for (; v < 256; v++) { acc += hist[v]; if (acc >= need) break; }
-                    bg[ch] = v;
+                    res.Reason = "名字和括号之间有表情一类的东西, 量不准"; return EndRule8(res, h);
                 }
-                int nonBg = 0;
-                for (int y = y0; y < y1; y++)
-                    for (int x = pv.B + m; x < br.A - m; x++)
-                    {
-                        long o = ((long)y * W + x) * 3;
-                        int d = Math.Abs(px[o] - bg[0]) + Math.Abs(px[o + 1] - bg[1]) + Math.Abs(px[o + 2] - bg[2]);
-                        if (d > NonBgDist) nonBg++;
-                    }
-                if (nonBg * 40 >= h * h) { res.Reason = "名字和括号之间有表情一类的东西, 量不准"; return res; }
             }
 
             // 7. 空白
@@ -290,6 +351,20 @@ namespace Ssp
             res.Reason = res.Verdict == PayeeSpaceVerdict.Suspicious
                 ? $"可疑: 名字和左括号之间空 {gap} 像素 = {txt} 个字高 >= 0.{GapMinPercent:00}(真图一般 0.1~0.5)"
                 : $"正常: 名字和左括号之间空 {gap} 像素 = {txt} 个字高";
+            return EndRule8(res, h);
+        }
+
+        /// <summary>第 6、7 步出了结果(判不了 / 正常 / 可疑)以后: 第 8 步判中、而第 7 步还没判可疑 -> 改判可疑, 原来的理由接在后面。</summary>
+        static PayeeSpaceResult EndRule8(PayeeSpaceResult res, int h)
+        {
+            if (res.EndHit && res.Verdict != PayeeSpaceVerdict.Suspicious)
+            {
+                int e = res.EndGap;
+                int q = (e * 200 + h) / (2 * h);
+                res.Verdict = PayeeSpaceVerdict.Suspicious;
+                res.Reason = $"可疑: 右括号离右边 {e} 像素 = {q / 100}.{q % 100:00} 个字高 >= {EndMaxPercent / 100}.{EndMaxPercent % 100:00}"
+                    + $"(苹果原图尺寸真图 1.8~2.05, 假图全角括号 2.6 以上); 空白那条: {res.Reason}";
+            }
             return res;
         }
     }
